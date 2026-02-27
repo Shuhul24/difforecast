@@ -1,623 +1,362 @@
 """
-Range View Dataset for Epona
-This dataset uses range view image projections from point clouds instead of RGB images.
-Adapted from Epona's dataset.py and DiffLoc's oxford.py
+Range View Dataset for Epona (JSON-based, e.g. nuScenes / nuPlan).
+
+Expects a JSON file whose structure mirrors Epona's standard format:
+    {
+        "video_key": [
+            {"data_path": "rel/path/to/frame.jpg",
+             "ego_pose": {"rotation": [qw, qx, qy, qz],
+                          "translation": [x, y, z]}},
+            ...
+        ],
+        ...
+    }
+
+The ``data_path`` extension is swapped for ``pc_extension`` to locate the
+corresponding point-cloud file.
+
+Uses DiffLoc's RangeProjection and Augmentor utilities.
+
+Returns per sample:
+    range_views : FloatTensor [T, 6, H, W]   (condition_frames + 1 frames)
+    poses       : FloatTensor [T, 4, 4]       absolute 4×4 pose matrices
 """
 
 import json
 import os
+import sys
 import numpy as np
 import torch
 import random
-import sys
 from torch.utils.data import Dataset
-from scipy.spatial.transform import Rotation as R
 
-# Add DiffLoc to path to import range projection utilities
-diffloc_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../DiffLoc'))
-if diffloc_path not in sys.path:
-    sys.path.append(diffloc_path)
+# ── DiffLoc utilities ─────────────────────────────────────────────────────────
+_diffloc = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../DiffLoc'))
+if _diffloc not in sys.path:
+    sys.path.insert(0, _diffloc)
 
 from datasets.projection import RangeProjection
-from datasets.augmentor import Augmentor, AugmentParams
 
-# Add Epona utils to path
-root_path = os.path.abspath(__file__)
-root_path = '/'.join(root_path.split('/')[:-2])
-if root_path not in sys.path:
-    sys.path.append(root_path)
+try:
+    from datasets.augmentor import Augmentor, AugmentParams
+    _AUGMENTOR_OK = True
+except ImportError:
+    Augmentor = AugmentParams = None
+    _AUGMENTOR_OK = False
+    print("Warning: DiffLoc Augmentor unavailable (missing robotcar SDK). "
+          "Augmentation will be disabled.")
 
-from dataset.datasets_utils import reverse_seq_data, get_meta_data
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def quaternion_to_rotation_matrix(q):
-    """Convert quaternion to rotation matrix"""
-    q_w, q_x, q_y, q_z = q
-
-    R = np.array([
-        [1 - 2*(q_y**2 + q_z**2), 2*(q_x*q_y - q_w*q_z), 2*(q_x*q_z + q_w*q_y)],
-        [2*(q_x*q_y + q_w*q_z), 1 - 2*(q_x**2 + q_z**2), 2*(q_y*q_z - q_w*q_x)],
-        [2*(q_x*q_z - q_w*q_y), 2*(q_y*q_z + q_w*q_x), 1 - 2*(q_x**2 + q_y**2)]
+def _quat_to_rot(q):
+    """Convert [qw, qx, qy, qz] to a 3×3 rotation matrix."""
+    qw, qx, qy, qz = q
+    return np.array([
+        [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qw*qz),     2*(qx*qz + qw*qy)],
+        [2*(qx*qy + qw*qz),     1 - 2*(qx**2 + qz**2), 2*(qy*qz - qw*qx)],
+        [2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx),     1 - 2*(qx**2 + qy**2)],
     ])
-    return R
 
 
-def create_transformation_matrix(rotation, translation):
-    """Create 4x4 transformation matrix from rotation and translation"""
+def _make_pose(ego_pose):
+    """Build a 4×4 transformation matrix from an ego_pose dict."""
     T = np.eye(4)
-    T[:3, :3] = rotation
-    T[:3, 3] = translation
+    T[:3, :3] = _quat_to_rot(ego_pose['rotation'])
+    T[:3, 3]  = ego_pose['translation']
     return T
 
 
-def poses_foraugmentation(rotation, pose):
-    """Apply rotation augmentation to pose"""
-    # rotation: [3, 3] rotation matrix from augmentation
-    # pose: [6] pose vector (x, y, z, roll, pitch, yaw)
+def _make_augmentor(cfg):
+    """Build a DiffLoc Augmentor from an augmentation config dict."""
+    if not _AUGMENTOR_OK or cfg is None:
+        return None
+    p = AugmentParams()
+    p.setTranslationParams(
+        p_transx=cfg.get('p_transx', 0.), trans_xmin=cfg.get('trans_xmin', 0.), trans_xmax=cfg.get('trans_xmax', 0.),
+        p_transy=cfg.get('p_transy', 0.), trans_ymin=cfg.get('trans_ymin', 0.), trans_ymax=cfg.get('trans_ymax', 0.),
+        p_transz=cfg.get('p_transz', 0.), trans_zmin=cfg.get('trans_zmin', 0.), trans_zmax=cfg.get('trans_zmax', 0.),
+    )
+    p.setRotationParams(
+        p_rot_roll=cfg.get('p_rot_roll', 0.),  rot_rollmin=cfg.get('rot_rollmin', 0.),  rot_rollmax=cfg.get('rot_rollmax', 0.),
+        p_rot_pitch=cfg.get('p_rot_pitch', 0.), rot_pitchmin=cfg.get('rot_pitchmin', 0.), rot_pitchmax=cfg.get('rot_pitchmax', 0.),
+        p_rot_yaw=cfg.get('p_rot_yaw', 0.),   rot_yawmin=cfg.get('rot_yawmin', 0.),   rot_yawmax=cfg.get('rot_yawmax', 0.),
+    )
+    if 'p_scale' in cfg:
+        p.sefScaleParams(p_scale=cfg['p_scale'], scale_min=cfg['scale_min'], scale_max=cfg['scale_max'])
+    return Augmentor(p)
 
-    # Extract euler angles from augmentation rotation
-    r = R.from_matrix(rotation)
-    aug_euler = r.as_euler('xyz', degrees=False)
 
-    # Add augmentation to pose
-    pose_new = pose.copy()
-    pose_new[3:] += aug_euler
+# ── Base class ────────────────────────────────────────────────────────────────
 
-    return pose_new
+class _BaseRangeViewDataset(Dataset):
+    """Shared projection / normalisation / loading logic for JSON-based datasets."""
+
+    _DEFAULT_MEAN = [0., 0., 0., 0., 0., 0.]
+    _DEFAULT_STD  = [1., 1., 1., 1., 1., 1.]
+
+    def __init__(
+        self,
+        h, w,
+        fov_up, fov_down, fov_left, fov_right,
+        proj_img_mean, proj_img_stds,
+        pc_extension, pc_dtype, pc_reshape,
+    ):
+        self.h, self.w      = h, w
+        self.pc_extension   = pc_extension
+        self.pc_dtype       = pc_dtype
+        self.pc_reshape     = pc_reshape
+
+        self.projection = RangeProjection(
+            fov_up=fov_up, fov_down=fov_down,
+            fov_left=fov_left, fov_right=fov_right,
+            proj_h=h, proj_w=w,
+        )
+
+        mean = proj_img_mean or self._DEFAULT_MEAN
+        std  = proj_img_stds or self._DEFAULT_STD
+        self.mean = torch.tensor(mean, dtype=torch.float)
+        self.std  = torch.tensor(std,  dtype=torch.float)
+
+    # ── JSON parsing ──────────────────────────────────────────────────────────
+
+    def _parse_json(self, json_path, data_path):
+        """Return two parallel lists-of-lists: pc_paths and ego_poses."""
+        with open(json_path, encoding='utf-8') as f:
+            raw = json.load(f)
+        pc_paths_all, poses_all = [], []
+        for key in sorted(raw.keys()):
+            pc_paths, poses = [], []
+            for item in raw[key]:
+                stem = os.path.splitext(item['data_path'])[0]
+                pc_paths.append(os.path.join(data_path, stem + self.pc_extension))
+                poses.append(item['ego_pose'])
+            pc_paths_all.append(pc_paths)
+            poses_all.append(poses)
+        return pc_paths_all, poses_all
+
+    # ── Point-cloud I/O ───────────────────────────────────────────────────────
+
+    def _load_pc(self, path):
+        try:
+            return np.fromfile(path, dtype=self.pc_dtype).reshape(self.pc_reshape)
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            return None
+
+    # ── Projection ────────────────────────────────────────────────────────────
+
+    def _project(self, pc):
+        """Project a point cloud → normalised [6, H, W] feature tensor.
+
+        Channels: [range, x, y, z, intensity, label].
+        Unoccupied pixels are zeroed via the projection mask.
+        """
+        proj_pc, proj_range, _, proj_mask = self.projection.doProjection(pc)
+
+        depth  = torch.from_numpy(proj_range)                               # [H, W]
+        xyz    = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)        # [3, H, W]
+        intens = (torch.from_numpy(proj_pc[..., 3])
+                  if pc.shape[1] >= 4 else torch.zeros_like(depth))         # [H, W]
+        label  = (torch.from_numpy(proj_pc[..., 4])
+                  if pc.shape[1] >= 5 else torch.zeros_like(depth))         # [H, W]
+        mask   = torch.from_numpy(proj_mask.astype(np.float32))             # [H, W]
+
+        feat = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0), label.unsqueeze(0)], 0)
+        feat = (feat - self.mean[:, None, None]) / self.std[:, None, None]
+        return feat * mask.unsqueeze(0)
 
 
-class TrainRangeViewDataset(Dataset):
-    """Training dataset using range view projections"""
+# ── Training dataset ──────────────────────────────────────────────────────────
+
+class TrainRangeViewDataset(_BaseRangeViewDataset):
+    """Training dataset from JSON-annotated point-cloud sequences.
+
+    Each sequence maps to one sample per call to ``__getitem__``; the start
+    frame is drawn uniformly at random within the valid range so that
+    different parts of long sequences are seen across epochs.
+    """
 
     def __init__(
         self,
         data_path,
         json_path,
         condition_frames=9,
+        ori_fps=10,
         downsample_fps=3,
-        h=64,
-        w=512,
-        # Range projection parameters
-        fov_up=10.0,
-        fov_down=-30.0,
-        fov_left=-180.0,
-        fov_right=180.0,
-        # Feature normalization parameters
+        h=64, w=512,
+        fov_up=10., fov_down=-30., fov_left=-180., fov_right=180.,
         proj_img_mean=None,
         proj_img_stds=None,
-        # Augmentation parameters
         augmentation_config=None,
-        # Point cloud file extension
         pc_extension='.bin',
         pc_dtype=np.float32,
-        pc_reshape=(-1, 5),  # (x, y, z, intensity, label)
+        pc_reshape=(-1, 5),
     ):
-        self.pc_path_data = []
-        self.pose_data = []
-        self.data_path = data_path
+        super().__init__(h, w, fov_up, fov_down, fov_left, fov_right,
+                         proj_img_mean, proj_img_stds, pc_extension, pc_dtype, pc_reshape)
         self.condition_frames = condition_frames
-        self.h = h
-        self.w = w
-        self.pc_extension = pc_extension
-        self.pc_dtype = pc_dtype
-        self.pc_reshape = pc_reshape
+        self.downsample       = ori_fps // downsample_fps
+        self.augmentor        = _make_augmentor(augmentation_config)
 
-        # Load metadata from JSON
-        with open(json_path, 'r', encoding='utf-8') as file:
-            preprocess_data = json.load(file)
+        all_paths, all_poses = self._parse_json(json_path, data_path)
 
-        self.ori_fps = 10
-        self.downsample = self.ori_fps // downsample_fps
+        # Keep only sequences long enough to yield at least one window
+        min_len = condition_frames * self.downsample  # original Epona convention
+        self.pc_paths = [p for p, q in zip(all_paths, all_poses) if len(p) > min_len]
+        self.poses    = [q for p, q in zip(all_paths, all_poses) if len(p) > min_len]
 
-        # Build dataset
-        keys = sorted(list(preprocess_data.keys()))
-        for video_key in keys:
-            tmp_pc_path = []
-            tmp_pose = []
-            path_poses = preprocess_data[video_key]
-
-            if len(path_poses) <= self.condition_frames * self.downsample:
-                continue
-
-            for path_pose in path_poses:
-                # Convert image path to point cloud path
-                data_path_str = path_pose['data_path']
-                # Replace image extension with point cloud extension
-                pc_path = os.path.splitext(data_path_str)[0] + self.pc_extension
-                tmp_pc_path.append(os.path.join(data_path, pc_path))
-                tmp_pose.append(path_pose['ego_pose'])
-
-            self.pc_path_data.append(tmp_pc_path)
-            self.pose_data.append(tmp_pose)
-
-        print(f"Range View Dataset - Total sequences: {len(self.pc_path_data)}")
-
-        # Initialize range projection
-        self.projection = RangeProjection(
-            fov_up=fov_up,
-            fov_down=fov_down,
-            fov_left=fov_left,
-            fov_right=fov_right,
-            proj_h=h,
-            proj_w=w
-        )
-
-        # Feature normalization
-        if proj_img_mean is None:
-            # Default mean for [range, x, y, z, intensity, label]
-            proj_img_mean = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if proj_img_stds is None:
-            # Default std for [range, x, y, z, intensity, label]
-            proj_img_stds = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-
-        self.proj_img_mean = torch.tensor(proj_img_mean, dtype=torch.float)
-        self.proj_img_stds = torch.tensor(proj_img_stds, dtype=torch.float)
-
-        # Initialize augmentation
-        if augmentation_config is not None:
-            augment_params = AugmentParams()
-            augment_params.setTranslationParams(
-                p_transx=augmentation_config.get('p_transx', 0.0),
-                trans_xmin=augmentation_config.get('trans_xmin', 0.0),
-                trans_xmax=augmentation_config.get('trans_xmax', 0.0),
-                p_transy=augmentation_config.get('p_transy', 0.0),
-                trans_ymin=augmentation_config.get('trans_ymin', 0.0),
-                trans_ymax=augmentation_config.get('trans_ymax', 0.0),
-                p_transz=augmentation_config.get('p_transz', 0.0),
-                trans_zmin=augmentation_config.get('trans_zmin', 0.0),
-                trans_zmax=augmentation_config.get('trans_zmax', 0.0)
-            )
-            augment_params.setRotationParams(
-                p_rot_roll=augmentation_config.get('p_rot_roll', 0.0),
-                rot_rollmin=augmentation_config.get('rot_rollmin', 0.0),
-                rot_rollmax=augmentation_config.get('rot_rollmax', 0.0),
-                p_rot_pitch=augmentation_config.get('p_rot_pitch', 0.0),
-                rot_pitchmin=augmentation_config.get('rot_pitchmin', 0.0),
-                rot_pitchmax=augmentation_config.get('rot_pitchmax', 0.0),
-                p_rot_yaw=augmentation_config.get('p_rot_yaw', 0.0),
-                rot_yawmin=augmentation_config.get('rot_yawmin', 0.0),
-                rot_yawmax=augmentation_config.get('rot_yawmax', 0.0)
-            )
-            if 'p_scale' in augmentation_config:
-                augment_params.sefScaleParams(
-                    p_scale=augmentation_config['p_scale'],
-                    scale_min=augmentation_config['scale_min'],
-                    scale_max=augmentation_config['scale_max']
-                )
-            self.augmentor = Augmentor(augment_params)
-        else:
-            self.augmentor = None
+        print(f"TrainRangeViewDataset: {len(self.pc_paths)} sequences loaded.")
 
     def __len__(self):
-        return len(self.pc_path_data)
+        return len(self.pc_paths)
 
-    def load_pointcloud(self, path):
-        """Load point cloud from file"""
-        try:
-            pc = np.fromfile(path, dtype=self.pc_dtype).reshape(self.pc_reshape)
-            return pc
-        except Exception as e:
-            print(f"Error loading point cloud from {path}: {e}")
-            return None
+    def __getitem__(self, idx):
+        pc_paths = self.pc_paths[idx]
+        poses    = self.poses[idx]
 
-    def project_pointcloud(self, pointcloud):
-        """Project point cloud to range view image"""
-        # Apply range projection
-        proj_pointcloud, proj_range, proj_idx, proj_mask = self.projection.doProjection(pointcloud)
+        # Random start so all parts of the sequence are visited
+        max_start = len(pc_paths) - (self.condition_frames + 1) * self.downsample
+        start = random.randint(0, max(0, max_start))
 
-        # Create feature tensor: [range, x, y, z, intensity, label]
-        proj_range_tensor = torch.from_numpy(proj_range)  # [H, W]
-        proj_xyz_tensor = torch.from_numpy(proj_pointcloud[..., :3])  # [H, W, 3]
-
-        # Handle intensity and label based on pointcloud shape
-        if pointcloud.shape[1] >= 4:
-            proj_intensity_tensor = torch.from_numpy(proj_pointcloud[..., 3])  # [H, W]
-        else:
-            proj_intensity_tensor = torch.zeros_like(proj_range_tensor)
-
-        if pointcloud.shape[1] >= 5:
-            proj_label_tensor = torch.from_numpy(proj_pointcloud[..., 4])  # [H, W]
-        else:
-            proj_label_tensor = torch.zeros_like(proj_range_tensor)
-
-        proj_mask_tensor = torch.from_numpy(proj_mask)  # [H, W]
-
-        # Stack features: [6, H, W]
-        proj_feature_tensor = torch.cat([
-            proj_range_tensor.unsqueeze(0),  # [1, H, W]
-            proj_xyz_tensor.permute(2, 0, 1),  # [3, H, W]
-            proj_intensity_tensor.unsqueeze(0),  # [1, H, W]
-            proj_label_tensor.unsqueeze(0)  # [1, H, W]
-        ], dim=0)
-
-        # Normalize
-        proj_feature_tensor = (proj_feature_tensor - self.proj_img_mean[:, None, None]) / self.proj_img_stds[:, None, None]
-        proj_feature_tensor = proj_feature_tensor * proj_mask_tensor.unsqueeze(0).float()
-
-        return proj_feature_tensor
-
-    def get_pc_feature(self, index):
-        """Load point clouds and poses for a sequence"""
-        pc_paths = self.pc_path_data[index]
-        poses = self.pose_data[index]
-        clip_length = len(pc_paths)
-
-        start = 0  # random.randint(0, clip_length-(self.condition_frames+1)*self.downsample)
-
-        range_views = []
-        poses_new = []
-
+        views, pose_list = [], []
         for i in range(self.condition_frames + 1):
-            # Load point cloud
-            pc = self.load_pointcloud(pc_paths[start + i * self.downsample])
-
+            pc = self._load_pc(pc_paths[start + i * self.downsample])
             if pc is None:
-                print(f'Warning: Point cloud does not exist at {pc_paths[start + i * self.downsample]}')
-                return None, None
-
-            # Apply augmentation during training
+                return self.__getitem__(random.randint(0, len(self) - 1))
             if self.augmentor is not None:
-                pc, rotation = self.augmentor.doAugmentation(pc)
-            else:
-                rotation = np.eye(3)
+                pc, _ = self.augmentor.doAugmentation(pc)
+            views.append(self._project(pc))
+            pose_list.append(_make_pose(poses[start + i * self.downsample]))
 
-            # Project to range view
-            range_view = self.project_pointcloud(pc)
-            range_views.append(range_view)
-
-            # Get pose
-            rotation_mat = quaternion_to_rotation_matrix(poses[start + i * self.downsample]["rotation"])
-            pose = create_transformation_matrix(rotation_mat, poses[start + i * self.downsample]["translation"])
-            poses_new.append(pose)
-
-        poses_array = np.array(poses_new)
-        return range_views, poses_array
-
-    def __getitem__(self, index):
-        """Get a sample from the dataset"""
-        while True:
-            range_views, poses = self.get_pc_feature(index)
-
-            if (range_views is not None) and (poses is not None):
-                break
-            else:
-                index = random.randint(0, self.__len__() - 1)
-
-        # Stack range views: [T, C, H, W]
-        range_views_tensor = torch.stack(range_views, dim=0)
-        poses_tensor = torch.from_numpy(poses).float()
-
-        return range_views_tensor, poses_tensor
+        return (
+            torch.stack(views),                                 # [T, 6, H, W]
+            torch.from_numpy(np.array(pose_list)).float(),      # [T, 4, 4]
+        )
 
 
-class ValRangeViewDataset(Dataset):
-    """Validation dataset using range view projections"""
+# ── Validation dataset ────────────────────────────────────────────────────────
+
+class ValRangeViewDataset(_BaseRangeViewDataset):
+    """Validation dataset — fixed window anchored near the end of each sequence.
+
+    ``target_frame`` (negative) picks the target frame index from the end of the
+    sequence, and the conditioning window is placed immediately before it.
+    No augmentation is applied.
+    """
 
     def __init__(
         self,
         data_path,
         json_path,
         condition_frames=3,
+        ori_fps=12,
         downsample_fps=3,
-        h=64,
-        w=512,
+        h=64, w=512,
         target_frame=-5,
-        # Range projection parameters
-        fov_up=10.0,
-        fov_down=-30.0,
-        fov_left=-180.0,
-        fov_right=180.0,
-        # Feature normalization parameters
+        fov_up=10., fov_down=-30., fov_left=-180., fov_right=180.,
         proj_img_mean=None,
         proj_img_stds=None,
-        # Point cloud file extension
         pc_extension='.bin',
         pc_dtype=np.float32,
         pc_reshape=(-1, 5),
     ):
-        self.pc_path_data = []
-        self.pose_data = []
-        self.target_frame = target_frame
-        assert self.target_frame < 0
-
-        self.data_path = data_path
+        super().__init__(h, w, fov_up, fov_down, fov_left, fov_right,
+                         proj_img_mean, proj_img_stds, pc_extension, pc_dtype, pc_reshape)
+        assert target_frame < 0, "target_frame must be negative (offset from end)"
         self.condition_frames = condition_frames
-        self.h = h
-        self.w = w
-        self.pc_extension = pc_extension
-        self.pc_dtype = pc_dtype
-        self.pc_reshape = pc_reshape
+        self.downsample       = ori_fps // downsample_fps
+        self.target_frame     = target_frame
 
-        # Load metadata from JSON
-        with open(json_path, 'r', encoding='utf-8') as file:
-            preprocess_data = json.load(file)
-
-        self.ori_fps = 12
-        self.downsample = self.ori_fps // downsample_fps
-
-        # Build dataset
-        keys = sorted(list(preprocess_data.keys()))
-        for video_key in keys:
-            tmp_pc_path = []
-            tmp_pose = []
-            path_poses = preprocess_data[video_key]
-
-            for path_pose in path_poses:
-                # Convert image path to point cloud path
-                data_path_str = path_pose['data_path']
-                pc_path = os.path.splitext(data_path_str)[0] + self.pc_extension
-                tmp_pc_path.append(os.path.join(data_path, pc_path))
-                tmp_pose.append(path_pose['ego_pose'])
-
-            self.pc_path_data.append(tmp_pc_path)
-            self.pose_data.append(tmp_pose)
-
-        print(f"Range View Val Dataset - Total sequences: {len(self.pc_path_data)}")
-
-        # Initialize range projection
-        self.projection = RangeProjection(
-            fov_up=fov_up,
-            fov_down=fov_down,
-            fov_left=fov_left,
-            fov_right=fov_right,
-            proj_h=h,
-            proj_w=w
-        )
-
-        # Feature normalization
-        if proj_img_mean is None:
-            proj_img_mean = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if proj_img_stds is None:
-            proj_img_stds = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-
-        self.proj_img_mean = torch.tensor(proj_img_mean, dtype=torch.float)
-        self.proj_img_stds = torch.tensor(proj_img_stds, dtype=torch.float)
+        self.pc_paths, self.poses = self._parse_json(json_path, data_path)
+        print(f"ValRangeViewDataset: {len(self.pc_paths)} sequences loaded.")
 
     def __len__(self):
-        return len(self.pc_path_data)
+        return len(self.pc_paths)
 
-    def load_pointcloud(self, path):
-        """Load point cloud from file"""
-        try:
-            pc = np.fromfile(path, dtype=self.pc_dtype).reshape(self.pc_reshape)
-            return pc
-        except Exception as e:
-            print(f"Error loading point cloud from {path}: {e}")
-            return None
+    def __getitem__(self, idx):
+        pc_paths = self.pc_paths[idx]
+        poses    = self.poses[idx]
+        clip_len = len(pc_paths)
 
-    def project_pointcloud(self, pointcloud):
-        """Project point cloud to range view image"""
-        proj_pointcloud, proj_range, proj_idx, proj_mask = self.projection.doProjection(pointcloud)
+        target_idx = clip_len + self.target_frame
+        start_idx  = target_idx - self.downsample * (self.condition_frames + 1)
 
-        proj_range_tensor = torch.from_numpy(proj_range)
-        proj_xyz_tensor = torch.from_numpy(proj_pointcloud[..., :3])
+        if start_idx < 0:
+            # Sequence too short — return zeros
+            views    = [torch.zeros(6, self.h, self.w) for _ in range(self.condition_frames + 1)]
+            pose_arr = np.zeros((self.condition_frames + 1, 4, 4))
+            return torch.stack(views), torch.from_numpy(pose_arr).float()
 
-        if pointcloud.shape[1] >= 4:
-            proj_intensity_tensor = torch.from_numpy(proj_pointcloud[..., 3])
-        else:
-            proj_intensity_tensor = torch.zeros_like(proj_range_tensor)
-
-        if pointcloud.shape[1] >= 5:
-            proj_label_tensor = torch.from_numpy(proj_pointcloud[..., 4])
-        else:
-            proj_label_tensor = torch.zeros_like(proj_range_tensor)
-
-        proj_mask_tensor = torch.from_numpy(proj_mask)
-
-        proj_feature_tensor = torch.cat([
-            proj_range_tensor.unsqueeze(0),
-            proj_xyz_tensor.permute(2, 0, 1),
-            proj_intensity_tensor.unsqueeze(0),
-            proj_label_tensor.unsqueeze(0)
-        ], dim=0)
-
-        proj_feature_tensor = (proj_feature_tensor - self.proj_img_mean[:, None, None]) / self.proj_img_stds[:, None, None]
-        proj_feature_tensor = proj_feature_tensor * proj_mask_tensor.unsqueeze(0).float()
-
-        return proj_feature_tensor
-
-    def get_pc_feature(self, index):
-        """Load point clouds and poses for a sequence"""
-        pc_paths = self.pc_path_data[index]
-        poses = self.pose_data[index]
-        clip_length = len(pc_paths)
-
-        target_index = clip_length + self.target_frame
-        start_index = target_index - self.downsample * (self.condition_frames + 1)
-
-        range_views = []
-        poses_new = []
-
+        views, pose_list = [], []
         for i in range(self.condition_frames + 1):
-            pc = self.load_pointcloud(pc_paths[start_index + i * self.downsample])
-
+            pc = self._load_pc(pc_paths[start_idx + i * self.downsample])
             if pc is None:
-                print(f'Warning: Point cloud does not exist')
-                return None, None
+                views    = [torch.zeros(6, self.h, self.w) for _ in range(self.condition_frames + 1)]
+                pose_arr = np.zeros((self.condition_frames + 1, 4, 4))
+                return torch.stack(views), torch.from_numpy(pose_arr).float()
+            views.append(self._project(pc))
+            pose_list.append(_make_pose(poses[start_idx + i * self.downsample]))
 
-            range_view = self.project_pointcloud(pc)
-            range_views.append(range_view)
-
-            rotation_mat = quaternion_to_rotation_matrix(poses[start_index + i * self.downsample]["rotation"])
-            pose = create_transformation_matrix(rotation_mat, poses[start_index + i * self.downsample]["translation"])
-            poses_new.append(pose)
-
-        poses_array = np.array(poses_new)
-        return range_views, poses_array
-
-    def __getitem__(self, index):
-        """Get a sample from the dataset"""
-        range_views, poses = self.get_pc_feature(index)
-
-        if range_views is None or poses is None:
-            # Return dummy data if loading fails
-            range_views = [torch.zeros(6, self.h, self.w) for _ in range(self.condition_frames + 1)]
-            poses = np.zeros((self.condition_frames + 1, 4, 4))
-
-        range_views_tensor = torch.stack(range_views, dim=0)
-        poses_tensor = torch.from_numpy(poses).float()
-
-        return range_views_tensor, poses_tensor
+        return (
+            torch.stack(views),                                 # [T, 6, H, W]
+            torch.from_numpy(np.array(pose_list)).float(),      # [T, 4, 4]
+        )
 
 
-class TestRangeViewDataset(Dataset):
-    """Test dataset using range view projections"""
+# ── Test dataset ──────────────────────────────────────────────────────────────
+
+class TestRangeViewDataset(_BaseRangeViewDataset):
+    """Test dataset — loads all downsampled frames from each sequence.
+
+    Each call to ``__getitem__`` returns the full (variable-length) sequence,
+    so a batch size of 1 is expected.
+    """
 
     def __init__(
         self,
         data_path,
         json_path,
         condition_frames=3,
+        ori_fps=12,
         downsample_fps=3,
-        h=64,
-        w=512,
-        # Range projection parameters
-        fov_up=10.0,
-        fov_down=-30.0,
-        fov_left=-180.0,
-        fov_right=180.0,
-        # Feature normalization parameters
+        h=64, w=512,
+        fov_up=10., fov_down=-30., fov_left=-180., fov_right=180.,
         proj_img_mean=None,
         proj_img_stds=None,
-        # Point cloud file extension
         pc_extension='.bin',
         pc_dtype=np.float32,
         pc_reshape=(-1, 5),
     ):
-        self.pc_path_data = []
-        self.pose_data = []
-        self.data_path = data_path
+        super().__init__(h, w, fov_up, fov_down, fov_left, fov_right,
+                         proj_img_mean, proj_img_stds, pc_extension, pc_dtype, pc_reshape)
         self.condition_frames = condition_frames
-        self.h = h
-        self.w = w
-        self.pc_extension = pc_extension
-        self.pc_dtype = pc_dtype
-        self.pc_reshape = pc_reshape
+        self.downsample       = ori_fps // downsample_fps
 
-        # Load metadata from JSON
-        with open(json_path, 'r', encoding='utf-8') as file:
-            preprocess_data = json.load(file)
-
-        self.ori_fps = 12
-        self.downsample = self.ori_fps // downsample_fps
-
-        # Build dataset
-        keys = sorted(list(preprocess_data.keys()))
-        for video_key in keys:
-            tmp_pc_path = []
-            tmp_pose = []
-            path_poses = preprocess_data[video_key]
-
-            for path_pose in path_poses:
-                # Convert image path to point cloud path
-                data_path_str = path_pose['data_path']
-                pc_path = os.path.splitext(data_path_str)[0] + self.pc_extension
-                tmp_pc_path.append(os.path.join(data_path, pc_path))
-                tmp_pose.append(path_pose['ego_pose'])
-
-            self.pc_path_data.append(tmp_pc_path)
-            self.pose_data.append(tmp_pose)
-
-        print(f"Range View Test Dataset - Total sequences: {len(self.pc_path_data)}")
-
-        # Initialize range projection
-        self.projection = RangeProjection(
-            fov_up=fov_up,
-            fov_down=fov_down,
-            fov_left=fov_left,
-            fov_right=fov_right,
-            proj_h=h,
-            proj_w=w
-        )
-
-        # Feature normalization
-        if proj_img_mean is None:
-            proj_img_mean = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if proj_img_stds is None:
-            proj_img_stds = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-
-        self.proj_img_mean = torch.tensor(proj_img_mean, dtype=torch.float)
-        self.proj_img_stds = torch.tensor(proj_img_stds, dtype=torch.float)
+        self.pc_paths, self.poses = self._parse_json(json_path, data_path)
+        print(f"TestRangeViewDataset: {len(self.pc_paths)} sequences loaded.")
 
     def __len__(self):
-        return len(self.pc_path_data)
+        return len(self.pc_paths)
 
-    def load_pointcloud(self, path):
-        """Load point cloud from file"""
-        try:
-            pc = np.fromfile(path, dtype=self.pc_dtype).reshape(self.pc_reshape)
-            return pc
-        except Exception as e:
-            print(f"Error loading point cloud from {path}: {e}")
-            return None
+    def __getitem__(self, idx):
+        pc_paths  = self.pc_paths[idx]
+        poses     = self.poses[idx]
+        clip_len  = len(pc_paths) // self.downsample
 
-    def project_pointcloud(self, pointcloud):
-        """Project point cloud to range view image"""
-        proj_pointcloud, proj_range, proj_idx, proj_mask = self.projection.doProjection(pointcloud)
-
-        proj_range_tensor = torch.from_numpy(proj_range)
-        proj_xyz_tensor = torch.from_numpy(proj_pointcloud[..., :3])
-
-        if pointcloud.shape[1] >= 4:
-            proj_intensity_tensor = torch.from_numpy(proj_pointcloud[..., 3])
-        else:
-            proj_intensity_tensor = torch.zeros_like(proj_range_tensor)
-
-        if pointcloud.shape[1] >= 5:
-            proj_label_tensor = torch.from_numpy(proj_pointcloud[..., 4])
-        else:
-            proj_label_tensor = torch.zeros_like(proj_range_tensor)
-
-        proj_mask_tensor = torch.from_numpy(proj_mask)
-
-        proj_feature_tensor = torch.cat([
-            proj_range_tensor.unsqueeze(0),
-            proj_xyz_tensor.permute(2, 0, 1),
-            proj_intensity_tensor.unsqueeze(0),
-            proj_label_tensor.unsqueeze(0)
-        ], dim=0)
-
-        proj_feature_tensor = (proj_feature_tensor - self.proj_img_mean[:, None, None]) / self.proj_img_stds[:, None, None]
-        proj_feature_tensor = proj_feature_tensor * proj_mask_tensor.unsqueeze(0).float()
-
-        return proj_feature_tensor
-
-    def get_pc_feature(self, index):
-        """Load all point clouds and poses for a sequence"""
-        pc_paths = self.pc_path_data[index]
-        poses = self.pose_data[index]
-        clip_length = len(pc_paths) // self.downsample
-
-        range_views = []
-        poses_new = []
-
-        for i in range(clip_length):
-            pc = self.load_pointcloud(pc_paths[i * self.downsample])
-
+        views, pose_list = [], []
+        for i in range(clip_len):
+            pc = self._load_pc(pc_paths[i * self.downsample])
             if pc is None:
-                print(f'Warning: Point cloud does not exist')
-                return None, None
+                # Return what has been collected so far (or a single zero frame)
+                if not views:
+                    views    = [torch.zeros(6, self.h, self.w)]
+                    pose_list = [np.zeros((4, 4))]
+                break
+            views.append(self._project(pc))
+            pose_list.append(_make_pose(poses[i * self.downsample]))
 
-            range_view = self.project_pointcloud(pc)
-            range_views.append(range_view)
-
-            rotation_mat = quaternion_to_rotation_matrix(poses[i * self.downsample]["rotation"])
-            pose = create_transformation_matrix(rotation_mat, poses[i * self.downsample]["translation"])
-            poses_new.append(pose)
-
-        poses_array = np.array(poses_new)
-        return range_views, poses_array
-
-    def __getitem__(self, index):
-        """Get a sample from the dataset"""
-        range_views, poses = self.get_pc_feature(index)
-
-        if range_views is None or poses is None:
-            # Return dummy data if loading fails
-            range_views = [torch.zeros(6, self.h, self.w)]
-            poses = np.zeros((1, 4, 4))
-
-        range_views_tensor = torch.stack(range_views, dim=0)
-        poses_tensor = torch.from_numpy(poses).float()
-
-        return range_views_tensor, poses_tensor
+        return (
+            torch.stack(views),                                 # [T, 6, H, W]
+            torch.from_numpy(np.array(pose_list)).float(),      # [T, 4, 4]
+        )
