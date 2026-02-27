@@ -121,6 +121,7 @@ def create_rangeview_dataset(args):
         poses_path=args.kitti_poses_path,
         sequences=args.train_sequences,
         condition_frames=args.condition_frames,
+        forward_iter=args.forward_iter,
         h=args.range_h,
         w=args.range_w,
         fov_up=args.fov_up,
@@ -151,8 +152,15 @@ def main(args):
             local_rank = int(os.environ["LOCAL_RANK"])
             start_training(local_rank, args)
         elif args.launcher == 'slurm':
-            num_gpus_per_nodes = torch.cuda.device_count()
-            mp.spawn(start_training, nprocs=num_gpus_per_nodes, args=(args,))
+            # Recommended: invoke this script via `torchrun` inside the SLURM job
+            # script, in which case LOCAL_RANK is already set by torchrun.
+            # Fallback: single-node SLURM without torchrun uses mp.spawn.
+            if 'LOCAL_RANK' in os.environ:
+                local_rank = int(os.environ['LOCAL_RANK'])
+                start_training(local_rank, args)
+            else:
+                num_gpus_per_nodes = torch.cuda.device_count()
+                mp.spawn(start_training, nprocs=num_gpus_per_nodes, args=(args,))
         else:
             raise RuntimeError(f'Launcher {args.launcher} is not supported.')
 
@@ -162,8 +170,12 @@ def start_training(local_rank, args):
     torch.cuda.set_device(local_rank)
 
     if 'RANK' not in os.environ:
-        node_rank = 0
-        global_rank = node_rank * torch.cuda.device_count() + local_rank
+        # torchrun not used: derive rank from SLURM env or assume single-node
+        if 'SLURM_PROCID' in os.environ:
+            global_rank = int(os.environ['SLURM_PROCID'])
+        else:
+            node_rank = 0
+            global_rank = node_rank * torch.cuda.device_count() + local_rank
         os.environ["RANK"] = str(global_rank)
         os.environ["LOCAL_RANK"] = str(local_rank)
 
@@ -301,8 +313,10 @@ def train(local_rank, args):
             if step % args.multifw_perstep == 0:
                 fw_iter = args.forward_iter
 
+            # Number of rotation matrices needed per forward pass: (condition_frames + 1) * block_size
+            n_rot = (args.condition_frames + 1) * args.block_size
             for j in range(fw_iter):
-                rot_matrix_cond = rot_matrix[:, j * args.block_size:j * args.block_size + args.condition_frames, ...]
+                rot_matrix_cond = rot_matrix[:, j * args.block_size:j * args.block_size + n_rot, ...]
                 features_gt = range_views[:, j + cf:j + cf + 1, ...]
 
                 # Forward pass with mixed precision

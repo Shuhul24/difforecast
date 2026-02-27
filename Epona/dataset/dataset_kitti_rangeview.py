@@ -107,6 +107,7 @@ class KITTIRangeViewDataset(Dataset):
         poses_path,
         sequences,
         condition_frames=5,
+        forward_iter=1,
         h=64, w=2048,
         fov_up=3.0, fov_down=-25.0,
         fov_left=-180.0, fov_right=180.0,
@@ -120,6 +121,7 @@ class KITTIRangeViewDataset(Dataset):
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
+        self.forward_iter = forward_iter
         self.h, self.w       = h, w
         self.pc_extension    = pc_extension
         self.pc_dtype        = pc_dtype
@@ -153,7 +155,7 @@ class KITTIRangeViewDataset(Dataset):
         """Return a list of (seq_str, start_frame, pose_window) tuples."""
         index  = []
         stride = self.TRAIN_STRIDE if self.is_train else 1
-        W      = self.condition_frames + 1          # window size
+        W      = self.condition_frames + self.forward_iter  # window size
 
         for sid in sequences:
             seq       = f"{sid:02d}"
@@ -219,7 +221,7 @@ class KITTIRangeViewDataset(Dataset):
         seq, start, poses = self.index[idx]
 
         views = []
-        for i in range(self.condition_frames + 1):
+        for i in range(self.condition_frames + self.forward_iter):
             pc = self._load_pc(seq, start + i)
             if pc is None:
                 return self.__getitem__(random.randint(0, len(self) - 1))

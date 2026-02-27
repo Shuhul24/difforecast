@@ -242,7 +242,10 @@ class RangeViewDiT(nn.Module):
                 features, rot_matrix, features_gt, rel_pose_cond, rel_yaw_cond, features_aug, step
             )
         else:
-            return self.step_eval(features, rot_matrix, sample_last=sample_last, **kwargs)
+            # Compute relative poses from absolute rotation matrices before calling step_eval
+            with torch.cuda.amp.autocast(enabled=False):
+                rel_pose, rel_yaw = get_rel_pose(rot_matrix)
+            return self.step_eval(features, rel_pose, rel_yaw, sample_last=sample_last)
 
     @torch.no_grad()
     def step_eval(self, features, rel_pose, rel_yaw, sample_last=True):
@@ -277,8 +280,7 @@ class RangeViewDiT(nn.Module):
         noise = torch.randn(bsz, self.img_token_size, self.vae_emb_dim).to(stt_features)
         timesteps = get_schedule(int(self.args.num_sampling_steps), self.img_token_size)
         predict_features = self.dit.sample(noise, img_ids, stt_features, cond_ids, pose_emb, timesteps)
-        predict_features = rearrange(predict_features, 'b (h w) c -> b h w c', h=self.h, w=self.w)
-
+        # Return token format [bsz, L, C] so callers (e.g., training loop) can rearrange as needed
         return predict_features
 
     def save_model(self, path, epoch, rank=0):
