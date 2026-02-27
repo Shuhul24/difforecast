@@ -25,21 +25,34 @@ def _init_dist_envi(args):
         args.distributed = True
     else:
         args.distributed = False
+
+    # config master addr
+    # When torchrun is used (recommended), MASTER_ADDR is already set.
+    # For SLURM without torchrun, derive the head-node hostname automatically.
+    if 'MASTER_ADDR' not in os.environ:
+        if 'SLURM_NODELIST' in os.environ:
+            import subprocess
+            master_addr = subprocess.getoutput(
+                f"scontrol show hostname {os.environ['SLURM_NODELIST']} | head -n1"
+            ).strip()
+        else:
+            master_addr = '127.0.0.1'
+        os.environ['MASTER_ADDR'] = master_addr
+
     # config port
-    if 'MASTER_PORT' not in os.environ:    
+    if 'MASTER_PORT' not in os.environ:
         if _is_free_port(14500):
             master_port = '14500'
         else:
             master_port = str(_find_free_port())
         os.environ['MASTER_PORT'] = master_port
 
-    # config addr
-    if 'MASTER_ADDR' not in os.environ:
-        master_addr = '127.0.0.1' #'tcp://127.0.0.1'
-        os.environ['MASTER_ADDR'] = master_addr
-
-
+    # config world size
     if 'WORLD_SIZE' not in os.environ:
-        num_nodes = 1
-        world_size = num_nodes * num_gpus_per_node
+        if 'SLURM_NTASKS' in os.environ:
+            # SLURM total tasks == world size when one task per GPU is used
+            world_size = int(os.environ['SLURM_NTASKS'])
+        else:
+            num_nodes = 1
+            world_size = num_nodes * num_gpus_per_node
         os.environ['WORLD_SIZE'] = str(world_size)

@@ -152,8 +152,15 @@ def main(args):
             local_rank = int(os.environ["LOCAL_RANK"])
             start_training(local_rank, args)
         elif args.launcher == 'slurm':
-            num_gpus_per_nodes = torch.cuda.device_count()
-            mp.spawn(start_training, nprocs=num_gpus_per_nodes, args=(args,))
+            # Recommended: invoke this script via `torchrun` inside the SLURM job
+            # script, in which case LOCAL_RANK is already set by torchrun.
+            # Fallback: single-node SLURM without torchrun uses mp.spawn.
+            if 'LOCAL_RANK' in os.environ:
+                local_rank = int(os.environ['LOCAL_RANK'])
+                start_training(local_rank, args)
+            else:
+                num_gpus_per_nodes = torch.cuda.device_count()
+                mp.spawn(start_training, nprocs=num_gpus_per_nodes, args=(args,))
         else:
             raise RuntimeError(f'Launcher {args.launcher} is not supported.')
 
@@ -163,8 +170,12 @@ def start_training(local_rank, args):
     torch.cuda.set_device(local_rank)
 
     if 'RANK' not in os.environ:
-        node_rank = 0
-        global_rank = node_rank * torch.cuda.device_count() + local_rank
+        # torchrun not used: derive rank from SLURM env or assume single-node
+        if 'SLURM_PROCID' in os.environ:
+            global_rank = int(os.environ['SLURM_PROCID'])
+        else:
+            node_rank = 0
+            global_rank = node_rank * torch.cuda.device_count() + local_rank
         os.environ["RANK"] = str(global_rank)
         os.environ["LOCAL_RANK"] = str(local_rank)
 

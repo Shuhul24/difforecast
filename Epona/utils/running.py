@@ -291,17 +291,39 @@ def save_ckpt_deepspeed(args, path, model, optimizer=None, scheduler=None, curr_
     # print(f'#### Save model: {ckpt_path}')
 
 
+def _get_inner_module(engine):
+    """Unwrap DeepSpeed / DDP layers to reach the actual nn.Module."""
+    m = engine
+    while hasattr(m, 'module'):
+        m = m.module
+    return m
+
+
 def load_from_deepspeed_ckpt(args, model):
     if args.load_from_deepspeed is not None:
-        print('#### Before deepspeed load ckpt, img_projector.0.weight sum:', torch.sum(model.model.state_dict()['img_projector.0.weight']))
+        try:
+            inner = _get_inner_module(model)
+            stt = getattr(inner, 'model', inner)
+            w = stt.state_dict().get('img_projector.0.weight')
+            if w is not None:
+                print('#### Before deepspeed load ckpt, img_projector.0.weight sum:', torch.sum(w))
+        except Exception:
+            pass
         load_path, client_sd = model.load_checkpoint(args.load_from_deepspeed, load_module_strict=False, load_module_only=True)
         if load_path is None or client_sd is None:
             if args.load_from_deepspeed.endswith("/"):
                 args.load_from_deepspeed = args.load_from_deepspeed[:-1]
             tag = os.path.split(args.load_from_deepspeed)[-1]
-            resume_raw_dir = os.path.dirname(args.load_from_deepspeed) 
+            resume_raw_dir = os.path.dirname(args.load_from_deepspeed)
             load_path, client_sd = model.load_checkpoint(resume_raw_dir, tag, load_module_strict=False, load_module_only=True)
-        print('#### After deepspeed load ckpt, img_projector.0.weight sum:', torch.sum(model.model.state_dict()['img_projector.0.weight']))
+        try:
+            inner = _get_inner_module(model)
+            stt = getattr(inner, 'model', inner)
+            w = stt.state_dict().get('img_projector.0.weight')
+            if w is not None:
+                print('#### After deepspeed load ckpt, img_projector.0.weight sum:', torch.sum(w))
+        except Exception:
+            pass
     # TODO
     # if args.resume_step > 0: # args.resume_from_deepspeed is not None:
     #     print('#### Before deepspeed resume ckpt, img_projector.0.weight sum:', torch.sum(model.model.state_dict()['img_projector.0.weight']))
