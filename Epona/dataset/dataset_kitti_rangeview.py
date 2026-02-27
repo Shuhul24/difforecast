@@ -2,7 +2,7 @@
 KITTI Range View Dataset for Epona range view forecasting.
 
 Reads directly from KITTI Odometry directory structure (no JSON required).
-Uses DiffLoc's RangeProjection and Augmentor utilities.
+Uses RangeProjection and Augmentor utilities.
 
 Returns per sample:
     range_views : FloatTensor [T, 6, H, W]   (condition_frames + 1 frames)
@@ -10,26 +10,20 @@ Returns per sample:
 """
 
 import os
-import sys
 import numpy as np
 import torch
 import random
 from torch.utils.data import Dataset
 
-# ── DiffLoc utilities ─────────────────────────────────────────────────────────
-_diffloc = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../DiffLoc'))
-if _diffloc not in sys.path:
-    sys.path.insert(0, _diffloc)
-
-from datasets.projection import RangeProjection
+from .projection import RangeProjection
 
 try:
-    from datasets.augmentor import Augmentor, AugmentParams
+    from .augmentor import Augmentor, AugmentParams
     _AUGMENTOR_OK = True
 except ImportError:
     Augmentor = AugmentParams = None
     _AUGMENTOR_OK = False
-    print("Warning: DiffLoc Augmentor unavailable (missing robotcar SDK). "
+    print("Warning: Augmentor unavailable (missing robotcar SDK). "
           "Augmentation will be disabled.")
 
 
@@ -128,7 +122,7 @@ class KITTIRangeViewDataset(Dataset):
         self.pc_reshape      = pc_reshape
         self.is_train        = is_train
 
-        # Range projection (DiffLoc)
+        # Range projection
         self.projection = RangeProjection(
             fov_up=fov_up, fov_down=fov_down,
             fov_left=fov_left, fov_right=fov_right,
@@ -141,7 +135,7 @@ class KITTIRangeViewDataset(Dataset):
         self.mean = torch.tensor(mean, dtype=torch.float)
         self.std  = torch.tensor(std,  dtype=torch.float)
 
-        # Augmentation (DiffLoc, training only)
+        # Augmentation (training only)
         self.augmentor = _make_augmentor(augmentation_config) if is_train else None
 
         # Build the flat sample index

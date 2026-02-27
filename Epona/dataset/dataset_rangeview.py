@@ -15,7 +15,7 @@ Expects a JSON file whose structure mirrors Epona's standard format:
 The ``data_path`` extension is swapped for ``pc_extension`` to locate the
 corresponding point-cloud file.
 
-Uses DiffLoc's RangeProjection and Augmentor utilities.
+Uses RangeProjection and Augmentor utilities.
 
 Returns per sample:
     range_views : FloatTensor [T, 6, H, W]   (condition_frames + 1 frames)
@@ -24,26 +24,20 @@ Returns per sample:
 
 import json
 import os
-import sys
 import numpy as np
 import torch
 import random
 from torch.utils.data import Dataset
 
-# ── DiffLoc utilities ─────────────────────────────────────────────────────────
-_diffloc = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../DiffLoc'))
-if _diffloc not in sys.path:
-    sys.path.insert(0, _diffloc)
-
-from datasets.projection import RangeProjection
+from .projection import RangeProjection
 
 try:
-    from datasets.augmentor import Augmentor, AugmentParams
+    from .augmentor import Augmentor, AugmentParams
     _AUGMENTOR_OK = True
 except ImportError:
     Augmentor = AugmentParams = None
     _AUGMENTOR_OK = False
-    print("Warning: DiffLoc Augmentor unavailable (missing robotcar SDK). "
+    print("Warning: Augmentor unavailable (missing robotcar SDK). "
           "Augmentation will be disabled.")
 
 
