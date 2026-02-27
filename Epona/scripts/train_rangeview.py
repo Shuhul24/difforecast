@@ -121,6 +121,7 @@ def create_rangeview_dataset(args):
         poses_path=args.kitti_poses_path,
         sequences=args.train_sequences,
         condition_frames=args.condition_frames,
+        forward_iter=args.forward_iter,
         h=args.range_h,
         w=args.range_w,
         fov_up=args.fov_up,
@@ -301,8 +302,10 @@ def train(local_rank, args):
             if step % args.multifw_perstep == 0:
                 fw_iter = args.forward_iter
 
+            # Number of rotation matrices needed per forward pass: (condition_frames + 1) * block_size
+            n_rot = (args.condition_frames + 1) * args.block_size
             for j in range(fw_iter):
-                rot_matrix_cond = rot_matrix[:, j * args.block_size:j * args.block_size + args.condition_frames, ...]
+                rot_matrix_cond = rot_matrix[:, j * args.block_size:j * args.block_size + n_rot, ...]
                 features_gt = range_views[:, j + cf:j + cf + 1, ...]
 
                 # Forward pass with mixed precision
