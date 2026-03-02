@@ -106,9 +106,37 @@ pose_x_bound = 50  # Bound for x-axis pose (meters)
 pose_y_bound = 10  # Bound for y-axis pose (meters)
 yaw_bound = 12  # Bound for yaw angle (degrees)
 
+# ===== DCAE Tokenizer Configuration =====
+# The range view images are encoded to latent space with a DCAE before being
+# fed to the STT and DiT, mirroring the encoding pattern used by Epona for RGB
+# images.  The dc_ae_f32c32_rangeview variant has 6 input channels and 32
+# latent channels, providing a 32× spatial compression (64×2048 → 2×64 = 128
+# latent tokens per frame — tractable for the transformer).
+#
+# vae_ckpt: path to a pre-trained dc-ae-f32c32 checkpoint (.safetensors or
+#   .pt).  When set, all layers whose weight shapes match the checkpoint are
+#   initialised from it; the channel-dependent input/output convolutions are
+#   randomly initialised because they differ (6 vs 3 channels).
+#   Set to None to initialise the entire DCAE randomly (requires more training
+#   iterations for the encoder to converge).
+#
+# vae_embed_dim: DCAE latent channels.  Must match the chosen model
+#   (32 for dc_ae_f32c32).
+#
+# downsample_size: DCAE spatial compression factor (32 for f32c32).
+#   This determines the latent spatial dimensions:
+#     h_lat = range_h // downsample_size = 64  // 32 = 2
+#     w_lat = range_w // downsample_size = 2048 // 32 = 64
+#   → img_token_size = 2 × 64 = 128 tokens per frame.
+vae_ckpt = None          # set to path of pre-trained DCAE weights if available
+vae_embed_dim = 32       # DCAE latent channels (dc_ae_f32c32)
+add_encoder_temporal = False
+add_decoder_temporal = False
+temporal_patch_size = 1
+
 # Feature processing
-downsample_size = 1  # Downsample factor for range images (usually 1 for range views)
-patch_size = 1  # Patch size for tokenization
+downsample_size = 32  # DCAE f32c32 spatial compression factor (32×)
+patch_size = 1  # Patch size for tokenization (applied after DCAE encoding)
 drop_feature = 0  # Dropout probability for features
 
 # ===== Diffusion Configuration =====

@@ -1,6 +1,20 @@
 """
-Simplified DiT Model for Range View Image Prediction
-This model only predicts the next frame without trajectory planning.
+DiT Model for Range View Image Prediction with DCAE Tokenization.
+
+This model mirrors the encoding pattern used by Epona's main TrainTransformersDiT:
+  raw range view images → DCAE encoder → latent tokens → STT → DiT → latent tokens
+                       → DCAE decoder → predicted range view images
+
+The DCAE tokenizer compresses the range view image (default 64×2048) by 32×
+spatially, producing (2×64) = 128 latent tokens per frame with 32 channels.
+This makes the token count tractable for the Spatial-Temporal Transformer and
+Diffusion Transformer.  Without DCAE the raw feature count (64×2048 = 131 072
+tokens) would be prohibitively large.
+
+Key differences from model.py:
+  - No TrajDiT (next-frame prediction only, no trajectory planning)
+  - RangeViewVAETokenizer used instead of VAETokenizer (6-channel input)
+  - Auxiliary losses (L1, Chamfer) computed on DCAE-decoded predictions
 """
 
 import os
@@ -12,7 +26,11 @@ from einops import rearrange
 from utils.preprocess import get_rel_pose
 from models.stt import SpatialTemporalTransformer
 from models.flux_dit import FluxParams, FluxDiT
-from models.modules.tokenizer import poses_to_indices, yaws_to_indices
+from models.modules.tokenizer import (
+    RangeViewVAETokenizer,
+    poses_to_indices,
+    yaws_to_indices,
+)
 from utils.fft_utils import freq_mix, ideal_low_pass_filter
 from models.modules.sampling import prepare_ids, get_schedule
 from utils.range_losses import (
@@ -24,35 +42,55 @@ from utils.range_losses import (
 
 
 class RangeViewDiT(nn.Module):
-    """
-    Simplified DiT model for range view image prediction.
-    Only predicts next frame, no trajectory planning.
+    """DiT model for range view image prediction using DCAE tokenization.
+
+    Input pipeline (training):
+        range_views [B, T, C, H, W]
+            → RangeViewVAETokenizer.encode_to_z
+            → latents [B, T, L, latent_C]
+            → SpatialTemporalTransformer
+            → FluxDiT (flow-matching)
+            → predicted latents [B*F, L, latent_C]
+            → RangeViewVAETokenizer.decode_from_z  (for auxiliary losses)
+            → predicted range views [B*F, C, H, W]
+
+    The DCAE encoder/decoder weights are frozen; only the STT and DiT
+    parameters are trained.
     """
 
     def __init__(
         self,
         args,
-        local_rank=-1,
+        local_rank: int = -1,
         load_path=None,
-        condition_frames=3,
+        condition_frames: int = 3,
     ):
         super().__init__()
         self.local_rank = local_rank
         self.args = args
         self.condition_frames = condition_frames
 
-        # For range view, we expect 6 channels: [range, x, y, z, intensity, label]
-        self.range_channels = args.range_channels if hasattr(args, 'range_channels') else 6
-        self.vae_emb_dim = self.range_channels * self.args.patch_size ** 2
+        # ------------------------------------------------------------------ #
+        # DCAE tokenizer (frozen; 32× spatial compression)
+        # ------------------------------------------------------------------ #
+        self.vae_tokenizer = RangeViewVAETokenizer(args, local_rank)
 
+        # Latent embedding dimension after patchification
+        # vae_embed_dim = DCAE latent channels (32 for f32c32)
+        # vae_emb_dim   = latent_channels × patch_size²
+        self.vae_emb_dim = self.args.vae_embed_dim * self.args.patch_size ** 2
+
+        # ------------------------------------------------------------------ #
+        # Spatial dimensions in latent space
+        # downsample_size = 32 (DCAE f32c32 compression factor)
+        # ------------------------------------------------------------------ #
         self.image_size = self.args.image_size
-        self.h, self.w = (
-            self.image_size[0] // (self.args.downsample_size * self.args.patch_size),
-            self.image_size[1] // (self.args.downsample_size * self.args.patch_size)
-        )
+        self.h = self.image_size[0] // (self.args.downsample_size * self.args.patch_size)
+        self.w = self.image_size[1] // (self.args.downsample_size * self.args.patch_size)
         self.pkeep = args.pkeep
 
         self.img_token_size = self.h * self.w
+
         self.pose_x_vocab_size = self.args.pose_x_vocab_size
         self.pose_y_vocab_size = self.args.pose_y_vocab_size
         self.yaw_vocab_size = self.args.yaw_vocab_size
@@ -68,12 +106,14 @@ class RangeViewDiT(nn.Module):
             'img_tokens_size': self.img_token_size,
             'pose_tokens_size': self.pose_token_size,
             'yaw_token_size': self.yaw_token_size,
-            'total_tokens_size': self.total_token_size
+            'total_tokens_size': self.total_token_size,
         }
 
-        # Spatial-Temporal Transformer for conditioning
+        # ------------------------------------------------------------------ #
+        # Spatial-Temporal Transformer (operates on latent tokens)
+        # ------------------------------------------------------------------ #
         self.model = SpatialTemporalTransformer(
-            block_size=condition_frames * (self.total_token_size),
+            block_size=condition_frames * self.total_token_size,
             n_layer=args.n_layer,
             n_head=args.n_head,
             n_embd=args.n_embd,
@@ -85,11 +125,13 @@ class RangeViewDiT(nn.Module):
             condition_frames=self.condition_frames,
             token_size_dict=self.token_size_dict,
             vae_emb_dim=self.vae_emb_dim,
-            temporal_block=self.args.block_size
+            temporal_block=self.args.block_size,
         )
         self.model.cuda()
 
-        # Diffusion Transformer for frame prediction
+        # ------------------------------------------------------------------ #
+        # Diffusion Transformer (predicts next-frame latents)
+        # ------------------------------------------------------------------ #
         self.dit = FluxDiT(FluxParams(
             in_channels=self.vae_emb_dim,
             out_channels=self.vae_emb_dim,
@@ -107,7 +149,7 @@ class RangeViewDiT(nn.Module):
         ))
         self.dit.cuda()
 
-        # Prepare IDs for positional encoding
+        # Positional encoding IDs (precomputed for efficiency)
         bs = args.batch_size * condition_frames
         self.img_ids, self.cond_ids, _ = prepare_ids(
             bs, self.h, self.w, self.total_token_size, 0
@@ -116,133 +158,163 @@ class RangeViewDiT(nn.Module):
         # ------------------------------------------------------------------ #
         # Auxiliary loss configuration
         # ------------------------------------------------------------------ #
-        # Normalisation statistics (needed to recover metric xyz / range)
         self.proj_img_mean = list(
             getattr(args, 'proj_img_mean', [10.839, 0.005, 0.494, -1.13, 0.0, 0.0])
         )
         self.proj_img_stds = list(
             getattr(args, 'proj_img_stds', [9.314, 11.521, 8.262, 0.828, 1.0, 1.0])
         )
-
-        # Loss weights (0.0 disables the respective term)
         self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
 
+        # ------------------------------------------------------------------ #
+        # Optional checkpoint loading (STT + DiT only; tokenizer is separate)
+        # ------------------------------------------------------------------ #
         if load_path is not None:
             state_dict = torch.load(load_path, map_location='cpu')["model_state_dict"]
 
-            # Load STT model
             model_state_dict = self.model.state_dict()
             for k in model_state_dict.keys():
                 if 'module.model.' + k in state_dict:
                     model_state_dict[k] = state_dict['module.model.' + k]
             self.model.load_state_dict(model_state_dict, strict=False)
 
-            # Load DiT model
             dit_state_dict = self.dit.state_dict()
             for k in dit_state_dict.keys():
                 if 'module.dit.' + k in state_dict:
                     dit_state_dict[k] = state_dict['module.dit.' + k]
             self.dit.load_state_dict(dit_state_dict, strict=False)
 
-            print(f"Successfully loaded model from {load_path}")
+            print(f"Successfully loaded STT + DiT from {load_path}")
 
-    def model_forward(self, feature_total, rot_matrix, targets, rel_pose_cond=None, rel_yaw_cond=None, step=0):
-        """
-        Forward pass for training
+    # ---------------------------------------------------------------------- #
+    # Core forward pass (training)
+    # ---------------------------------------------------------------------- #
+
+    def model_forward(
+        self,
+        latents_total,
+        rot_matrix,
+        latent_targets,
+        rel_pose_cond=None,
+        rel_yaw_cond=None,
+        step=0,
+    ):
+        """Forward pass for training.
 
         Args:
-            feature_total: Range view features [B, F, L, C]
-            rot_matrix: Rotation matrices [B, T, 4, 4]
-            targets: Target range view features [B*F, L, C]
-            rel_pose_cond: Optional conditioned relative pose
-            rel_yaw_cond: Optional conditioned relative yaw
-            step: Training step
+            latents_total:   ``[B, F, L, latent_C]`` — condition + target latents
+                             (may have augmentation noise applied).
+            rot_matrix:      ``[B, T, 4, 4]`` absolute rotation matrices.
+            latent_targets:  ``[(B*F), L, latent_C]`` — clean target latents
+                             used for flow-matching supervision.
+            rel_pose_cond:   Optional pre-computed relative pose  (B, T, 2).
+            rel_yaw_cond:    Optional pre-computed relative yaw   (B, T, 1).
+            step:            Training step counter.
+
+        Returns:
+            dict with keys: loss_all, loss_diff, loss_range_l1, loss_chamfer,
+            predict (``[(B*F), C, H, W]`` decoded range view or None).
         """
-        # Get relative pose and yaw from rotation matrices
+        # Relative pose / yaw indices
         if (rel_pose_cond is not None) and (rel_yaw_cond is not None):
             with torch.cuda.amp.autocast(enabled=False):
                 rel_pose_gt, rel_yaw_gt = get_rel_pose(
-                    rot_matrix[:, (self.condition_frames - 1) * self.args.block_size:(self.condition_frames + 1) * self.args.block_size]
+                    rot_matrix[
+                        :,
+                        (self.condition_frames - 1) * self.args.block_size:
+                        (self.condition_frames + 1) * self.args.block_size,
+                    ]
                 )
             rel_pose_total = torch.cat([rel_pose_cond, rel_pose_gt[:, -1:]], dim=1)
-            rel_yaw_total = torch.cat([rel_yaw_cond, rel_yaw_gt[:, -1:]], dim=1)
+            rel_yaw_total  = torch.cat([rel_yaw_cond,  rel_yaw_gt[:, -1:]],  dim=1)
         else:
             with torch.cuda.amp.autocast(enabled=False):
                 rel_pose_total, rel_yaw_total = get_rel_pose(
                     rot_matrix[:, :(self.condition_frames + 1) * self.args.block_size]
                 )
 
-        # Convert pose and yaw to indices
         pose_indices_total = poses_to_indices(
             rel_pose_total, self.pose_x_vocab_size, self.pose_y_vocab_size
         )
         yaw_indices_total = yaws_to_indices(rel_yaw_total, self.yaw_vocab_size)
 
-        # Get features from Spatial-Temporal Transformer
+        # Spatial-Temporal Transformer
         logits = self.model(
-            feature_total, pose_indices_total, yaw_indices_total,
-            drop_feature=self.args.drop_feature
+            latents_total, pose_indices_total, yaw_indices_total,
+            drop_feature=self.args.drop_feature,
         )
         stt_features = logits['logits']
-        pose_emb = logits['pose_emb']
+        pose_emb     = logits['pose_emb']
 
-        # Predict next frame using DiT
+        # Flow-matching loss (DiT)
         loss_terms = self.dit.training_losses(
-            img=targets,
+            img=latent_targets,
             img_ids=self.img_ids,
             cond=stt_features,
             cond_ids=self.cond_ids,
-            t=torch.rand((targets.shape[0], 1, 1), device=targets.device),
+            t=torch.rand((latent_targets.shape[0], 1, 1), device=latent_targets.device),
             y=pose_emb,
-            return_predict=self.args.return_predict
+            return_predict=self.args.return_predict,
         )
-
         diff_loss = loss_terms['loss']
-        predict   = loss_terms['predict']
+        predict   = loss_terms['predict']   # [(B*F), L, latent_C] or None
 
         # ------------------------------------------------------------------ #
-        # Auxiliary losses (applied on the denoised *predict* estimate)
+        # Auxiliary losses — computed on DCAE-decoded predictions
         # ------------------------------------------------------------------ #
-        # ``predict`` is the clean-frame estimate: x_t + pred * (1 - t).
-        # Computing reconstruction losses here gives image-space and 3-D
-        # supervision that the flow-matching loss alone cannot provide.
-        # Both losses are gated by their weight so they add zero overhead
-        # when disabled (weight == 0).
+        # Decode the DiT's x_0 estimate back to range view feature space so
+        # we can supervise with pixel-level L1 and 3-D Chamfer distance.
+        # The decode is NOT wrapped in torch.no_grad() so that gradients flow
+        # from these losses through the frozen DCAE decoder back to `predict`
+        # and ultimately to the DiT parameters.
+        # ------------------------------------------------------------------ #
+        range_l1_loss    = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
+        chamfer_loss_val = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
+        predict_decoded  = None
 
-        range_l1_loss   = torch.zeros(1, device=targets.device, dtype=targets.dtype)
-        chamfer_loss_val = torch.zeros(1, device=targets.device, dtype=targets.dtype)
+        if predict is not None:
+            # Decode predicted latents → range view features [(B*F), C, H, W]
+            predict_decoded = self.vae_tokenizer.decode_from_z(predict, self.h, self.w)
 
-        if predict is not None and (self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0):
-            # Valid-pixel mask derived from GT range channel
-            gt_valid = make_valid_mask(
-                targets,
-                range_mean=self.proj_img_mean[0],
-                range_std=self.proj_img_stds[0],
-            )   # [B*F, L]
+            if self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0:
+                # Decode target latents for supervision (no grad needed for targets)
+                with torch.no_grad():
+                    targets_decoded = self.vae_tokenizer.decode_from_z(
+                        latent_targets.detach(), self.h, self.w
+                    )  # [(B*F), C, H, W]
 
-            if self.range_view_loss_weight > 0:
-                # Per-pixel L1 on all 6 feature channels; masked to GT-valid pixels
-                range_l1_loss = range_view_l1_loss(predict, targets, valid_mask=gt_valid)
+                # Reshape to [..., L, C] for aux-loss helpers
+                pred_tok   = rearrange(predict_decoded, 'b c h w -> b (h w) c')
+                target_tok = rearrange(targets_decoded, 'b c h w -> b (h w) c')
 
-            if self.chamfer_loss_weight > 0:
-                # Extract unnormalised xyz from predicted and GT features
-                pred_xyz = features_to_xyz(predict, self.proj_img_mean, self.proj_img_stds)
-                gt_xyz   = features_to_xyz(targets, self.proj_img_mean, self.proj_img_stds)
-
-                # Build valid mask for predictions from their own range channel
-                pred_valid = make_valid_mask(
-                    predict,
+                gt_valid = make_valid_mask(
+                    target_tok,
                     range_mean=self.proj_img_mean[0],
                     range_std=self.proj_img_stds[0],
-                )   # [B*F, L]
+                )  # [(B*F), L]
 
-                chamfer_loss_val = batch_chamfer_distance(
-                    pred_xyz, gt_xyz,
-                    pred_valid, gt_valid,
-                    max_pts=self.chamfer_max_pts,
-                )
+                if self.range_view_loss_weight > 0:
+                    range_l1_loss = range_view_l1_loss(
+                        pred_tok, target_tok, valid_mask=gt_valid
+                    )
+
+                if self.chamfer_loss_weight > 0:
+                    pred_xyz = features_to_xyz(pred_tok, self.proj_img_mean, self.proj_img_stds)
+                    gt_xyz   = features_to_xyz(target_tok, self.proj_img_mean, self.proj_img_stds)
+
+                    pred_valid = make_valid_mask(
+                        pred_tok,
+                        range_mean=self.proj_img_mean[0],
+                        range_std=self.proj_img_stds[0],
+                    )
+
+                    chamfer_loss_val = batch_chamfer_distance(
+                        pred_xyz, gt_xyz,
+                        pred_valid, gt_valid,
+                        max_pts=self.chamfer_max_pts,
+                    )
 
         total_loss = (
             diff_loss
@@ -250,115 +322,156 @@ class RangeViewDiT(nn.Module):
             + self.chamfer_loss_weight    * chamfer_loss_val
         )
 
-        loss = {
-            "loss_all":     total_loss,
-            "loss_diff":    diff_loss,
+        return {
+            "loss_all":      total_loss,
+            "loss_diff":     diff_loss,
             "loss_range_l1": range_l1_loss,
             "loss_chamfer":  chamfer_loss_val,
-            "predict": None if not self.args.return_predict else predict,
+            # predict_decoded: [(B*F), C, H, W] or None
+            # Callers use this for autoregressive conditioning (next iteration).
+            "predict": predict_decoded,
         }
-        return loss
 
-    def step_train(self, features, rot_matrix, features_gt, rel_pose_cond=None, rel_yaw_cond=None, features_aug=None, step=0):
-        """
-        Training step
+    # ---------------------------------------------------------------------- #
+    # Training step
+    # ---------------------------------------------------------------------- #
+
+    def step_train(
+        self,
+        features,
+        rot_matrix,
+        features_gt,
+        rel_pose_cond=None,
+        rel_yaw_cond=None,
+        features_aug=None,
+        step=0,
+    ):
+        """Training step.
 
         Args:
-            features: Input range view features [B, F, L, C]
-            rot_matrix: Rotation matrices
-            features_gt: Ground truth next frame features
-            rel_pose_cond: Optional conditioned relative pose
-            rel_yaw_cond: Optional conditioned relative yaw
-            features_aug: Optional augmented features
-            step: Training step
+            features:     ``[B, CF, C, H, W]`` condition range view images.
+            rot_matrix:   ``[B, T, 4, 4]`` absolute rotation matrices.
+            features_gt:  ``[B, 1, C, H, W]``  next-frame ground truth.
+            rel_pose_cond:  Optional pre-computed relative pose.
+            rel_yaw_cond:   Optional pre-computed relative yaw.
+            features_aug:   Not used (reserved for future augmentation).
+            step:         Training step counter.
         """
         self.model.train()
 
-        if features_aug is None:
-            features_total = torch.cat([features, features_gt], dim=1)
-        else:
-            features_total = features_aug
+        # Concatenate all frames and encode to latent space with frozen DCAE
+        features_all = torch.cat([features, features_gt], dim=1)  # [B, CF+1, C, H, W]
+        latents_all  = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
 
-        # Optional: Apply masking/noise augmentation
+        latents_total = latents_all  # may be replaced by augmented version below
+
+        # Optional: frequency-domain / masking augmentation on latent tokens
         pro = random.random()
         if pro < self.args.mask_data:
-            mask = torch.bernoulli(random.uniform(0.7, 1) * torch.ones_like(features_total))
-            mask = mask.round().to(dtype=torch.int64)
-            noise = torch.randn_like(features_total)
+            mask  = torch.bernoulli(random.uniform(0.7, 1) * torch.ones_like(latents_total))
+            mask  = mask.round().to(dtype=torch.int64)
+            noise = torch.randn_like(latents_total)
 
             if random.random() < 0.5:
                 LPF = ideal_low_pass_filter(
-                    features_total.shape, d_s=random.uniform(0.5, 1), dims=(-1,)
+                    latents_total.shape, d_s=random.uniform(0.5, 1), dims=(-1,)
                 ).cuda()
-                features_total = freq_mix(features_total, noise, LPF, dims=(-1,))
+                latents_total = freq_mix(latents_total, noise, LPF, dims=(-1,))
             else:
-                features_total = mask * features_total + (1 - mask) * noise
+                latents_total = mask * latents_total + (1 - mask) * noise
 
-        # Prepare targets
-        targets = torch.cat([features, features_gt], dim=1)[:, 1:]
-        targets = rearrange(targets, 'B F L C -> (B F) L C')
+        # Targets: latents of all frames shifted by 1 (each frame predicts the next)
+        latent_targets = latents_all[:, 1:]                          # [B, CF, L, latent_C]
+        latent_targets = rearrange(latent_targets, 'B F L C -> (B F) L C')
 
-        # Forward pass
-        loss = self.model_forward(
-            features_total, rot_matrix, targets,
-            rel_pose_cond=rel_pose_cond, rel_yaw_cond=rel_yaw_cond, step=step
+        return self.model_forward(
+            latents_total, rot_matrix, latent_targets,
+            rel_pose_cond=rel_pose_cond, rel_yaw_cond=rel_yaw_cond, step=step,
         )
-        return loss
 
-    def forward(self, features, rot_matrix, features_gt, rel_pose_cond=None, rel_yaw_cond=None, features_aug=None, sample_last=True, step=0, **kwargs):
-        """
-        Forward pass - delegates to train or eval
-        """
+    # ---------------------------------------------------------------------- #
+    # Unified forward
+    # ---------------------------------------------------------------------- #
+
+    def forward(
+        self,
+        features,
+        rot_matrix,
+        features_gt,
+        rel_pose_cond=None,
+        rel_yaw_cond=None,
+        features_aug=None,
+        sample_last=True,
+        step=0,
+        **kwargs,
+    ):
+        """Delegate to training or evaluation step."""
         if self.training:
             return self.step_train(
-                features, rot_matrix, features_gt, rel_pose_cond, rel_yaw_cond, features_aug, step
+                features, rot_matrix, features_gt,
+                rel_pose_cond, rel_yaw_cond, features_aug, step,
             )
         else:
-            # Compute relative poses from absolute rotation matrices before calling step_eval
             with torch.cuda.amp.autocast(enabled=False):
                 rel_pose, rel_yaw = get_rel_pose(rot_matrix)
             return self.step_eval(features, rel_pose, rel_yaw, sample_last=sample_last)
 
+    # ---------------------------------------------------------------------- #
+    # Evaluation step
+    # ---------------------------------------------------------------------- #
+
     @torch.no_grad()
     def step_eval(self, features, rel_pose, rel_yaw, sample_last=True):
-        """
-        Evaluation step - predict next frame
+        """Predict next range view frame from conditioning frames.
 
         Args:
-            features: Input range view features [B, F, L, C]
-            rel_pose: Relative pose [B, T, 2]
-            rel_yaw: Relative yaw [B, T, 1]
-            sample_last: Whether to sample only the last frame
+            features:    ``[B, CF, C, H, W]`` conditioning range view images.
+            rel_pose:    ``[B, T, 2]`` relative translations.
+            rel_yaw:     ``[B, T, 1]`` relative yaw angles.
+            sample_last: If True, only the last condition frame is used to
+                         initialise the sampling (matches training behaviour).
 
         Returns:
-            predict_features: Predicted next frame features
+            ``[bsz, C, H, W]`` decoded predicted next-frame range view.
         """
         self.model.eval()
 
-        # Convert pose and yaw to indices
-        pose_total = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size)
-        yaw_total = yaws_to_indices(rel_yaw, self.yaw_vocab_size)
+        # Encode conditioning frames to latent space
+        feature_latents = self.vae_tokenizer.encode_to_z(features)  # [B, CF, L, latent_C]
 
-        # Get features from Spatial-Temporal Transformer
+        # Pose / yaw indices
+        pose_total = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size)
+        yaw_total  = yaws_to_indices(rel_yaw,  self.yaw_vocab_size)
+
+        # Spatial-Temporal Transformer
         stt_features, pose_emb = self.model.evaluate(
-            features, pose_total, yaw_total, sample_last=sample_last
+            feature_latents, pose_total, yaw_total, sample_last=sample_last
         )
 
         bsz = stt_features.shape[0]
         img_ids, cond_ids, _ = prepare_ids(bsz, self.h, self.w, self.total_token_size, 0)
 
-        # Predict next frame using DiT
+        # Diffusion sampling in latent space
         self.dit.eval()
-        noise = torch.randn(bsz, self.img_token_size, self.vae_emb_dim).to(stt_features)
+        noise     = torch.randn(bsz, self.img_token_size, self.vae_emb_dim).to(stt_features)
         timesteps = get_schedule(int(self.args.num_sampling_steps), self.img_token_size)
-        predict_features = self.dit.sample(noise, img_ids, stt_features, cond_ids, pose_emb, timesteps)
-        # Return token format [bsz, L, C] so callers (e.g., training loop) can rearrange as needed
+        predict_latents = self.dit.sample(noise, img_ids, stt_features, cond_ids, pose_emb, timesteps)
+        # predict_latents: [bsz, L, latent_C]
+
+        # Decode latents back to range view feature space
+        predict_features = self.vae_tokenizer.decode_from_z(predict_latents, self.h, self.w)
+        # predict_features: [bsz, C, H, W]
+
         return predict_features
 
+    # ---------------------------------------------------------------------- #
+    # Checkpoint
+    # ---------------------------------------------------------------------- #
+
     def save_model(self, path, epoch, rank=0):
-        """Save model checkpoint"""
+        """Save model checkpoint."""
         if rank == 0:
-            torch.save({
-                'model_state_dict': self.state_dict(),
-                'epoch': epoch
-            }, f'{path}/rangeview_dit_{epoch}.pkl')
+            torch.save(
+                {'model_state_dict': self.state_dict(), 'epoch': epoch},
+                f'{path}/rangeview_dit_{epoch}.pkl',
+            )
