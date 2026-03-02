@@ -341,7 +341,7 @@ class SpatialTemporalTransformer(nn.Module):
         self.condition_frames = condition_frames
 
         self.time_emb = nn.Parameter(torch.zeros(50, self.C)) 
-        nn.init.normal(self.time_emb.data, mean=0, std=0.02)
+        nn.init.normal_(self.time_emb.data, mean=0, std=0.02)
         self.begin_ends = []
 
         self.causal_time_space_blocks = nn.Sequential(*[CausalTimeSpaceBlock(config) for _ in range(self.causal_time_space_num)])
@@ -355,18 +355,10 @@ class SpatialTemporalTransformer(nn.Module):
         time_causal_mask = torch.where(matrix==1, 0, time_causal_mask)
         self.mask_time = time_causal_mask.contiguous().cuda()
 
-        # 注意：mask_space 需要根据生成自回归策略进行修改，如每次生成一行应改为阶梯形
-        matrix_1 = torch.ones(self.total_token_size, self.total_token_size)
-        for i in range(0, self.prefix_size):
-            matrix_1[i, self.prefix_size:] = 0
-        seq_causal_mask = torch.where(matrix_1==0, float('-inf'), matrix_1)
-        seq_causal_mask = torch.where(matrix_1==1, 0, seq_causal_mask)
-        beta = 0.1
-        space_weight = torch.zeros(self.total_token_size, self.total_token_size)
-        space_weight[:, 0] = 2
-        space_weight[:, 1] = 1
-        seq_causal_mask = seq_causal_mask + space_weight * beta
-        self.mask_space = seq_causal_mask.contiguous().cuda()
+        # mask_space was a [total_token_size, total_token_size] attention mask that was
+        # never read in any forward pass.  With total_token_size = h*w + 3 = 131,075
+        # (for 64x2048 range images), allocating it consumed ~69 GB of memory and
+        # caused an OOM-kill before training could start.  Removed.
 
     def get_block_size(self):
         return self.block_size
