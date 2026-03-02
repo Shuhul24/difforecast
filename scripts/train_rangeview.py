@@ -292,20 +292,19 @@ def train(local_rank, args):
         for i, (range_views, rot_matrix) in enumerate(train_data):
             model.train()
 
-            # Move data to GPU
+            # Move data to GPU — keep [B, T, C, H, W]; the model's DCAE
+            # tokenizer handles the encode/decode internally.
             range_views = range_views.cuda()  # [B, T, C, H, W]
-            rot_matrix = rot_matrix.cuda()    # [B, T, 4, 4]
+            rot_matrix  = rot_matrix.cuda()   # [B, T, 4, 4]
 
-            # Reshape range views to [B, T, L, C] where L = H*W
             B, T, C, H, W = range_views.shape
-            range_views = rearrange(range_views, 'b t c h w -> b t (h w) c')
 
             data_time_interval = time.time() - time_stamp
             torch.cuda.synchronize()
             time_stamp = time.time()
 
             cf = args.condition_frames // args.block_size
-            features_cond = range_views[:, :cf, ...]  # [B, CF, L, C]
+            features_cond = range_views[:, :cf, ...]   # [B, CF, C, H, W]
             rel_pose_cond, rel_yaw_cond = None, None
 
             # Forward iterations
@@ -313,11 +312,14 @@ def train(local_rank, args):
             if step % args.multifw_perstep == 0:
                 fw_iter = args.forward_iter
 
-            # Number of rotation matrices needed per forward pass: (condition_frames + 1) * block_size
+            # Number of rotation matrices needed per forward pass:
+            # (condition_frames + 1) * block_size
             n_rot = (args.condition_frames + 1) * args.block_size
             for j in range(fw_iter):
-                rot_matrix_cond = rot_matrix[:, j * args.block_size:j * args.block_size + n_rot, ...]
-                features_gt = range_views[:, j + cf:j + cf + 1, ...]
+                rot_matrix_cond = rot_matrix[
+                    :, j * args.block_size:j * args.block_size + n_rot, ...
+                ]
+                features_gt = range_views[:, j + cf:j + cf + 1, ...]  # [B, 1, C, H, W]
 
                 # Forward pass with mixed precision
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -327,7 +329,7 @@ def train(local_rank, args):
                         features_gt,
                         rel_pose_cond=rel_pose_cond,
                         rel_yaw_cond=rel_yaw_cond,
-                        step=step
+                        step=step,
                     )
 
                 loss_value = loss_final["loss_all"]
@@ -341,7 +343,8 @@ def train(local_rank, args):
                 model.backward(loss_value)
                 model.step()
 
-                # Prepare for next iteration (autoregressive)
+                # Prepare for next autoregressive iteration.
+                # predict is [(B*CF), C, H, W] decoded range view features.
                 if j < fw_iter - 1:
                     if args.return_predict:
                         predict_features = loss_final["predict"].detach()
@@ -351,13 +354,14 @@ def train(local_rank, args):
                             features_cond,
                             rot_matrix_cond,
                             features_gt,
-                            sample_last=False
+                            sample_last=False,
                         )
                         model.train()
 
+                    # Reshape [(B*CF), C, H, W] → [B, CF, C, H, W] for next iter
                     features_cond = rearrange(
-                        predict_features, '(b t) l c -> b t l c',
-                        b=args.batch_size, t=args.condition_frames // args.block_size
+                        predict_features, '(b t) c h w -> b t c h w',
+                        b=B, t=cf,
                     )
 
             step += 1

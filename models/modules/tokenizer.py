@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-from models.modules.dcae import DCAE, dc_ae_f32c32
+from models.modules.dcae import DCAE, dc_ae_f32c32, dc_ae_f32c32_rangeview
 
 def poses_to_indices(poses, x_divisions=128, y_divisions=128):
     x_min = 0
@@ -100,3 +100,94 @@ class VAETokenizer(nn.Module):
         internal_x, internal_y = torch.floor(x * 16).clip(0, 127), torch.floor((y + 1) * 16).clip(0, 31)
         indices = internal_x * self.latitute_bins + internal_y
         return indices.to(torch.long).unsqueeze(dim=2)
+
+
+class RangeViewVAETokenizer(nn.Module):
+    """DCAE-based tokenizer for multi-channel range view images.
+
+    Mirrors the encoding pattern used by ``VAETokenizer`` for RGB images but
+    accepts ``in_channels``-channel (default 6) range view features.  The
+    encoder is always run under ``torch.no_grad()`` (frozen); the decoder is
+    intentionally *not* wrapped in ``no_grad`` so that auxiliary reconstruction
+    losses (L1, Chamfer) can propagate gradients back through the DiT.
+
+    The spatial compression ratio of the underlying ``dc_ae_f32c32_rangeview``
+    model is 32×, matching ``downsample_size=32`` in the range view config.
+
+    Args:
+        args: Config namespace.  Must expose:
+            - ``args.patch_size``     (int)  patchification factor after DCAE
+            - ``args.vae_embed_dim``  (int)  DCAE latent channels (32)
+            - ``args.range_channels`` (int, optional) input channels (default 6)
+            - ``args.vae_ckpt``       (str, optional) pre-trained DCAE path
+        local_rank: CUDA device index.
+    """
+
+    def __init__(self, args, local_rank: int):
+        super().__init__()
+        self.patch_size = args.patch_size
+        self.vae_embed_dim = args.vae_embed_dim  # latent channels (32 for f32c32)
+        in_channels = getattr(args, 'range_channels', 6)
+        vae_ckpt = getattr(args, 'vae_ckpt', None)
+
+        dcae_cfg = dc_ae_f32c32_rangeview(
+            pretrained_path=vae_ckpt,
+            in_channels=in_channels,
+        )
+        self.vae = DCAE(dcae_cfg)
+        self.vae.cuda(local_rank)
+
+        # Freeze all DCAE parameters — only the STT and DiT are trained.
+        for param in self.vae.parameters():
+            param.requires_grad = False
+        self.vae.eval()
+
+        print(f"RangeViewVAETokenizer: in_channels={in_channels}, "
+              f"latent_channels={self.vae_embed_dim}, vae_ckpt={vae_ckpt}")
+
+    @torch.no_grad()
+    def encode_to_z(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode range view images to latent tokens.
+
+        Args:
+            x: ``[B, T, C, H, W]`` normalised range view features.
+
+        Returns:
+            ``[B, T, L, latent_C]`` latent tokens where
+            ``L = (H / (32*patch_size)) * (W / (32*patch_size))``
+            and ``latent_C = vae_embed_dim * patch_size**2``.
+        """
+        b, t, _, _, _ = x.shape
+        ts = rearrange(x, 'b t c h w -> (b t) c h w')
+        with torch.no_grad():
+            latents = self.vae.encode(ts)          # [(B*T), latent_channels, h_lat, w_lat]
+        latents = patchify(latents, self.patch_size)  # [(B*T), L, latent_C]
+        latents = rearrange(latents, '(b t) L c -> b t L c', b=b, t=t)
+        return latents
+
+    def decode_from_z(
+        self,
+        z: torch.Tensor,
+        h_lat: int,
+        w_lat: int,
+    ) -> torch.Tensor:
+        """Decode latent tokens back to range view features.
+
+        This method does **not** use ``torch.no_grad()`` so that auxiliary
+        reconstruction losses computed on the decoded output can propagate
+        gradients to the DiT's predicted latents (and hence to the DiT
+        weights).  The frozen DCAE weights themselves receive no gradient
+        updates.
+
+        Args:
+            z:     ``[(B*T), L, latent_C]`` latent tokens.
+            h_lat: Latent spatial height  (``H // 32``).
+            w_lat: Latent spatial width   (``W // 32``).
+
+        Returns:
+            ``[(B*T), C, H, W]`` decoded range view features.
+        """
+        z = rearrange(z, 'bt (h w) c -> bt h w c', h=h_lat, w=w_lat)
+        z = unpatchify(z, self.patch_size, self.vae_embed_dim)  # [(B*T), latent_channels, h_lat, w_lat]
+        decoded = self.vae.decode(z)               # [(B*T), in_channels, H, W]
+        return decoded

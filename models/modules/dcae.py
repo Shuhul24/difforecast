@@ -28,7 +28,7 @@ from models.modules.dcae_layers.ops import (
 )
 from utils.utils import format_number
 
-__all__ = ["DCAE", "dc_ae_f32c32", "dc_ae_f64c128", "dc_ae_f128c512"]
+__all__ = ["DCAE", "dc_ae_f32c32", "dc_ae_f32c32_rangeview", "dc_ae_f64c128", "dc_ae_f128c512"]
 
 
 @dataclass
@@ -727,6 +727,24 @@ class DCAE(nn.Module):
             self.load_state_dict(state_dict)
             print(f"load from {self.cfg.pretrained_path}")
             del state_dict
+        elif self.cfg.pretrained_source == "dc-ae-partial":
+            # Partial loading: skip layers whose shapes differ (e.g. different in_channels).
+            # Useful when fine-tuning a pre-trained RGB DCAE for range-view inputs.
+            if self.cfg.pretrained_path.endswith(".safetensors"):
+                state_dict = load_sft(self.cfg.pretrained_path, device="cpu")
+            else:
+                state_dict = torch.load(self.cfg.pretrained_path, map_location="cpu", weights_only=True)["model"]
+            own_state = self.state_dict()
+            matched = {k: v for k, v in state_dict.items()
+                       if k in own_state and own_state[k].shape == v.shape}
+            missing_keys, unexpected_keys = self.load_state_dict(matched, strict=False)
+            n_total = len(own_state)
+            print(f"Partial load from {self.cfg.pretrained_path}: "
+                  f"{len(matched)}/{n_total} params shape-matched and loaded")
+            if missing_keys:
+                print(f"  Randomly initialised ({len(missing_keys)} params): "
+                      f"{missing_keys[:3]}{'...' if len(missing_keys) > 3 else ''}")
+            del state_dict
         else:
             raise NotImplementedError
         
@@ -837,6 +855,51 @@ def dc_ae_f64c128(name: str,
     cfg.add_decoder_temporal = add_decoder_temporal
     cfg.condition_frames = condition_frames
     cfg.token_size = token_size
+    return cfg
+
+
+def dc_ae_f32c32_rangeview(
+    pretrained_path: Optional[str] = None,
+    in_channels: int = 6,
+) -> DCAEConfig:
+    """Create a DCAE f32c32 config for multi-channel range view images.
+
+    Uses the same encoder/decoder architecture as ``dc_ae_f32c32`` (32×
+    spatial compression, 32 latent channels) but accepts ``in_channels``
+    input channels instead of the standard 3-channel RGB.
+
+    When ``pretrained_path`` is provided the weights are loaded with shape-
+    matched partial loading (``pretrained_source="dc-ae-partial"``): all
+    layers whose parameter shapes match the pre-trained checkpoint are
+    initialised from it; the input-/output-channel-dependent layers
+    (``encoder.project_in`` and ``decoder.project_out``) are randomly
+    initialised because they differ in the number of channels.
+
+    Args:
+        pretrained_path: Optional path to a pre-trained dc-ae-f32c32
+            checkpoint (.safetensors or .pt with a ``"model"`` key).
+            Pass ``None`` to initialise all weights randomly.
+        in_channels: Number of input channels (default 6 for range view
+            [range, x, y, z, intensity, label]).
+
+    Returns:
+        DCAEConfig ready to be passed to ``DCAE(cfg)``.
+    """
+    cfg_str = (
+        f"in_channels={in_channels} "
+        "latent_channels=32 "
+        "encoder.block_type=[ResBlock,ResBlock,ResBlock,EViT_GLU,EViT_GLU,EViT_GLU] "
+        "encoder.width_list=[128,256,512,512,1024,1024] encoder.depth_list=[0,4,8,2,2,2] "
+        "decoder.block_type=[ResBlock,ResBlock,ResBlock,EViT_GLU,EViT_GLU,EViT_GLU] "
+        "decoder.width_list=[128,256,512,512,1024,1024] decoder.depth_list=[0,5,10,2,2,2] "
+        "decoder.norm=[bn2d,bn2d,bn2d,trms2d,trms2d,trms2d] "
+        "decoder.act=[relu,relu,relu,silu,silu,silu]"
+    )
+    cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
+    cfg: DCAEConfig = OmegaConf.to_object(OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg))
+    cfg.pretrained_path = pretrained_path
+    if pretrained_path is not None:
+        cfg.pretrained_source = "dc-ae-partial"
     return cfg
 
 
