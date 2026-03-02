@@ -22,6 +22,11 @@ from typing import List, Optional, Tuple, Union
 from collections import defaultdict
 
 
+def check_file_exist(filename):
+    if not osp.isfile(filename):
+        raise FileNotFoundError(f'config file {filename} does not exist')
+
+
 BASE_KEY = '_base_'
 DELETE_KEY = '_delete_'
 DEPRECATION_KEY = '_deprecation_'
