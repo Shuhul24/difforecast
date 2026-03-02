@@ -93,6 +93,54 @@ class RangeProjection(object):
 
         return proj_pointcloud, proj_range, proj_idx, proj_mask
 
+    def back_project_range(self, range_depth: np.ndarray) -> np.ndarray:
+        """Back-project a depth/range map to a 3-D point cloud.
+
+        Inverts ``doProjection`` using the stored FOV parameters.  For each
+        pixel ``(u, v)`` with valid depth ``r > 0`` the 3-D point is:
+
+            yaw   = (u / proj_w) * fov_h  - |fov_left|
+            pitch = (1 - v / proj_h) * fov_v - |fov_down|
+            x =  r * cos(pitch) * cos(yaw)
+            y = -r * cos(pitch) * sin(yaw)   # sign from yaw = -atan2(y, x)
+            z =  r * sin(pitch)
+
+        This is the inverse of the spherical projection used in DiffLoc and
+        adapted here from ``doProjection``.
+
+        Args:
+            range_depth: ``(proj_h, proj_w)`` float array of per-pixel depth
+                         values in metres.  Non-positive values are invalid.
+
+        Returns:
+            ``(N, 3)`` float32 array of valid 3-D points ``(x, y, z)``.
+        """
+        H, W = range_depth.shape
+        assert H == self.proj_h and W == self.proj_w, (
+            f"Depth map shape {range_depth.shape} does not match "
+            f"projection dimensions ({self.proj_h}, {self.proj_w})"
+        )
+
+        # Pixel coordinate grids
+        u = np.arange(W, dtype=np.float32)
+        v = np.arange(H, dtype=np.float32)
+        uu, vv = np.meshgrid(u, v)                          # (H, W) each
+
+        # Recover spherical angles (inverse of doProjection)
+        yaw   = (uu / W) * self.fov_h - abs(self.fov_left)   # (H, W)
+        pitch = (1.0 - vv / H) * self.fov_v - abs(self.fov_down)  # (H, W)
+
+        valid = range_depth > 0.0
+        r = range_depth[valid]
+        p = pitch[valid]
+        y = yaw[valid]
+
+        x_pts =  r * np.cos(p) * np.cos(y)
+        y_pts = -r * np.cos(p) * np.sin(y)    # negative: yaw = -atan2(y, x)
+        z_pts =  r * np.sin(p)
+
+        return np.stack([x_pts, y_pts, z_pts], axis=1).astype(np.float32)
+
 
 class ScanProjection(object):
     '''

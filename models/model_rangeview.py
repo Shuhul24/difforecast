@@ -15,6 +15,12 @@ from models.flux_dit import FluxParams, FluxDiT
 from models.modules.tokenizer import poses_to_indices, yaws_to_indices
 from utils.fft_utils import freq_mix, ideal_low_pass_filter
 from models.modules.sampling import prepare_ids, get_schedule
+from utils.range_losses import (
+    make_valid_mask,
+    range_view_l1_loss,
+    features_to_xyz,
+    batch_chamfer_distance,
+)
 
 
 class RangeViewDiT(nn.Module):
@@ -107,6 +113,22 @@ class RangeViewDiT(nn.Module):
             bs, self.h, self.w, self.total_token_size, 0
         )
 
+        # ------------------------------------------------------------------ #
+        # Auxiliary loss configuration
+        # ------------------------------------------------------------------ #
+        # Normalisation statistics (needed to recover metric xyz / range)
+        self.proj_img_mean = list(
+            getattr(args, 'proj_img_mean', [10.839, 0.005, 0.494, -1.13, 0.0, 0.0])
+        )
+        self.proj_img_stds = list(
+            getattr(args, 'proj_img_stds', [9.314, 11.521, 8.262, 0.828, 1.0, 1.0])
+        )
+
+        # Loss weights (0.0 disables the respective term)
+        self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
+        self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
+        self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
+
         if load_path is not None:
             state_dict = torch.load(load_path, map_location='cpu')["model_state_dict"]
 
@@ -178,11 +200,61 @@ class RangeViewDiT(nn.Module):
         )
 
         diff_loss = loss_terms['loss']
-        predict = loss_terms['predict']
+        predict   = loss_terms['predict']
+
+        # ------------------------------------------------------------------ #
+        # Auxiliary losses (applied on the denoised *predict* estimate)
+        # ------------------------------------------------------------------ #
+        # ``predict`` is the clean-frame estimate: x_t + pred * (1 - t).
+        # Computing reconstruction losses here gives image-space and 3-D
+        # supervision that the flow-matching loss alone cannot provide.
+        # Both losses are gated by their weight so they add zero overhead
+        # when disabled (weight == 0).
+
+        range_l1_loss   = torch.zeros(1, device=targets.device, dtype=targets.dtype)
+        chamfer_loss_val = torch.zeros(1, device=targets.device, dtype=targets.dtype)
+
+        if predict is not None and (self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0):
+            # Valid-pixel mask derived from GT range channel
+            gt_valid = make_valid_mask(
+                targets,
+                range_mean=self.proj_img_mean[0],
+                range_std=self.proj_img_stds[0],
+            )   # [B*F, L]
+
+            if self.range_view_loss_weight > 0:
+                # Per-pixel L1 on all 6 feature channels; masked to GT-valid pixels
+                range_l1_loss = range_view_l1_loss(predict, targets, valid_mask=gt_valid)
+
+            if self.chamfer_loss_weight > 0:
+                # Extract unnormalised xyz from predicted and GT features
+                pred_xyz = features_to_xyz(predict, self.proj_img_mean, self.proj_img_stds)
+                gt_xyz   = features_to_xyz(targets, self.proj_img_mean, self.proj_img_stds)
+
+                # Build valid mask for predictions from their own range channel
+                pred_valid = make_valid_mask(
+                    predict,
+                    range_mean=self.proj_img_mean[0],
+                    range_std=self.proj_img_stds[0],
+                )   # [B*F, L]
+
+                chamfer_loss_val = batch_chamfer_distance(
+                    pred_xyz, gt_xyz,
+                    pred_valid, gt_valid,
+                    max_pts=self.chamfer_max_pts,
+                )
+
+        total_loss = (
+            diff_loss
+            + self.range_view_loss_weight * range_l1_loss
+            + self.chamfer_loss_weight    * chamfer_loss_val
+        )
 
         loss = {
-            "loss_all": diff_loss,
-            "loss_diff": diff_loss,
+            "loss_all":     total_loss,
+            "loss_diff":    diff_loss,
+            "loss_range_l1": range_l1_loss,
+            "loss_chamfer":  chamfer_loss_val,
             "predict": None if not self.args.return_predict else predict,
         }
         return loss

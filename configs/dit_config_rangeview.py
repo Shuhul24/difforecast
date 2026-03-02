@@ -115,6 +115,28 @@ drop_feature = 0  # Dropout probability for features
 diffusion_model_type = "flow"  # Type of diffusion model
 num_sampling_steps = 100  # Number of sampling steps during inference
 
+# ===== Auxiliary Loss Weights =====
+# These are applied to the denoised *predict* estimate produced during training,
+# giving direct image-space and 3-D geometric supervision on top of the
+# flow-matching loss.
+#
+# range_view_loss_weight: scales the per-pixel L1 loss between the predicted
+#   and GT normalised range-view features.  Start small (0.1) and tune up.
+#   Set to 0.0 to disable.
+#
+# chamfer_loss_weight: scales the Chamfer Distance between the 3-D point
+#   clouds recovered from the predicted and GT range-view images.  The xyz
+#   channels already stored in the 6-channel features are used directly so no
+#   separate back-projection step is required during training.
+#   Chamfer values are typically larger; start with 0.01.
+#   Set to 0.0 to disable.
+#
+# chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
+#   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
+range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
+chamfer_loss_weight    = 0.01  # weight for Chamfer Distance loss
+chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
+
 # ===== Training Settings =====
 return_predict = True  # Return predictions during training for visualization
 diff_only = True  # Train only diffusion model (no trajectory planning)

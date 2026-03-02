@@ -369,8 +369,12 @@ def train(local_rank, args):
             # Logging
             if step % 100 == 1 and rank == 0:
                 writer.add_scalar('learning_rate/lr', optimizer.param_groups[0]['lr'], step)
-                writer.add_scalar('loss/loss_all', loss_final["loss_all"].to(torch.float32), step)
+                writer.add_scalar('loss/loss_all',  loss_final["loss_all"].to(torch.float32),  step)
                 writer.add_scalar('loss/loss_diff', loss_final["loss_diff"].to(torch.float32), step)
+                writer.add_scalar('loss/loss_range_l1',
+                                  loss_final["loss_range_l1"].to(torch.float32), step)
+                writer.add_scalar('loss/loss_chamfer',
+                                  loss_final["loss_chamfer"].to(torch.float32),  step)
                 writer.flush()
 
             if rank == 0:
@@ -378,7 +382,9 @@ def train(local_rank, args):
                     f'step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
                     f'lr:{optimizer.param_groups[0]["lr"]:.4e} '
                     f'loss_avg:{loss_final["loss_all"].to(torch.float32):.4e} '
-                    f'diff_loss:{loss_final["loss_diff"].to(torch.float32):.4e}'
+                    f'diff_loss:{loss_final["loss_diff"].to(torch.float32):.4e} '
+                    f'range_l1:{loss_final["loss_range_l1"].to(torch.float32):.4e} '
+                    f'chamfer:{loss_final["loss_chamfer"].to(torch.float32):.4e}'
                 )
 
             # Save checkpoint
