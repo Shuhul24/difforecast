@@ -268,6 +268,12 @@ def train(local_rank, args):
     )
 
     print(f'Training dataloader length: {len(train_data)}')
+    if len(train_data) == 0:
+        raise RuntimeError(
+            "Training dataloader is empty. The dataset contains no samples. "
+            "Please check that 'kitti_sequences_path', 'kitti_poses_path', and "
+            "'train_sequences' are correctly configured and point to existing data."
+        )
     epoch = step // len(train_data) + 1
 
     # Initialize DeepSpeed
