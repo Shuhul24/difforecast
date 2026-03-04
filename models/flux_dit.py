@@ -94,6 +94,14 @@ class FluxDiT(nn.Module):
         if img.ndim != 3 or cond.ndim != 3:
             raise ValueError("Input img and cond tensors must have 3 dimensions.")
 
+        # Cast inputs to model dtype to handle float32/bfloat16 mismatches
+        # that arise when the VAE encoder runs outside the autocast context.
+        dtype = self.img_in.weight.dtype
+        img = img.to(dtype)
+        cond = cond.to(dtype)
+        y = y.to(dtype)
+        timesteps = timesteps.to(dtype)
+
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
@@ -137,7 +145,9 @@ class FluxDiT(nn.Module):
         target = img - noise
         pred = self(img=x_t, img_ids=img_ids, cond=cond, cond_ids=cond_ids, timesteps=t.reshape(-1), y=y, guidance=guidance)
         assert pred.shape == target.shape == img.shape
-        predict = x_t + pred * (1. - t)
+        target = target.to(pred.dtype)
+        x_t = x_t.to(pred.dtype)
+        predict = x_t + pred * (1. - t.to(pred.dtype))
         terms["mse"] = mean_flat((target - pred) ** 2)
         
         terms["loss"] = terms["mse"].mean()
