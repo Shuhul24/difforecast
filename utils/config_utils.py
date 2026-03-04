@@ -182,6 +182,28 @@ def _gather_abs_import_lazyobj(tree: ast.Module,
     tree.body = new_body
     return tree, abs_imported
 
+
+class RemoveAssignFromAST(ast.NodeTransformer):
+    """Remove assignment statements from AST by target name.
+
+    Used to strip ``_base_ = [...]`` lines from a config file's AST so that
+    the ``_base_`` key does not appear in the resulting config dict after the
+    code is compiled and executed.
+
+    Args:
+        key (str): The assignment target name to remove (e.g. ``'_base_'``).
+    """
+
+    def __init__(self, key):
+        self.key = key
+
+    def visit_Assign(self, node):
+        if (isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == self.key):
+            return None
+        return node
+
+
 class ImportTransformer(ast.NodeTransformer):
     """Convert the import syntax to the assignment of
     :class:`mmengine.config.LazyObject` and preload the base variable before
