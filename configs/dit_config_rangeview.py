@@ -96,7 +96,7 @@ n_embd = 2048  # Embedding dimension for STT
 # Diffusion Transformer (DiT)
 n_embd_dit = 2048  # Hidden size for DiT
 n_head_dit = 16  # Number of attention heads for DiT
-axes_dim_dit = [16, 64, 64]  # Axes dimensions for rotary position encoding (adjusted for KITTI dimensions)
+axes_dim_dit = [16, 48, 64]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 128
 
 # Pose/Trajectory encoding
 pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
