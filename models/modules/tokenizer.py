@@ -160,7 +160,8 @@ class RangeViewVAETokenizer(nn.Module):
         b, t, _, _, _ = x.shape
         ts = rearrange(x, 'b t c h w -> (b t) c h w')
         with torch.no_grad():
-            latents = self.vae.encode(ts)          # [(B*T), latent_channels, h_lat, w_lat]
+            vae_dtype = next(self.vae.parameters()).dtype
+            latents = self.vae.encode(ts.to(vae_dtype))  # [(B*T), latent_channels, h_lat, w_lat]
         latents = patchify(latents, self.patch_size)  # [(B*T), L, latent_C]
         latents = rearrange(latents, '(b t) L c -> b t L c', b=b, t=t)
         return latents
@@ -189,5 +190,6 @@ class RangeViewVAETokenizer(nn.Module):
         """
         z = rearrange(z, 'bt (h w) c -> bt h w c', h=h_lat, w=w_lat)
         z = unpatchify(z, self.patch_size, self.vae_embed_dim)  # [(B*T), latent_channels, h_lat, w_lat]
-        decoded = self.vae.decode(z)               # [(B*T), in_channels, H, W]
+        vae_dtype = next(self.vae.parameters()).dtype
+        decoded = self.vae.decode(z.to(vae_dtype))  # [(B*T), in_channels, H, W]
         return decoded
