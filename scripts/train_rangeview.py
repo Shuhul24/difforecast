@@ -34,7 +34,6 @@ from models.model_rangeview import RangeViewDiT
 from dataset.dataset_kitti_rangeview import KITTIRangeViewTrainDataset, KITTIRangeViewValDataset
 from utils.comm import _init_dist_envi
 from utils.running import init_lr_schedule, save_ckpt, load_parameters, add_weight_decay, save_ckpt_deepspeed, load_from_deepspeed_ckpt
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 logger = logging.getLogger('base')
 
@@ -212,9 +211,6 @@ def train(local_rank, args):
     print(f"STT Parameters: {format_number(stt_params)}")
     print(f"DiT Parameters: {format_number(dit_params)}")
 
-    # Wrap with DDP
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-
     # Calculate effective batch size
     eff_batch_size = args.batch_size * args.condition_frames // args.block_size * dist.get_world_size()
 
@@ -227,7 +223,7 @@ def train(local_rank, args):
     print(f"Effective batch size: {eff_batch_size}")
 
     # Create optimizer
-    param_groups = add_weight_decay(model.module, args.weight_decay)
+    param_groups = add_weight_decay(model, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(f"Optimizer: {optimizer}")
 
@@ -238,7 +234,7 @@ def train(local_rank, args):
     if args.resume_path is not None:
         checkpoint = torch.load(args.resume_path, map_location="cpu")
         print(f"Loading model from: {args.resume_path}")
-        model.module = load_parameters(model.module, checkpoint)
+        model = load_parameters(model, checkpoint)
         del checkpoint
 
     # Create dataset
