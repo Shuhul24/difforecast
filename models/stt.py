@@ -373,12 +373,13 @@ class SpatialTemporalTransformer(nn.Module):
             module.weight.data.fill_(1.0)
 
     def get_yaw_pose_emb(self, pose_indices, yaw_indices):
+        target_dtype = self.yaw_projector[0].weight.dtype
         if pose_indices == None:
             yaw_indices_normalize = yaw_indices / self.yaw_vocab_num
-            yaw_emb = get_fourier_embeds_from_coordinates( 
+            yaw_emb = get_fourier_embeds_from_coordinates(
                 self.yaw_pose_emb_dim,
                 yaw_indices_normalize)
-            return yaw_emb, None, None
+            return yaw_emb.to(target_dtype), None, None
         elif pose_indices is not None and (pose_indices.shape[-1]==1):
             yaw_indices_normalize = yaw_indices / self.yaw_vocab_num
             pose_x_indices_normalize = pose_indices[:, :, 0:1] / self.pose_x_vocab_num
@@ -386,17 +387,17 @@ class SpatialTemporalTransformer(nn.Module):
                 self.yaw_pose_emb_dim,
                 torch.cat([yaw_indices_normalize, pose_x_indices_normalize], dim=-1), )
             yaw_emb, pose_x_emb = torch.split(yaw_pose_emb, dim=2, split_size_or_sections=1)
-            return yaw_emb, pose_x_emb, None
+            return yaw_emb.to(target_dtype), pose_x_emb.to(target_dtype), None
         else :
             yaw_indices_normalize = yaw_indices / self.yaw_vocab_num
             pose_x_indices_normalize = pose_indices[:, :, 0:1] / self.pose_x_vocab_num
             pose_y_indices_normalize = pose_indices[:, :, 1:2] / self.pose_y_vocab_num
             yaw_pose_emb = get_fourier_embeds_from_coordinates(
                 self.yaw_pose_emb_dim,
-                torch.cat([yaw_indices_normalize, pose_x_indices_normalize, pose_y_indices_normalize], dim=-1), 
+                torch.cat([yaw_indices_normalize, pose_x_indices_normalize, pose_y_indices_normalize], dim=-1),
                 )
             yaw_emb, pose_x_emb, pose_y_emb = torch.split(yaw_pose_emb, dim=2, split_size_or_sections=1)
-            return yaw_emb, pose_x_emb, pose_y_emb
+            return yaw_emb.to(target_dtype), pose_x_emb.to(target_dtype), pose_y_emb.to(target_dtype)
 
     def forward(self, feature_total, pose_indices_total, yaw_indices_total, drop_feature=0):
         """
