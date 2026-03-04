@@ -89,13 +89,13 @@ augmentation_config = {
 
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
-n_layer = [12, 6, 6]  # Number of layers [STT, DiT double blocks, DiT single blocks]
-n_head = 16  # Number of attention heads for STT
-n_embd = 2048  # Embedding dimension for STT
+n_layer = [6, 4, 4]  # Number of layers [STT, DiT double blocks, DiT single blocks]
+n_head = 8  # Number of attention heads for STT
+n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 2048  # Hidden size for DiT
-n_head_dit = 16  # Number of attention heads for DiT
+n_embd_dit = 1024  # Hidden size for DiT
+n_head_dit = 8  # Number of attention heads for DiT
 axes_dim_dit = [16, 64, 64]  # Axes dimensions for rotary position encoding (adjusted for KITTI dimensions)
 
 # Pose/Trajectory encoding
