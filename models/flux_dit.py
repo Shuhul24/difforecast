@@ -94,6 +94,14 @@ class FluxDiT(nn.Module):
         if img.ndim != 3 or cond.ndim != 3:
             raise ValueError("Input img and cond tensors must have 3 dimensions.")
 
+        # Cast inputs to model dtype to handle float32/bfloat16 mismatches
+        # that arise when the VAE encoder runs outside the autocast context.
+        dtype = self.img_in.weight.dtype
+        img = img.to(dtype)
+        cond = cond.to(dtype)
+        y = y.to(dtype)
+        timesteps = timesteps.to(dtype)
+
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
