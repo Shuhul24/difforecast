@@ -145,7 +145,9 @@ class FluxDiT(nn.Module):
         target = img - noise
         pred = self(img=x_t, img_ids=img_ids, cond=cond, cond_ids=cond_ids, timesteps=t.reshape(-1), y=y, guidance=guidance)
         assert pred.shape == target.shape == img.shape
-        predict = x_t + pred * (1. - t)
+        target = target.to(pred.dtype)
+        x_t = x_t.to(pred.dtype)
+        predict = x_t + pred * (1. - t.to(pred.dtype))
         terms["mse"] = mean_flat((target - pred) ** 2)
         
         terms["loss"] = terms["mse"].mean()

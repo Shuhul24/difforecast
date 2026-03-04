@@ -410,10 +410,11 @@ class SpatialTemporalTransformer(nn.Module):
         F = F - 1
         yaw_emb_total, pose_x_emb_total, pose_y_emb_total = self.get_yaw_pose_emb(pose_indices_total, yaw_indices_total)
         # Get embeddings of all tokens
-        pose_x_token_embeddings = self.pose_x_projector(pose_x_emb_total) 
+        target_dtype = self.img_projector[0].weight.dtype
+        pose_x_token_embeddings = self.pose_x_projector(pose_x_emb_total)
         pose_y_token_embeddings = self.pose_y_projector(pose_y_emb_total)
         yaw_token_embeddings = self.yaw_projector(yaw_emb_total)
-        feature_embeddings = self.img_projector(feature_total)
+        feature_embeddings = self.img_projector(feature_total.to(target_dtype))
         pose_x_token_embeddings = rearrange(pose_x_token_embeddings, "B (F T) L C -> B F (L T) C", F=F+1, T=self.temporal_block)
         pose_y_token_embeddings = rearrange(pose_y_token_embeddings, "B (F T) L C -> B F (L T) C", F=F+1, T=self.temporal_block)
         yaw_token_embeddings = rearrange(yaw_token_embeddings, "B (F T) L C -> B F (L T) C", F=F+1, T=self.temporal_block)
@@ -467,7 +468,7 @@ class SpatialTemporalTransformer(nn.Module):
         input_pose_y_token_embeddings = pose_y_token_embeddings[:, :-1, ...]
         input_yaw_token_embeddings = yaw_token_embeddings[:, :-1, ...]
 
-        feature_embeddings = self.img_projector(feature)
+        feature_embeddings = self.img_projector(feature.to(self.img_projector[0].weight.dtype))
         yaw_pose_scale_token_embeddings = torch.cat([input_yaw_token_embeddings, input_pose_x_token_embeddings, input_pose_y_token_embeddings, feature_embeddings], dim=2)
         B, F, _, _ = yaw_pose_scale_token_embeddings.shape
         # yaw_pose_scale_token_embeddings = rearrange(yaw_pose_scale_token_embeddings, 'b F L c -> b (F L) c')
