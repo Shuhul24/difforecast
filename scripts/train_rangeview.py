@@ -21,6 +21,7 @@ import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 import deepspeed
+import wandb
 
 # Add Epona root to path BEFORE importing local modules
 root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +57,12 @@ def add_arguments():
     parser.add_argument('--overfit', action='store_true', help='Overfit on small subset')
     parser.add_argument('--eval_steps', type=int, default=2000, help='Checkpoint save interval')
     parser.add_argument('--load_from_deepspeed', default=None, type=str, help='Load from DeepSpeed checkpoint')
+    parser.add_argument('--wandb_project', type=str, default='difforecast-rangeview',
+                        help='Weights & Biases project name')
+    parser.add_argument('--wandb_run_name', type=str, default=None,
+                        help='W&B run name (defaults to --exp_name)')
+    parser.add_argument('--no_wandb', action='store_true',
+                        help='Disable Weights & Biases logging')
 
     args = parser.parse_args()
     cfg = Config.fromfile(args.config)
@@ -87,6 +94,16 @@ def init_logs(global_rank, args):
 
         args.writer = writer
         args.writer_val = writer_val
+
+        # Setup Weights & Biases (rank-0 only)
+        if not getattr(args, 'no_wandb', False):
+            wandb.init(
+                project=getattr(args, 'wandb_project', 'difforecast-rangeview'),
+                name=getattr(args, 'wandb_run_name', None) or args.exp_name,
+                config={k: v for k, v in vars(args).items()
+                        if isinstance(v, (int, float, str, bool, type(None)))},
+                resume='allow',
+            )
     else:
         args.writer = None
         args.writer_val = None
@@ -377,12 +394,29 @@ def train(local_rank, args):
 
             # Logging
             if step % 100 == 1 and rank == 0:
-                writer.add_scalar('learning_rate/lr', optimizer.param_groups[0]['lr'], step)
-                writer.add_scalar('loss/loss_all',      loss_final["loss_all"].item(),      step)
-                writer.add_scalar('loss/loss_diff',     loss_final["loss_diff"].item(),     step)
-                writer.add_scalar('loss/loss_range_l1', loss_final["loss_range_l1"].item(), step)
-                writer.add_scalar('loss/loss_chamfer',  loss_final["loss_chamfer"].item(),  step)
+                current_lr     = optimizer.param_groups[0]['lr']
+                loss_all_val   = loss_final["loss_all"].item()
+                loss_diff_val  = loss_final["loss_diff"].item()
+                loss_rl1_val   = loss_final["loss_range_l1"].item()
+                loss_cd_val    = loss_final["loss_chamfer"].item()
+
+                # TensorBoard
+                writer.add_scalar('learning_rate/lr',   current_lr,    step)
+                writer.add_scalar('loss/loss_all',      loss_all_val,  step)
+                writer.add_scalar('loss/loss_diff',     loss_diff_val, step)
+                writer.add_scalar('loss/loss_range_l1', loss_rl1_val,  step)
+                writer.add_scalar('loss/loss_chamfer',  loss_cd_val,   step)
                 writer.flush()
+
+                # Weights & Biases
+                if not getattr(args, 'no_wandb', False) and wandb.run is not None:
+                    wandb.log({
+                        'loss/loss_all':      loss_all_val,
+                        'loss/loss_diff':     loss_diff_val,
+                        'loss/loss_range_l1': loss_rl1_val,
+                        'loss/loss_chamfer':  loss_cd_val,
+                        'learning_rate/lr':   current_lr,
+                    }, step=step)
 
             if rank == 0:
                 logger.info(
@@ -407,6 +441,10 @@ def train(local_rank, args):
 
         epoch += 1
         dist.barrier()
+
+    # Clean up W&B run on rank 0 when training finishes normally
+    if rank == 0 and not getattr(args, 'no_wandb', False) and wandb.run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":
