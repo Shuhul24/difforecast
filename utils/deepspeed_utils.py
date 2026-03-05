@@ -15,16 +15,12 @@ def get_deepspeed_config(args):
         #     'stage': 1,
         # }
         
-        # adjust following parameters with comments.
+        # ZeRO stage 0 is used to avoid the count_used_parameters_in_backward
+        # assertion that requires internal PyTorch APIs unavailable in this build.
+        # With a single GPU, ZeRO stages 1/2 provide no memory benefit from
+        # optimizer-state partitioning, so stage 0 is equivalent in practice.
         config_params["zero_optimization"] = {
-            "stage": 2,
-            "allgather_partitions": True,
-            "allgather_bucket_size":  3e8, #
-            "overlap_comm": False,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 3e8, #
-            "contiguous_gradients": False, #
-            "ignore_unused_parameters": True,
+            "stage": 0,
         }
 
 
