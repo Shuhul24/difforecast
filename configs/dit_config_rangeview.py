@@ -8,9 +8,9 @@ seed = 43
 
 # ===== Dataset Configuration =====
 # KITTI Odometry Dataset
-kitti_root = '/scratch/p24cs0005/kitti'  # Root path to KITTI dataset
-kitti_sequences_path = '/scratch/p24cs0005/kitti/dataset/sequences'  # Path to sequences
-kitti_poses_path = '/scratch/p24cs0005/kitti/poses'  # Path to ground truth poses
+kitti_root = '/DATA2/shuhul/kitti'  # Root path to KITTI dataset
+kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequences
+kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
 train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
@@ -128,7 +128,7 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 #     h_lat = range_h // downsample_size = 64  // 32 = 2
 #     w_lat = range_w // downsample_size = 2048 // 32 = 64
 #   → img_token_size = 2 × 64 = 128 tokens per frame.
-vae_ckpt = None          # set to path of pre-trained DCAE weights if available
+vae_ckpt = '/home/shuhul/weights/model.safetensors.1'          # set to path of pre-trained DCAE weights if available
 vae_embed_dim = 32       # DCAE latent channels (dc_ae_f32c32)
 add_encoder_temporal = False
 add_decoder_temporal = False

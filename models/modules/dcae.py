@@ -720,20 +720,20 @@ class DCAE(nn.Module):
 
     def load_model(self):
         if self.cfg.pretrained_source == "dc-ae":
-            if self.cfg.pretrained_path.endswith(".safetensors"):
+            if ".safetensors" in self.cfg.pretrained_path:
                 state_dict = load_sft(self.cfg.pretrained_path, device="cpu")
             else:
-                state_dict = torch.load(self.cfg.pretrained_path, map_location="cpu", weights_only=True)["model"]
+                state_dict = torch.load(self.cfg.pretrained_path, map_location="cpu", weights_only=False)["model"]
             self.load_state_dict(state_dict)
             print(f"load from {self.cfg.pretrained_path}")
             del state_dict
         elif self.cfg.pretrained_source == "dc-ae-partial":
             # Partial loading: skip layers whose shapes differ (e.g. different in_channels).
             # Useful when fine-tuning a pre-trained RGB DCAE for range-view inputs.
-            if self.cfg.pretrained_path.endswith(".safetensors"):
+            if ".safetensors" in self.cfg.pretrained_path:
                 state_dict = load_sft(self.cfg.pretrained_path, device="cpu")
             else:
-                state_dict = torch.load(self.cfg.pretrained_path, map_location="cpu", weights_only=True)["model"]
+                state_dict = torch.load(self.cfg.pretrained_path, map_location="cpu", weights_only=False)["model"]
             own_state = self.state_dict()
             matched = {k: v for k, v in state_dict.items()
                        if k in own_state and own_state[k].shape == v.shape}
