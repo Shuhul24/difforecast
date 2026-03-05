@@ -24,6 +24,7 @@ def get_deepspeed_config(args):
             "reduce_scatter": True,
             "reduce_bucket_size": 3e8, #
             "contiguous_gradients": False, #
+            "ignore_unused_parameters": True,
         }
 
 
