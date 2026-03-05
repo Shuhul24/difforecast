@@ -144,6 +144,43 @@ sbatch scripts/submit_rangeview_slurm.sh
 
 ---
 
+## DCAE Pre-trained Weights
+
+The `RangeViewVAETokenizer` (defined in `models/modules/tokenizer.py`) wraps a `dc_ae_f32c32_rangeview` DCAE model built entirely from local code in `models/modules/dcae.py`. **No weights are fetched from any library or Hugging Face Hub at runtime.** The encoder is kept strictly frozen during training (all parameters have `requires_grad=False`).
+
+### Where weights come from
+
+Epona (the upstream project this work is based on) initialises its RGB DCAE from the **`dc-ae-f32c32-mix-1.0`** checkpoint released by MIT Han Lab:
+
+> **[mit-han-lab/dc-ae-f32c32-mix-1.0](https://huggingface.co/mit-han-lab/dc-ae-f32c32-mix-1.0)**
+
+For the range-view case the same checkpoint is used as a warm-start via **partial loading**: every layer whose weight shape matches the 3-channel RGB checkpoint is initialised from it. The two channel-sensitive layers — `encoder.project_in` (3 → 128 ch) and `decoder.project_out` (128 → 3 ch) — differ from the 6-channel range-view variant and are therefore **randomly initialised**. This is handled automatically by `dc_ae_f32c32_rangeview` when `pretrained_path` is set (`pretrained_source = "dc-ae-partial"`).
+
+### Downloading the weights
+
+```bash
+# Install the Hugging Face Hub CLI if not already available
+pip install huggingface_hub
+
+# Download the safetensors checkpoint (~400 MB)
+huggingface-cli download mit-han-lab/dc-ae-f32c32-mix-1.0 \
+    --include "model.safetensors" \
+    --local-dir /path/to/weights/dc-ae-f32c32-mix-1.0
+```
+
+### Updating the path
+
+Open `configs/dit_config_rangeview.py` and set `vae_ckpt` to the downloaded file:
+
+```python
+# configs/dit_config_rangeview.py  (line ~131)
+vae_ckpt = '/path/to/weights/dc-ae-f32c32-mix-1.0/model.safetensors'
+```
+
+Setting `vae_ckpt = None` (the current default) initialises the entire DCAE randomly, which requires significantly more training iterations for the encoder to converge.
+
+---
+
 ## Acknowledgement
 
-Built on [Epona](https://github.com/FoundationVision/Epona), [DrivingWorld](https://github.com/YvanYin/DrivingWorld), [Flux](https://github.com/black-forest-labs/flux), and [DCAE](https://github.com/mit-han-lab/efficientvit/tree/master/applications/dc_ae).
+Built on [Epona](https://github.com/Kevin-thu/Epona), [DrivingWorld](https://github.com/YvanYin/DrivingWorld), [Flux](https://github.com/black-forest-labs/flux), and [DCAE](https://github.com/mit-han-lab/efficientvit/tree/master/applications/dc_ae).
