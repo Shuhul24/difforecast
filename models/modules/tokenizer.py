@@ -142,6 +142,12 @@ class RangeViewVAETokenizer(nn.Module):
             param.requires_grad = False
         self.vae.eval()
 
+        # Convert VAE to bf16 so that decoder activations (which are stored for
+        # backward through the reconstruction loss) are in bf16, not fp32.
+        # The checkpoint loads fp32 weights regardless of the default dtype, so
+        # this explicit cast is needed to halve the decoder's activation memory.
+        self.vae = self.vae.to(torch.bfloat16)
+
         print(f"RangeViewVAETokenizer: in_channels={in_channels}, "
               f"latent_channels={self.vae_embed_dim}, vae_ckpt={vae_ckpt}")
 

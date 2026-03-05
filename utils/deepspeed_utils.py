@@ -11,35 +11,19 @@ def get_deepspeed_config(args):
             'top_modules': 3,
             'detailed': True,
         }
-        # config_params['zero_optimization'] ={
-        #     'stage': 1,
-        # }
-        
-        # ZeRO stage 0 is used to avoid the count_used_parameters_in_backward
-        # assertion that requires internal PyTorch APIs unavailable in this build.
-        # With a single GPU, ZeRO stages 1/2 provide no memory benefit from
-        # optimizer-state partitioning, so stage 0 is equivalent in practice.
+        # ZeRO Stage 2 with CPU optimizer offload:
+        # - Keeps Adam optimizer states (exp_avg, exp_avg_sq) on CPU, preventing
+        #   GPU OOM when initializing optimizer states for a large bf16 model.
+        # - Stage 2 has far less initialization overhead than Stage 3 (no parameter
+        #   partitioning), which avoids the SIGKILL from CPU RAM exhaustion on init.
+        # - Requires PyTorch >= 2.2 for the count_used_parameters_in_backward API.
         config_params["zero_optimization"] = {
-            "stage": 0,
+            "stage": 2,
+            "offload_optimizer": {
+                "device": "cpu",
+                "pin_memory": True,
+            },
         }
-
-
-        # config_params["train_micro_batch_size_per_gpu"] = int(args.batch_size),
-        # # config_params["train_batch_size"]="auto",
-        # config_params["gradient_accumulation_steps"]="auto",
-        # config_params['zero_optimization'] = {
-        #     "stage": 3,
-        #     "overlap_comm": True, 
-        #     "contiguous_gradients": True, 
-        #     "sub_group_size": 1e9, 
-        #     "reduce_bucket_size": "auto", 
-        #     "stage3_prefetch_bucket_size": "auto",
-        #     "stage3_param_persistence_threshold": "auto",
-        #     "stage3_max_live_parameters": 1e9,
-        #     "stage3_max_reuse_distance": 1e9,
-        #     "stage3_gather_16bit_weights_on_model_save": True
-
-        # }
         config_params['bf16'] = {
             "enabled": True,
         }

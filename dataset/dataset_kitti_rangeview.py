@@ -5,7 +5,7 @@ Reads directly from KITTI Odometry directory structure (no JSON required).
 Uses RangeProjection and Augmentor utilities.
 
 Returns per sample:
-    range_views : FloatTensor [T, 6, H, W]   (condition_frames + 1 frames)
+    range_views : FloatTensor [T, 3, H, W]   (condition_frames + 1 frames)
     poses       : FloatTensor [T, 4, 4]       absolute 4×4 pose matrices
 """
 
@@ -81,16 +81,16 @@ class KITTIRangeViewDataset(Dataset):
         condition_frames : Number of *conditioning* frames; total window = condition_frames + 1.
         h / w            : Range image height / width.
         fov_*            : Vertical / horizontal field-of-view limits (degrees).
-        proj_img_mean/stds: Per-channel normalisation for [range, x, y, z, intensity, label].
+        proj_img_mean/stds: Per-channel normalisation for [range, intensity, z].
         augmentation_config: Dict of augmentation parameters (training only); ``None`` disables.
         pc_extension     : Point-cloud file extension (default ``.bin``).
         pc_dtype / pc_reshape: NumPy dtype and reshape tuple for loading binary PCs.
         is_train         : Enables training-mode stride and augmentation.
     """
 
-    # Default normalisation stats for [range, x, y, z, intensity, label]
-    _DEFAULT_MEAN = [10.839,  0.005,  0.494, -1.13, 0., 0.]
-    _DEFAULT_STD  = [ 9.314, 11.521,  8.262,  0.828, 1., 1.]
+    # Default normalisation stats for [range, intensity, z]
+    _DEFAULT_MEAN = [10.839,  0.,    -1.13]
+    _DEFAULT_STD  = [ 9.314,  1.,     0.828]
 
     # Sliding-window stride when is_train=True
     TRAIN_STRIDE = 5
@@ -187,9 +187,16 @@ class KITTIRangeViewDataset(Dataset):
             return None
 
     def _project(self, pc):
-        """Project a point cloud to a normalised [6, H, W] feature tensor.
+        """Project a point cloud to a normalised [3, H, W] feature tensor.
 
-        Channels: [range, x, y, z, intensity, label].
+        Channels: [range, intensity, z].
+        - range:     primary LiDAR depth measurement.
+        - intensity: surface reflectivity (non-redundant with range).
+        - z:         elevation — the most geometry-informative xyz component.
+        x and y are dropped (recoverable from range + scan geometry) and the
+        label channel is dropped (all zeros for KITTI).  Using 3 channels
+        matches the original RGB DC-AE input/output shape, allowing all
+        checkpoint weights to be loaded without random initialisation.
         Unoccupied pixels are zeroed via the projection mask.
         """
         proj_pc, proj_range, _, proj_mask = self.projection.doProjection(pc)
@@ -198,11 +205,10 @@ class KITTIRangeViewDataset(Dataset):
         xyz    = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)        # [3, H, W]
         intens = (torch.from_numpy(proj_pc[..., 3])
                   if pc.shape[1] >= 4 else torch.zeros_like(depth))         # [H, W]
-        label  = (torch.from_numpy(proj_pc[..., 4])
-                  if pc.shape[1] >= 5 else torch.zeros_like(depth))         # [H, W]
         mask   = torch.from_numpy(proj_mask.astype(np.float32))             # [H, W]
 
-        feat = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0), label.unsqueeze(0)], 0)
+        # [range, intensity, z]
+        feat = torch.stack([depth, intens, xyz[2]], dim=0)                  # [3, H, W]
         feat = (feat - self.mean[:, None, None]) / self.std[:, None, None]
         return feat * mask.unsqueeze(0)
 
@@ -224,7 +230,7 @@ class KITTIRangeViewDataset(Dataset):
             views.append(self._project(pc))
 
         return (
-            torch.stack(views),                            # [T, 6, H, W]
+            torch.stack(views),                            # [T, 3, H, W]
             torch.from_numpy(np.array(poses)).float(),     # [T, 4, 4]
         )
 

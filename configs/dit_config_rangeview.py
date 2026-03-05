@@ -32,17 +32,18 @@ fov_right = 180.0  # Right field of view (degrees)
 # Range image resolution for KITTI
 range_h = 64  # Height of range image (64-beam LiDAR)
 range_w = 2048  # Width of range image (full 360-degree coverage)
-range_channels = 6  # Number of channels: [range, x, y, z, intensity, label] - label will be zeros for KITTI
+range_channels = 3  # Channels: [range, intensity, z] — matches RGB DC-AE shape → all weights loaded from checkpoint
 
 # Image size for processing (this is the range view size)
 image_size = (64, 2048)  # Fixed for KITTI
 
 # ===== Feature Normalization =====
 # KITTI Odometry dataset statistics (computed from training sequences 0-5)
-# Format: [range, x, y, z, intensity, label]
-# Note: label channel is all zeros for KITTI (no semantic labels)
-proj_img_mean = [10.839, 0.005, 0.494, -1.13, 0.0, 0.0]
-proj_img_stds = [9.314, 11.521, 8.262, 0.828, 1.0, 1.0]
+# Format: [range, intensity, z]
+# x, y dropped (redundant given range + scan geometry); label dropped (zeros for KITTI).
+# 3 channels matches the original RGB DC-AE shape → all checkpoint weights loaded, no random init.
+proj_img_mean = [10.839, 0.0, -1.13]   # [range, intensity, z]
+proj_img_stds = [9.314,  1.0,  0.828]  # [range, intensity, z]
 
 # ===== Training Parameters =====
 downsample_fps = 10  # KITTI is at 10 Hz
@@ -89,13 +90,16 @@ augmentation_config = {
 
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
-n_layer = [12, 6, 6]  # Number of layers [STT, DiT double blocks, DiT single blocks]
-n_head = 16  # Number of attention heads for STT
-n_embd = 2048  # Embedding dimension for STT
+# Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
+# n_embd halved → params scale as n_embd², giving ~7× fewer trainable params (~370M).
+# axes_dim_dit must sum to n_embd_dit // n_head_dit = 1024 // 8 = 128 (unchanged).
+n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
+n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
+n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 2048  # Hidden size for DiT
-n_head_dit = 16  # Number of attention heads for DiT
+n_embd_dit = 1024  # Hidden size for DiT
+n_head_dit = 8  # Number of attention heads for DiT (head_dim = 1024 // 8 = 128)
 axes_dim_dit = [16, 48, 64]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 128
 
 # Pose/Trajectory encoding
@@ -162,7 +166,7 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 # chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
 #   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
 range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
-chamfer_loss_weight    = 0.01  # weight for Chamfer Distance loss
+chamfer_loss_weight    = 0.0   # disabled — xyz channels removed; re-enable with pytorch3d when needed
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== Training Settings =====

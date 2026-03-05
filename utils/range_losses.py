@@ -61,7 +61,11 @@ def range_view_l1_loss(
     target: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Per-pixel L1 loss on normalised range-view features.
+    """Per-pixel L1 loss on the depth (range) channel only.
+
+    Evaluating only channel 0 (range/depth) is semantically correct for a
+    "range view loss" — intensity and z have different physical scales and
+    meanings, so including them would dilute the depth supervision signal.
 
     Args:
         pred:       ``[..., C]`` predicted (normalised) range features.
@@ -71,13 +75,13 @@ def range_view_l1_loss(
                     dominate.
 
     Returns:
-        Scalar L1 loss.
+        Scalar L1 loss on the range channel.
     """
-    loss = torch.abs(pred - target)          # [..., C]
+    loss = torch.abs(pred[..., 0] - target[..., 0])   # [...] — depth channel only
     if valid_mask is not None:
-        mask = valid_mask.unsqueeze(-1).float()   # [..., 1]
+        mask = valid_mask.float()
         loss = loss * mask
-        return loss.sum() / (mask.sum() * pred.shape[-1] + 1e-8)
+        return loss.sum() / (mask.sum() + 1e-8)
     return loss.mean()
 
 

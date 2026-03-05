@@ -13,6 +13,7 @@ import logging
 import argparse
 from einops import rearrange
 import numpy as np
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 import torch.distributed as dist
 import torch.utils
 from torch.utils.data import DataLoader, Subset, DistributedSampler
@@ -43,7 +44,7 @@ def add_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Train Range View DiT Model')
     parser.add_argument('--iter', default=60000000, type=int, help='Total training iterations')
-    parser.add_argument('--batch_size', default=1, type=int, help='Batch size per GPU')
+    parser.add_argument('--batch_size', default=4, type=int, help='Batch size per GPU')
     parser.add_argument('--config', required=True, type=str, help='Path to config file')
     parser.add_argument('--lr', type=float, default=None, help='Learning rate (absolute)')
     parser.add_argument('--blr', type=float, default=1e-4, help='Base learning rate')
@@ -196,13 +197,16 @@ def train(local_rank, args):
     save_model_path = args.save_model_path
     step = args.resume_step
 
-    # Create model
+    # Create model directly in bf16 to avoid the fp32→bf16 conversion peak
+    # (which temporarily holds both copies, doubling CPU RAM usage).
     print("Creating Range View DiT model...")
+    torch.set_default_dtype(torch.bfloat16)
     model = RangeViewDiT(
         args,
         local_rank=local_rank,
         condition_frames=args.condition_frames // args.block_size
     )
+    torch.set_default_dtype(torch.float32)
 
     # Count parameters
     total_params = count_parameters(model)
@@ -225,7 +229,11 @@ def train(local_rank, args):
 
     # Create optimizer
     param_groups = add_weight_decay(model, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    # DeepSpeedCPUAdam is required for ZeRO Stage 2 + CPU offload:
+    # it applies the Adam update directly from bf16 gradients without
+    # materialising a full fp32 gradient tensor (~10 GB for 2.53B params),
+    # preventing CPU RAM OOM during the optimizer step.
+    optimizer = DeepSpeedCPUAdam(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(f"Optimizer: {optimizer}")
 
     # Learning rate schedule
@@ -370,22 +378,20 @@ def train(local_rank, args):
             # Logging
             if step % 100 == 1 and rank == 0:
                 writer.add_scalar('learning_rate/lr', optimizer.param_groups[0]['lr'], step)
-                writer.add_scalar('loss/loss_all',  loss_final["loss_all"].to(torch.float32),  step)
-                writer.add_scalar('loss/loss_diff', loss_final["loss_diff"].to(torch.float32), step)
-                writer.add_scalar('loss/loss_range_l1',
-                                  loss_final["loss_range_l1"].to(torch.float32), step)
-                writer.add_scalar('loss/loss_chamfer',
-                                  loss_final["loss_chamfer"].to(torch.float32),  step)
+                writer.add_scalar('loss/loss_all',      loss_final["loss_all"].item(),      step)
+                writer.add_scalar('loss/loss_diff',     loss_final["loss_diff"].item(),     step)
+                writer.add_scalar('loss/loss_range_l1', loss_final["loss_range_l1"].item(), step)
+                writer.add_scalar('loss/loss_chamfer',  loss_final["loss_chamfer"].item(),  step)
                 writer.flush()
 
             if rank == 0:
                 logger.info(
                     f'step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
                     f'lr:{optimizer.param_groups[0]["lr"]:.4e} '
-                    f'loss_avg:{loss_final["loss_all"].to(torch.float32):.4e} '
-                    f'diff_loss:{loss_final["loss_diff"].to(torch.float32):.4e} '
-                    f'range_l1:{loss_final["loss_range_l1"].to(torch.float32):.4e} '
-                    f'chamfer:{loss_final["loss_chamfer"].to(torch.float32):.4e}'
+                    f'loss_avg:{loss_final["loss_all"].item():.4e} '
+                    f'diff_loss:{loss_final["loss_diff"].item():.4e} '
+                    f'range_l1:{loss_final["loss_range_l1"].item():.4e} '
+                    f'chamfer:{loss_final["loss_chamfer"].item():.4e}'
                 )
 
             # Save checkpoint
