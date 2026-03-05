@@ -20,7 +20,7 @@ def get_deepspeed_config(args):
             "stage": 2,
             "allgather_partitions": True,
             "allgather_bucket_size":  3e8, #
-            "overlap_comm": True, #False,
+            "overlap_comm": False,
             "reduce_scatter": True,
             "reduce_bucket_size": 3e8, #
             "contiguous_gradients": False, #
