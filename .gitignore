@@ -10,9 +10,9 @@ outpus/*
 
 __pycache__/*
 
-eval_results/*
+eval_results/
 
-wandb/*
+wandb/
 
 logs/*
 logs/*/*
