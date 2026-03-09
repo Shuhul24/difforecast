@@ -156,16 +156,19 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #   Set to 0.0 to disable.
 #
 # chamfer_loss_weight: scales the Chamfer Distance between the 3-D point
-#   clouds recovered from the predicted and GT range-view images.  The xyz
-#   channels already stored in the 6-channel features are used directly so no
-#   separate back-projection step is required during training.
-#   Chamfer values are typically larger; start with 0.01.
+#   clouds recovered from the predicted and GT range-view depth maps.  The
+#   depth channel (ch 0) is unnormalised to metres and back-projected via
+#   RangeViewProjection (spherical geometry), so xyz channels in the feature
+#   tensor are NOT required — works with any number of channels including the
+#   default 2-ch [range, intensity] format.
+#   Requires: git submodule update --init && pip install -e pyTorchChamferDistance
+#   Chamfer values are typically in tens of metres²; start with 0.01.
 #   Set to 0.0 to disable.
 #
 # chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
 #   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
 range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
-chamfer_loss_weight    = 0.0   # disabled — no xyz channels in 2-ch [range, intensity] format
+chamfer_loss_weight    = 0.01  # weight for 3-D Chamfer distance loss (requires pyTorchChamferDistance)
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== Training Settings =====

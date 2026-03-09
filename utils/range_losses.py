@@ -17,8 +17,106 @@ Two complementary signals on top of the flow-matching (diffusion) loss:
      inference time.
 """
 
+import math
+import os
+import sys
 import torch
 import torch.nn.functional as F
+
+# ---------------------------------------------------------------------------
+# pyTorchChamferDistance — lazy import (CUDA extension compiled on first use)
+# ---------------------------------------------------------------------------
+# Inspired by ATPPNet (https://github.com/kaustabpal/ATPPNet) which uses this
+# library as a git submodule for efficient Chamfer distance computation.
+# The submodule has no setup.py; it is used directly from the repo root via
+# sys.path.  Setup: git submodule update --init  (no pip install needed).
+# ---------------------------------------------------------------------------
+
+# Repo root = two levels up from utils/range_losses.py
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_chamfer_fn = None
+_CHAMFER_AVAILABLE: bool | None = None   # None = not yet attempted
+
+
+def _get_chamfer_fn():
+    """Return a lazily-initialised ChamferDistance instance (singleton)."""
+    global _chamfer_fn, _CHAMFER_AVAILABLE
+    if _CHAMFER_AVAILABLE is None:
+        # Make the submodule importable by ensuring the repo root is on sys.path
+        if _REPO_ROOT not in sys.path:
+            sys.path.insert(0, _REPO_ROOT)
+        try:
+            from pyTorchChamferDistance.chamfer_distance import ChamferDistance
+            _chamfer_fn        = ChamferDistance()
+            _CHAMFER_AVAILABLE = True
+        except Exception as e:
+            _CHAMFER_AVAILABLE = False
+            _get_chamfer_fn._last_err = str(e)
+    if not _CHAMFER_AVAILABLE:
+        err = getattr(_get_chamfer_fn, '_last_err', '')
+        raise RuntimeError(
+            "pyTorchChamferDistance failed to load"
+            + (f" ({err})" if err else "") + ".\n"
+            "Run:  git submodule update --init\n"
+            "Then ensure nvcc is available for CUDA JIT compilation."
+        )
+    return _chamfer_fn
+
+
+# ---------------------------------------------------------------------------
+# Range-view → 3-D back-projection
+# ---------------------------------------------------------------------------
+
+class RangeViewProjection:
+    """Precomputes per-pixel spherical ray directions for depth → xyz back-projection.
+
+    Inspired by ATPPNet's projection utility:
+    https://github.com/kaustabpal/ATPPNet/blob/main/atppnet/utils/projection.py
+
+    Stores (x_fac, y_fac, z_fac) unit-vector factors so that
+    ``xyz = depth * (x_fac, y_fac, z_fac)`` gives metric 3-D coordinates
+    directly — no repeated trigonometry at training time.
+    """
+
+    def __init__(self, fov_up: float, fov_down: float, H: int, W: int):
+        """
+        Args:
+            fov_up:   Upper vertical field of view (degrees, positive above horizon).
+            fov_down: Lower vertical field of view (degrees, negative below horizon).
+            H, W:     Range image height and width in pixels.
+        """
+        fov_up_r   = fov_up   / 180.0 * math.pi
+        fov_down_r = fov_down / 180.0 * math.pi
+        fov        = abs(fov_down_r) + abs(fov_up_r)
+
+        h = torch.arange(H, dtype=torch.float32).view(H, 1).expand(H, W)
+        w = torch.arange(W, dtype=torch.float32).view(1, W).expand(H, W)
+
+        yaw   = math.pi * (1.0 - 2.0 * w / W)
+        pitch = (1.0 - h / H) * fov - abs(fov_down_r)
+
+        cos_pitch = torch.cos(pitch)
+        # Flatten to [H*W] so we can broadcast over the batch dimension.
+        self.x_fac = (cos_pitch * torch.cos(yaw)).reshape(-1)   # [L]
+        self.y_fac = (cos_pitch * torch.sin(yaw)).reshape(-1)   # [L]
+        self.z_fac = torch.sin(pitch).reshape(-1)               # [L]
+
+    def depth_to_xyz(self, depth: torch.Tensor) -> torch.Tensor:
+        """Back-project a flat depth map to 3-D Cartesian coordinates.
+
+        Args:
+            depth: ``[B, L]`` depth values in metres (0 = invalid).
+
+        Returns:
+            ``[B, L, 3]`` xyz coordinates in metres.
+        """
+        dev = depth.device
+        dt  = depth.dtype
+        x = depth * self.x_fac.to(device=dev, dtype=dt)
+        y = depth * self.y_fac.to(device=dev, dtype=dt)
+        z = depth * self.z_fac.to(device=dev, dtype=dt)
+        return torch.stack([x, y, z], dim=-1)   # [B, L, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -116,51 +214,47 @@ def features_to_xyz(
 
 
 # ---------------------------------------------------------------------------
-# Chamfer Distance
+# Chamfer Distance Loss (CUDA-accelerated via pyTorchChamferDistance)
 # ---------------------------------------------------------------------------
 
-def _chamfer_single(pc1: torch.Tensor, pc2: torch.Tensor) -> torch.Tensor:
-    """Symmetric Chamfer Distance between two small point clouds.
-
-    Args:
-        pc1: ``[N, 3]``
-        pc2: ``[M, 3]``
-
-    Returns:
-        Scalar: mean(min_dist pc1→pc2) + mean(min_dist pc2→pc1).
-    """
-    diff  = pc1.unsqueeze(1) - pc2.unsqueeze(0)   # [N, M, 3]
-    dist2 = (diff ** 2).sum(dim=-1)               # [N, M]
-    d1 = dist2.min(dim=1)[0].mean()               # each pc1 pt → nearest pc2
-    d2 = dist2.min(dim=0)[0].mean()               # each pc2 pt → nearest pc1
-    return d1 + d2
-
-
 def batch_chamfer_distance(
-    pred_xyz: torch.Tensor,
-    gt_xyz: torch.Tensor,
+    pred_depth: torch.Tensor,
+    gt_depth: torch.Tensor,
     pred_valid: torch.Tensor,
     gt_valid: torch.Tensor,
+    projector: RangeViewProjection,
     max_pts: int = 2048,
 ) -> torch.Tensor:
-    """Batched Chamfer Distance with random subsampling for efficiency.
+    """Batched Chamfer Distance using the CUDA-accelerated pyTorchChamferDistance kernel.
 
-    A full range image has H*W ≈ 131 072 pixels; computing O(N²) distances
-    over all of them is prohibitive.  We randomly subsample up to ``max_pts``
-    valid points per cloud before calling the pairwise distance kernel.
+    Inspired by the ``chamfer_distance`` loss class in ATPPNet:
+    https://github.com/kaustabpal/ATPPNet/blob/main/atppnet/models/loss.py
+
+    Depth maps are back-projected to 3-D via ``projector`` before computing
+    the pairwise nearest-neighbour distances.  Random subsampling keeps the
+    O(N²) distance matrix tractable for full-resolution range images.
 
     Args:
-        pred_xyz:   ``[B, L, 3]`` predicted xyz (unnormalised, metres).
-        gt_xyz:     ``[B, L, 3]`` GT xyz (unnormalised, metres).
-        pred_valid: ``[B, L]``    bool mask for predicted valid pixels.
-        gt_valid:   ``[B, L]``    bool mask for GT valid pixels.
-        max_pts:    max points to sample per cloud.
+        pred_depth:  ``[B, L]`` predicted depth in metres (0 = invalid).
+        gt_depth:    ``[B, L]`` GT depth in metres (0 = invalid).
+        pred_valid:  ``[B, L]`` bool mask — True where predicted pixel is valid.
+        gt_valid:    ``[B, L]`` bool mask — True where GT pixel is valid.
+        projector:   :class:`RangeViewProjection` for depth → xyz back-projection.
+        max_pts:     Maximum points sampled per cloud (reduces O(N²) cost).
 
     Returns:
-        Mean Chamfer distance over valid batch elements (scalar).
+        Mean symmetric Chamfer distance over valid batch elements (scalar tensor).
     """
-    B = pred_xyz.shape[0]
-    total_cd  = pred_xyz.new_zeros(())
+    chamfer_fn = _get_chamfer_fn()
+
+    # Back-project depth maps to 3-D coordinates [B, L, 3]
+    pred_xyz = projector.depth_to_xyz(pred_depth)
+    gt_xyz   = projector.depth_to_xyz(gt_depth)
+
+    B         = pred_xyz.shape[0]
+    # Always accumulate in float32: the CUDA kernel returns float32 tensors
+    # regardless of the input dtype (e.g. bfloat16 under autocast).
+    total_cd  = torch.zeros((), device=pred_depth.device, dtype=torch.float32)
     valid_cnt = 0
 
     for b in range(B):
@@ -177,9 +271,11 @@ def batch_chamfer_distance(
             idx = torch.randperm(pc2.shape[0], device=pc2.device)[:max_pts]
             pc2 = pc2[idx]
 
-        total_cd  = total_cd + _chamfer_single(pc1, pc2)
+        # ChamferDistance expects [1, N, 3]; returns squared distances [1, N] and [1, M]
+        dist1, dist2 = chamfer_fn(pc1.unsqueeze(0).float(), pc2.unsqueeze(0).float())
+        total_cd  += torch.mean(dist1) + torch.mean(dist2)
         valid_cnt += 1
 
     if valid_cnt == 0:
-        return total_cd          # zero; keeps computation graph intact
-    return total_cd / valid_cnt
+        return total_cd.to(pred_depth.dtype)   # zero; keeps computation graph intact
+    return (total_cd / valid_cnt).to(pred_depth.dtype)

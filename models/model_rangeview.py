@@ -36,7 +36,7 @@ from models.modules.sampling import prepare_ids, get_schedule
 from utils.range_losses import (
     make_valid_mask,
     range_view_l1_loss,
-    features_to_xyz,
+    RangeViewProjection,
     batch_chamfer_distance,
 )
 
@@ -167,6 +167,16 @@ class RangeViewDiT(nn.Module):
         self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
+
+        # Spherical back-projection for Chamfer distance loss.
+        # Precomputes per-pixel (x, y, z) ray-direction factors from the
+        # LiDAR FOV so that xyz = depth * factor at training time.
+        self.range_projector = RangeViewProjection(
+            fov_up=float(getattr(args, 'fov_up',   3.0)),
+            fov_down=float(getattr(args, 'fov_down', -25.0)),
+            H=int(getattr(args, 'range_h', 64)),
+            W=int(getattr(args, 'range_w', 2048)),
+        )
 
         # ------------------------------------------------------------------ #
         # Optional checkpoint loading (STT + DiT only; tokenizer is separate)
@@ -301,18 +311,24 @@ class RangeViewDiT(nn.Module):
                     )
 
                 if self.chamfer_loss_weight > 0:
-                    pred_xyz = features_to_xyz(pred_tok, self.proj_img_mean, self.proj_img_stds)
-                    gt_xyz   = features_to_xyz(target_tok, self.proj_img_mean, self.proj_img_stds)
+                    range_mean = self.proj_img_mean[0]
+                    range_std  = self.proj_img_stds[0]
+
+                    # Unnormalize depth channel (ch 0) from feature space to metres.
+                    # Works for any number of feature channels — no xyz channels needed.
+                    pred_depth = pred_tok[..., 0] * range_std + range_mean    # [B, L]
+                    gt_depth   = target_tok[..., 0] * range_std + range_mean  # [B, L]
 
                     pred_valid = make_valid_mask(
                         pred_tok,
-                        range_mean=self.proj_img_mean[0],
-                        range_std=self.proj_img_stds[0],
+                        range_mean=range_mean,
+                        range_std=range_std,
                     )
 
                     chamfer_loss_val = batch_chamfer_distance(
-                        pred_xyz, gt_xyz,
+                        pred_depth, gt_depth,
                         pred_valid, gt_valid,
+                        projector=self.range_projector,
                         max_pts=self.chamfer_max_pts,
                     )
 
