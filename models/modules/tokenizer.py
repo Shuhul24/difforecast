@@ -134,16 +134,20 @@ class RangeViewVAETokenizer(nn.Module):
         self.vae = RangeLDMVAE(ckpt_path=vae_ckpt)
         self.vae.cuda(local_rank)
 
-        # Freeze all VAE parameters — only the STT and DiT are trained.
-        for param in self.vae.parameters():
-            param.requires_grad = False
-        self.vae.eval()
+        # VAE parameters are trainable when no pre-trained checkpoint is provided.
+        # With a checkpoint, freeze them to preserve the learned codec.
+        if vae_ckpt is None:
+            for param in self.vae.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.vae.parameters():
+                param.requires_grad = False
+            self.vae.eval()
 
         print(f"RangeViewVAETokenizer (RangeLDM): in_channels=2, "
               f"z_channels={self.vae_embed_dim}, patch_size={self.patch_size}, "
               f"vae_ckpt={vae_ckpt}")
 
-    @torch.no_grad()
     def encode_to_z(self, x: torch.Tensor) -> torch.Tensor:
         """Encode 2-channel range view images to latent tokens.
 
@@ -157,10 +161,9 @@ class RangeViewVAETokenizer(nn.Module):
         """
         b, t, _, _, _ = x.shape
         ts = rearrange(x, 'b t c h w -> (b t) c h w')  # [(B*T), 2, H, W]
-        with torch.no_grad():
-            vae_dtype = next(self.vae.parameters()).dtype
-            latents = self.vae.encode(ts.to(vae_dtype))  # [(B*T), z_ch, H/4, W/4]
-        latents = patchify(latents, self.patch_size)   # [(B*T), L, latent_C]
+        vae_dtype = next(self.vae.parameters()).dtype
+        latents = self.vae.encode(ts.to(vae_dtype))     # [(B*T), z_ch, H/4, W/4]
+        latents = patchify(latents, self.patch_size)     # [(B*T), L, latent_C]
         latents = rearrange(latents, '(b t) L c -> b t L c', b=b, t=t)
         return latents
 
