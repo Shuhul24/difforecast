@@ -32,18 +32,17 @@ fov_right = 180.0  # Right field of view (degrees)
 # Range image resolution for KITTI
 range_h = 64  # Height of range image (64-beam LiDAR)
 range_w = 2048  # Width of range image (full 360-degree coverage)
-range_channels = 3  # Channels: [range, intensity, z] — matches RGB DC-AE shape → all weights loaded from checkpoint
+range_channels = 2  # [range, intensity] — matches RangeLDM VAE in_channels=2
 
 # Image size for processing (this is the range view size)
 image_size = (64, 2048)  # Fixed for KITTI
 
 # ===== Feature Normalization =====
 # KITTI Odometry dataset statistics (computed from training sequences 0-5)
-# Format: [range, intensity, z]
-# x, y dropped (redundant given range + scan geometry); label dropped (zeros for KITTI).
-# 3 channels matches the original RGB DC-AE shape → all checkpoint weights loaded, no random init.
-proj_img_mean = [10.839, 0.0, -1.13]   # [range, intensity, z]
-proj_img_stds = [9.314,  1.0,  0.828]  # [range, intensity, z]
+# Format: [range, intensity]
+# Matches the 2-channel input/output of the RangeLDM VAE.
+proj_img_mean = [10.839, 0.0]  # [range, intensity]
+proj_img_stds = [9.314,  1.0]  # [range, intensity]
 
 # ===== Training Parameters =====
 downsample_fps = 10  # KITTI is at 10 Hz
@@ -110,37 +109,37 @@ pose_x_bound = 50  # Bound for x-axis pose (meters)
 pose_y_bound = 10  # Bound for y-axis pose (meters)
 yaw_bound = 12  # Bound for yaw angle (degrees)
 
-# ===== DCAE Tokenizer Configuration =====
-# The range view images are encoded to latent space with a DCAE before being
-# fed to the STT and DiT, mirroring the encoding pattern used by Epona for RGB
-# images.  The dc_ae_f32c32_rangeview variant has 6 input channels and 32
-# latent channels, providing a 32× spatial compression (64×2048 → 2×64 = 128
-# latent tokens per frame — tractable for the transformer).
+# ===== RangeLDM VAE Tokenizer Configuration =====
+# Range view images are encoded with the RangeLDM VAE (kitti360 config):
+#   Encoder/Decoder: 2-ch range image → 4× spatial compression → z_channels=4
+#   Architecture: ch=64, ch_mult=[1,2,4], circular=True, act='silu'
 #
-# vae_ckpt: path to a pre-trained dc-ae-f32c32 checkpoint (.safetensors or
-#   .pt).  When set, all layers whose weight shapes match the checkpoint are
-#   initialised from it; the channel-dependent input/output convolutions are
-#   randomly initialised because they differ (6 vs 3 channels).
-#   Set to None to initialise the entire DCAE randomly (requires more training
-#   iterations for the encoder to converge).
+# vae_ckpt: path to a RangeLDM training checkpoint (.ckpt) whose state_dict
+#   contains 'encoder.*' and 'decoder.*' keys.
+#   Set to None to randomly initialise the VAE (not recommended for quality).
 #
-# vae_embed_dim: DCAE latent channels.  Must match the chosen model
-#   (32 for dc_ae_f32c32).
+# vae_embed_dim: VAE latent channels (z_channels=4 for RangeLDM kitti360).
 #
-# downsample_size: DCAE spatial compression factor (32 for f32c32).
-#   This determines the latent spatial dimensions:
-#     h_lat = range_h // downsample_size = 64  // 32 = 2
-#     w_lat = range_w // downsample_size = 2048 // 32 = 64
-#   → img_token_size = 2 × 64 = 128 tokens per frame.
-vae_ckpt = '/home/shuhul/weights/model.safetensors.1'          # set to path of pre-trained DCAE weights if available
-vae_embed_dim = 32       # DCAE latent channels (dc_ae_f32c32)
+# downsample_size: VAE spatial compression factor (4× for RangeLDM).
+#   Latent spatial dimensions:
+#     h_lat_vae = 64   // 4 = 16
+#     w_lat_vae = 2048 // 4 = 512
+#
+# patch_size: Further spatial grouping applied after VAE encoding.
+#   With patch_size=8 and 4× VAE compression:
+#     h_tok = 16  // 8 = 2
+#     w_tok = 512 // 8 = 64
+#   → img_token_size = 2 × 64 = 128 tokens per frame  (same as DC-AE path)
+#   → latent_C = vae_embed_dim × patch_size² = 4 × 64 = 256
+vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
+vae_embed_dim = 4        # RangeLDM z_channels
 add_encoder_temporal = False
 add_decoder_temporal = False
 temporal_patch_size = 1
 
 # Feature processing
-downsample_size = 32  # DCAE f32c32 spatial compression factor (32×)
-patch_size = 1  # Patch size for tokenization (applied after DCAE encoding)
+downsample_size = 4   # RangeLDM VAE spatial compression factor (4×)
+patch_size = 8        # Patchification after VAE (keeps img_token_size = 128)
 drop_feature = 0  # Dropout probability for features
 
 # ===== Diffusion Configuration =====
@@ -166,7 +165,7 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 # chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
 #   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
 range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
-chamfer_loss_weight    = 0.0   # disabled — xyz channels removed; re-enable with pytorch3d when needed
+chamfer_loss_weight    = 0.0   # disabled — no xyz channels in 2-ch [range, intensity] format
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== Training Settings =====
@@ -175,10 +174,10 @@ diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
 
 # ===== Output Directories =====
-outdir = "exp/ckpt"  # Checkpoint directory
-logdir = "exp/job_log"  # Log directory
-tdir = "exp/job_tboard"  # TensorBoard directory
-validation_dir = "exp/validation"  # Validation output directory
+outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory
+logdir = "/DATA2/shuhul/exp/job_log"  # Log directory
+tdir = "/DATA2/shuhul/exp/job_tboard"  # TensorBoard directory
+validation_dir = "/DATA2/shuhul/exp/validation"  # Validation output directory
 
 # ===== Data Loading =====
 num_workers = 8  # Number of data loading workers

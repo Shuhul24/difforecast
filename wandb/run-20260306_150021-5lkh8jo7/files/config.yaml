@@ -1,0 +1,301 @@
+_filename:
+    value: configs/dit_config_rangeview.py
+_format_python_code:
+    value: true
+_text:
+    value: |
+        /home/shuhul/difforecast/configs/dit_config_rangeview.py
+        """
+        Configuration file for Range View DiT Training
+        This config is for training the simplified DiT model on range view images
+        """
+
+        # Random seed (KITTI experiment seed)
+        seed = 43
+
+        # ===== Dataset Configuration =====
+        # KITTI Odometry Dataset
+        kitti_root = '/DATA2/shuhul/kitti'  # Root path to KITTI dataset
+        kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequences
+        kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
+
+        # KITTI sequence splits (following KITTI Odometry format)
+        train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
+        val_sequences = [6, 7]  # Validation sequences
+        test_sequences = [8, 9, 10]  # Test sequences
+
+        # Point cloud file settings for KITTI
+        pc_extension = '.bin'  # Point cloud file extension
+        pc_dtype = 'float32'  # Data type for loading point cloud
+        pc_reshape = (-1, 4)  # KITTI: (x, y, z, intensity) - 4 channels only
+
+        # ===== Range View Projection Parameters =====
+        # KITTI Velodyne HDL-64E LiDAR specifications
+        fov_up = 3.0  # Upper field of view (degrees) for KITTI
+        fov_down = -25.0  # Lower field of view (degrees) for KITTI
+        fov_left = -180.0  # Left field of view (degrees)
+        fov_right = 180.0  # Right field of view (degrees)
+
+        # Range image resolution for KITTI
+        range_h = 64  # Height of range image (64-beam LiDAR)
+        range_w = 2048  # Width of range image (full 360-degree coverage)
+        range_channels = 3  # Channels: [range, intensity, z] — matches RGB DC-AE shape → all weights loaded from checkpoint
+
+        # Image size for processing (this is the range view size)
+        image_size = (64, 2048)  # Fixed for KITTI
+
+        # ===== Feature Normalization =====
+        # KITTI Odometry dataset statistics (computed from training sequences 0-5)
+        # Format: [range, intensity, z]
+        # x, y dropped (redundant given range + scan geometry); label dropped (zeros for KITTI).
+        # 3 channels matches the original RGB DC-AE shape → all checkpoint weights loaded, no random init.
+        proj_img_mean = [10.839, 0.0, -1.13]   # [range, intensity, z]
+        proj_img_stds = [9.314,  1.0,  0.828]  # [range, intensity, z]
+
+        # ===== Training Parameters =====
+        downsample_fps = 10  # KITTI is at 10 Hz
+        condition_frames = 5  # Number of past frames (N_PAST_STEPS from KITTI config)
+        block_size = 1  # Temporal block size
+        forward_iter = 5  # Number of future frames to predict (N_FUTURE_STEPS from KITTI config)
+        multifw_perstep = 10  # Apply multi-forward every N steps
+
+        # Augmentation
+        mask_data = 0  # 1 means apply masking, 0 means no masking
+        pkeep = 0.7  # Percentage of latent codes to keep
+        paug = 0  # Augmentation probability
+        reverse_seq = False
+
+        # Data augmentation configuration
+        augmentation_config = {
+            # Translation augmentation
+            'p_transx': 0.5,
+            'trans_xmin': -0.5,
+            'trans_xmax': 0.5,
+            'p_transy': 0.5,
+            'trans_ymin': -0.5,
+            'trans_ymax': 0.5,
+            'p_transz': 0.5,
+            'trans_zmin': -0.1,
+            'trans_zmax': 0.1,
+
+            # Rotation augmentation
+            'p_rot_roll': 0.5,
+            'rot_rollmin': -5.0,
+            'rot_rollmax': 5.0,
+            'p_rot_pitch': 0.5,
+            'rot_pitchmin': -5.0,
+            'rot_pitchmax': 5.0,
+            'p_rot_yaw': 0.5,
+            'rot_yawmin': -5.0,
+            'rot_yawmax': 5.0,
+
+            # Scale augmentation
+            'p_scale': 0.5,
+            'scale_min': 0.95,
+            'scale_max': 1.05,
+        }
+
+        # ===== Model Configuration =====
+        # Spatial-Temporal Transformer
+        # Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
+        # n_embd halved → params scale as n_embd², giving ~7× fewer trainable params (~370M).
+        # axes_dim_dit must sum to n_embd_dit // n_head_dit = 1024 // 8 = 128 (unchanged).
+        n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
+        n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
+        n_embd = 1024  # Embedding dimension for STT
+
+        # Diffusion Transformer (DiT)
+        n_embd_dit = 1024  # Hidden size for DiT
+        n_head_dit = 8  # Number of attention heads for DiT (head_dim = 1024 // 8 = 128)
+        axes_dim_dit = [16, 48, 64]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 128
+
+        # Pose/Trajectory encoding
+        pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
+        pose_y_vocab_size = 128  # Vocabulary size for y-axis pose
+        yaw_vocab_size = 512  # Vocabulary size for yaw angle
+        pose_x_bound = 50  # Bound for x-axis pose (meters)
+        pose_y_bound = 10  # Bound for y-axis pose (meters)
+        yaw_bound = 12  # Bound for yaw angle (degrees)
+
+        # ===== DCAE Tokenizer Configuration =====
+        # The range view images are encoded to latent space with a DCAE before being
+        # fed to the STT and DiT, mirroring the encoding pattern used by Epona for RGB
+        # images.  The dc_ae_f32c32_rangeview variant has 6 input channels and 32
+        # latent channels, providing a 32× spatial compression (64×2048 → 2×64 = 128
+        # latent tokens per frame — tractable for the transformer).
+        #
+        # vae_ckpt: path to a pre-trained dc-ae-f32c32 checkpoint (.safetensors or
+        #   .pt).  When set, all layers whose weight shapes match the checkpoint are
+        #   initialised from it; the channel-dependent input/output convolutions are
+        #   randomly initialised because they differ (6 vs 3 channels).
+        #   Set to None to initialise the entire DCAE randomly (requires more training
+        #   iterations for the encoder to converge).
+        #
+        # vae_embed_dim: DCAE latent channels.  Must match the chosen model
+        #   (32 for dc_ae_f32c32).
+        #
+        # downsample_size: DCAE spatial compression factor (32 for f32c32).
+        #   This determines the latent spatial dimensions:
+        #     h_lat = range_h // downsample_size = 64  // 32 = 2
+        #     w_lat = range_w // downsample_size = 2048 // 32 = 64
+        #   → img_token_size = 2 × 64 = 128 tokens per frame.
+        vae_ckpt = '/home/shuhul/weights/model.safetensors.1'          # set to path of pre-trained DCAE weights if available
+        vae_embed_dim = 32       # DCAE latent channels (dc_ae_f32c32)
+        add_encoder_temporal = False
+        add_decoder_temporal = False
+        temporal_patch_size = 1
+
+        # Feature processing
+        downsample_size = 32  # DCAE f32c32 spatial compression factor (32×)
+        patch_size = 1  # Patch size for tokenization (applied after DCAE encoding)
+        drop_feature = 0  # Dropout probability for features
+
+        # ===== Diffusion Configuration =====
+        diffusion_model_type = "flow"  # Type of diffusion model
+        num_sampling_steps = 100  # Number of sampling steps during inference
+
+        # ===== Auxiliary Loss Weights =====
+        # These are applied to the denoised *predict* estimate produced during training,
+        # giving direct image-space and 3-D geometric supervision on top of the
+        # flow-matching loss.
+        #
+        # range_view_loss_weight: scales the per-pixel L1 loss between the predicted
+        #   and GT normalised range-view features.  Start small (0.1) and tune up.
+        #   Set to 0.0 to disable.
+        #
+        # chamfer_loss_weight: scales the Chamfer Distance between the 3-D point
+        #   clouds recovered from the predicted and GT range-view images.  The xyz
+        #   channels already stored in the 6-channel features are used directly so no
+        #   separate back-projection step is required during training.
+        #   Chamfer values are typically larger; start with 0.01.
+        #   Set to 0.0 to disable.
+        #
+        # chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
+        #   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
+        range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
+        chamfer_loss_weight    = 0.0   # disabled — xyz channels removed; re-enable with pytorch3d when needed
+        chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
+
+        # ===== Training Settings =====
+        return_predict = True  # Return predictions during training for visualization
+        diff_only = True  # Train only diffusion model (no trajectory planning)
+        no_pose = False  # Whether to use pose information
+
+        # ===== Output Directories =====
+        outdir = "exp/ckpt"  # Checkpoint directory
+        logdir = "exp/job_log"  # Log directory
+        tdir = "exp/job_tboard"  # TensorBoard directory
+        validation_dir = "exp/validation"  # Validation output directory
+
+        # ===== Data Loading =====
+        num_workers = 8  # Number of data loading workers
+
+        # ===== Distributed Training =====
+        distributed = True  # Enable distributed training
+
+        # ===== Example Usage =====
+        """
+        To train with this config on KITTI:
+
+        # Recommended hyperparameters from KITTI experiment:
+        # - batch_size: 4
+        # - lr: 0.0003 (3e-4)
+        # - max_epoch: 100
+        # - num_gpus: 1
+
+        # Single GPU training
+        export NODES_NUM=1
+        export GPUS_NUM=1
+
+        torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
+          scripts/train_rangeview.py \\
+          --batch_size 4 \\
+          --lr 0.0003 \\
+          --exp_name "kitti-rangeview-training" \\
+          --config configs/dit_config_rangeview.py \\
+          --eval_steps 2000
+
+        # Multi-GPU training (if available)
+        export NODES_NUM=1
+        export GPUS_NUM=4
+
+        torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
+          scripts/train_rangeview.py \\
+          --batch_size 1 \\
+          --lr 0.0003 \\
+          --exp_name "kitti-rangeview-training-multigpu" \\
+          --config configs/dit_config_rangeview.py \\
+          --eval_steps 2000
+
+        # To resume from a checkpoint:
+        torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
+          scripts/train_rangeview.py \\
+          --batch_size 4 \\
+          --lr 0.0003 \\
+          --exp_name "kitti-rangeview-resume" \\
+          --config configs/dit_config_rangeview.py \\
+          --resume_path "exp/ckpt/kitti-rangeview-training/rangeview_dit_10000.pkl" \\
+          --resume_step 10000 \\
+          --eval_steps 2000
+        """
+_wandb:
+    value:
+        cli_version: 0.25.0
+        e:
+            3p0xknu4golrd7m5ve83171vw0oh86ng:
+                args:
+                    - --batch_size
+                    - "4"
+                    - --lr
+                    - "3e-4"
+                    - --exp_name
+                    - kitti_rangeview
+                    - --config
+                    - configs/dit_config_rangeview.py
+                    - --eval_steps
+                    - "2000"
+                codePath: scripts/train_rangeview.py
+                codePathLocal: scripts/train_rangeview.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "1967317549056"
+                        used: "1740992729088"
+                email: p24cs0005@iitj.ac.in
+                executable: /home/shuhul/miniconda3/envs/difforecast/bin/python3.10
+                git:
+                    commit: 921ee3b4c70b7ed7f95a31ee46362c93d4170bb6
+                    remote: https://github.com/Shuhul24/difforecast.git
+                gpu: NVIDIA RTX A6000
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-570189a0-036b-13a6-c73d-8f37f3f6dfc6
+                host: baymax
+                memory:
+                    total: "67254587392"
+                os: Linux-6.8.0-87-generic-x86_64-with-glibc2.35
+                program: /home/shuhul/difforecast/scripts/train_rangeview.py
+                python: CPython 3.10.19
+                root: /home/shuhul/difforecast
+                startedAt: "2026-03-06T09:30:21.799398Z"
+                writerId: 3p0xknu4golrd7m5ve83171vw0oh86ng
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 13
+                - 16
+            "4": 3.10.19
+            "5": 0.25.0
+            "12": 0.25.0
+            "13": linux-x86_64

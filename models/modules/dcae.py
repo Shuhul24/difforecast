@@ -858,35 +858,24 @@ def dc_ae_f64c128(name: str,
     return cfg
 
 
-def dc_ae_f32c32_rangeview(
-    pretrained_path: Optional[str] = None,
-    in_channels: int = 6,
-) -> DCAEConfig:
-    """Create a DCAE f32c32 config for multi-channel range view images.
+def dc_ae_f32c32_rangeview(pretrained_path: Optional[str] = None) -> DCAEConfig:
+    """Create a DCAE f32c32 config for depth-only range view images.
 
-    Uses the same encoder/decoder architecture as ``dc_ae_f32c32`` (32×
-    spatial compression, 32 latent channels) but accepts ``in_channels``
-    input channels instead of the standard 3-channel RGB.
-
-    When ``pretrained_path`` is provided the weights are loaded with shape-
-    matched partial loading (``pretrained_source="dc-ae-partial"``): all
-    layers whose parameter shapes match the pre-trained checkpoint are
-    initialised from it; the input-/output-channel-dependent layers
-    (``encoder.project_in`` and ``decoder.project_out``) are randomly
-    initialised because they differ in the number of channels.
+    Uses ``in_channels=3`` (same as the RGB pretrained checkpoint).  The
+    range view tokenizer feeds 3 identical copies of the depth channel so
+    that every encoder AND decoder weight can be loaded directly from the
+    pre-trained checkpoint with no random initialisation.
 
     Args:
         pretrained_path: Optional path to a pre-trained dc-ae-f32c32
             checkpoint (.safetensors or .pt with a ``"model"`` key).
             Pass ``None`` to initialise all weights randomly.
-        in_channels: Number of input channels (default 6 for range view
-            [range, x, y, z, intensity, label]).
 
     Returns:
         DCAEConfig ready to be passed to ``DCAE(cfg)``.
     """
     cfg_str = (
-        f"in_channels={in_channels} "
+        "in_channels=3 "
         "latent_channels=32 "
         "encoder.block_type=[ResBlock,ResBlock,ResBlock,EViT_GLU,EViT_GLU,EViT_GLU] "
         "encoder.width_list=[128,256,512,512,1024,1024] encoder.depth_list=[0,4,8,2,2,2] "
@@ -898,8 +887,9 @@ def dc_ae_f32c32_rangeview(
     cfg = OmegaConf.from_dotlist(cfg_str.split(" "))
     cfg: DCAEConfig = OmegaConf.to_object(OmegaConf.merge(OmegaConf.structured(DCAEConfig), cfg))
     cfg.pretrained_path = pretrained_path
+    # Full exact-match loading — in_channels=3 matches the pretrained RGB checkpoint.
     if pretrained_path is not None:
-        cfg.pretrained_source = "dc-ae-partial"
+        cfg.pretrained_source = "dc-ae"
     return cfg
 
 

@@ -311,6 +311,60 @@ def render_bev_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Range-view comparison figure (GT | Predicted | |Error|)
+# ---------------------------------------------------------------------------
+
+def render_rangeview_comparison(
+    gt_depth: np.ndarray,
+    pred_depth: np.ndarray,
+    output_path: str,
+    frame_idx: int = 0,
+    max_depth: float = 80.0,
+    metrics: dict | None = None,
+) -> None:
+    """Save a 3-panel range-view comparison PNG: GT | Predicted | Abs Error.
+
+    Args:
+        gt_depth:    ``(H, W)`` ground-truth depth map in metres.
+        pred_depth:  ``(H, W)`` predicted depth map in metres.
+        output_path: Path for the saved PNG.
+        frame_idx:   Frame number shown in the figure title.
+        max_depth:   Depth value used to clip and normalise the colour scale.
+        metrics:     Optional ``{name: value}`` dict of evaluation metrics.
+    """
+    gt_clipped   = np.clip(gt_depth,   0.0, max_depth)
+    pred_clipped = np.clip(pred_depth, 0.0, max_depth)
+    abs_error    = np.abs(pred_clipped - gt_clipped)
+
+    fig, axes = plt.subplots(1, 3, figsize=(24, 5))
+
+    panels = [
+        (gt_clipped,   'plasma', f'Ground Truth depth  (max {max_depth:.0f} m)'),
+        (pred_clipped, 'plasma', 'Predicted depth'),
+        (abs_error,    'hot',    'Absolute Error  |pred − gt|'),
+    ]
+
+    for ax, (img, cmap, subtitle) in zip(axes, panels):
+        im = ax.imshow(img, cmap=cmap, vmin=0.0,
+                       vmax=max_depth if cmap == 'plasma' else abs_error.max() + 1e-6,
+                       aspect='auto', interpolation='nearest')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='metres')
+        ax.set_title(subtitle, fontsize=11)
+        ax.set_xlabel('azimuth (pixel)')
+        ax.set_ylabel('elevation (pixel)')
+
+    suptitle_parts = [f'Frame {frame_idx}  —  Range-View Comparison']
+    if metrics:
+        suptitle_parts.append('   |   '.join(f'{k}: {v:.4f}' for k, v in metrics.items()))
+    fig.suptitle('\n'.join(suptitle_parts), fontsize=12, y=1.02)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Summary plot — aggregate metrics across frames
 # ---------------------------------------------------------------------------
 

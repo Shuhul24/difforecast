@@ -1,0 +1,34 @@
+[2311998] (rank = 0, local_rank = 0) starting training...
+Training configuration:
+Config (path: configs/dit_config_rangeview.py): {'seed': 43, 'kitti_root': '/DATA2/shuhul/kitti', 'kitti_sequences_path': '/DATA2/shuhul/kitti/dataset/sequences', 'kitti_poses_path': '/DATA2/shuhul/kitti/poses', 'train_sequences': [0, 1, 2, 3, 4, 5], 'val_sequences': [6, 7], 'test_sequences': [8, 9, 10], 'pc_extension': '.bin', 'pc_dtype': 'float32', 'pc_reshape': (-1, 4), 'fov_up': 3.0, 'fov_down': -25.0, 'fov_left': -180.0, 'fov_right': 180.0, 'range_h': 64, 'range_w': 2048, 'range_channels': 2, 'image_size': (64, 2048), 'proj_img_mean': [10.839, 0.0], 'proj_img_stds': [9.314, 1.0], 'downsample_fps': 10, 'condition_frames': 5, 'block_size': 1, 'forward_iter': 5, 'multifw_perstep': 10, 'mask_data': 0, 'pkeep': 0.7, 'paug': 0, 'reverse_seq': False, 'augmentation_config': {'p_transx': 0.5, 'trans_xmin': -0.5, 'trans_xmax': 0.5, 'p_transy': 0.5, 'trans_ymin': -0.5, 'trans_ymax': 0.5, 'p_transz': 0.5, 'trans_zmin': -0.1, 'trans_zmax': 0.1, 'p_rot_roll': 0.5, 'rot_rollmin': -5.0, 'rot_rollmax': 5.0, 'p_rot_pitch': 0.5, 'rot_pitchmin': -5.0, 'rot_pitchmax': 5.0, 'p_rot_yaw': 0.5, 'rot_yawmin': -5.0, 'rot_yawmax': 5.0, 'p_scale': 0.5, 'scale_min': 0.95, 'scale_max': 1.05}, 'n_layer': [6, 4, 4], 'n_head': 8, 'n_embd': 1024, 'n_embd_dit': 1024, 'n_head_dit': 8, 'axes_dim_dit': [16, 48, 64], 'pose_x_vocab_size': 128, 'pose_y_vocab_size': 128, 'yaw_vocab_size': 512, 'pose_x_bound': 50, 'pose_y_bound': 10, 'yaw_bound': 12, 'vae_ckpt': None, 'vae_embed_dim': 4, 'add_encoder_temporal': False, 'add_decoder_temporal': False, 'temporal_patch_size': 1, 'downsample_size': 4, 'patch_size': 8, 'drop_feature': 0, 'diffusion_model_type': 'flow', 'num_sampling_steps': 100, 'range_view_loss_weight': 0.1, 'chamfer_loss_weight': 0.0, 'chamfer_max_pts': 2048, 'return_predict': True, 'diff_only': True, 'no_pose': False, 'outdir': '/DATA2/shuhul/exp/ckpt', 'logdir': '/DATA2/shuhul/exp/job_log', 'tdir': '/DATA2/shuhul/exp/job_tboard', 'validation_dir': '/DATA2/shuhul/exp/validation', 'num_workers': 8, 'distributed': False, 'iter': 60000000, 'batch_size': 2, 'config': 'configs/dit_config_rangeview.py', 'lr': 0.0003, 'blr': 0.0001, 'weight_decay': 0.01, 'resume_path': None, 'resume_step': 0, 'exp_name': 'kitti_rangeview', 'launcher': 'pytorch', 'overfit': False, 'eval_steps': 1000, 'load_from_deepspeed': None, 'wandb_project': 'difforecast-rangeview', 'wandb_run_name': None, 'no_wandb': False, 'writer': <torch.utils.tensorboard.writer.SummaryWriter object at 0x74f7a1b0bcd0>, 'writer_val': <torch.utils.tensorboard.writer.SummaryWriter object at 0x74f7a1b0b610>, 'log_path': '/DATA2/shuhul/exp/job_log/kitti_rangeview', 'save_model_path': '/DATA2/shuhul/exp/ckpt/kitti_rangeview', 'tdir_path': '/DATA2/shuhul/exp/job_tboard/kitti_rangeview', 'validation_path': '/DATA2/shuhul/exp/validation/kitti_rangeview'}
+Creating Range View DiT model...
+RangeViewVAETokenizer (RangeLDM): in_channels=2, z_channels=4, patch_size=8, vae_ckpt=None
+self.causal_time_space_num, self.auto_regressive_num 6 4
+Total Parameters: 390.76M (390,762,186)
+STT Parameters: 154.17M (154,167,296)
+DiT Parameters: 223.26M (223,264,000)
+Base LR: 7.68e-03
+Actual LR: 3.00e-04
+Effective batch size: 10
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/home/shuhul/difforecast/scripts/train_rangeview.py", line 453, in <module>
+[rank0]:     main(args)
+[rank0]:   File "/home/shuhul/difforecast/scripts/train_rangeview.py", line 166, in main
+[rank0]:     start_training(0, args)
+[rank0]:   File "/home/shuhul/difforecast/scripts/train_rangeview.py", line 206, in start_training
+[rank0]:     train(local_rank, args)
+[rank0]:   File "/home/shuhul/difforecast/scripts/train_rangeview.py", line 253, in train
+[rank0]:     optimizer = DeepSpeedCPUAdam(param_groups, lr=args.lr, betas=(0.9, 0.95))
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/adam/cpu_adam.py", line 94, in __init__
+[rank0]:     self.ds_opt_adam = CPUAdamBuilder().load()
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/op_builder/builder.py", line 542, in load
+[rank0]:     return self.jit_load(verbose)
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/op_builder/builder.py", line 575, in jit_load
+[rank0]:     cxx_args = self.strip_empty_entries(self.cxx_args())
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/op_builder/builder.py", line 858, in cxx_args
+[rank0]:     CUDA_ENABLE = self.get_cuda_compile_flag()
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/op_builder/builder.py", line 430, in get_cuda_compile_flag
+[rank0]:     assert_no_cuda_mismatch(self.name)
+[rank0]:   File "/home/shuhul/miniconda3/envs/difforecast/lib/python3.10/site-packages/deepspeed/ops/op_builder/builder.py", line 109, in assert_no_cuda_mismatch
+[rank0]:     raise CUDAMismatchException(
+[rank0]: deepspeed.ops.op_builder.builder.CUDAMismatchException: >- DeepSpeed Op Builder: Installed CUDA version 12.6 does not match the version torch was compiled with 11.8, unable to compile cuda/cpp extensions without a matching cuda version.

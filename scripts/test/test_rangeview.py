@@ -48,6 +48,7 @@ from utils.preprocess import get_rel_pose
 from utils.bev_utils import (
     rangeview_to_pointcloud,
     render_bev_comparison,
+    render_rangeview_comparison,
     plot_metrics_summary,
 )
 from dataset.dataset_kitti_rangeview import KITTIRangeViewTestDataset
@@ -153,7 +154,9 @@ def evaluate(cfg):
     # ------------------------------------------------------------------ #
     output_root = os.path.join(cfg.output_dir, cfg.exp_name)
     bev_dir     = os.path.join(output_root, 'bev_comparisons')
+    rv_dir      = os.path.join(output_root, 'rangeview_comparisons')
     os.makedirs(bev_dir, exist_ok=True)
+    os.makedirs(rv_dir,  exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # Model
@@ -309,6 +312,15 @@ def evaluate(cfg):
                         metrics=frame_metrics,
                     )
 
+                    rv_path = os.path.join(rv_dir, f'rv_{sample_idx:05d}.png')
+                    render_rangeview_comparison(
+                        gt_depth=gt_depth,
+                        pred_depth=pred_depth,
+                        output_path=rv_path,
+                        frame_idx=sample_idx,
+                        metrics=frame_metrics,
+                    )
+
                 # -------------------------------------------------- #
                 # Progress logging
                 # -------------------------------------------------- #
@@ -335,6 +347,7 @@ def evaluate(cfg):
         print(f'  Mean Range L1       : {mean_rl1:.4f}')
         print(f'  Mean Chamfer Dist   : {mean_cd:.4f}')
         print(f'  BEV images saved to : {bev_dir}')
+        print(f'  RV images saved to  : {rv_dir}')
         print(f'  Metrics CSV         : {csv_path}')
         print('=' * 60)
 
