@@ -28,5 +28,6 @@ def get_deepspeed_config(args):
             "enabled": True,
         }
         config_params['zero_allow_untested_optimizer'] = True
+        config_params['gradient_clipping'] = 1.0
 
         return config_params

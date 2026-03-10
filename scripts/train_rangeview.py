@@ -34,8 +34,10 @@ from utils.deepspeed_utils import get_deepspeed_config
 from utils.utils import *
 from models.model_rangeview import RangeViewDiT
 from dataset.dataset_kitti_rangeview import KITTIRangeViewTrainDataset, KITTIRangeViewValDataset
+from dataset.projection import RangeProjection
 from utils.comm import _init_dist_envi
 from utils.running import init_lr_schedule, save_ckpt, load_parameters, add_weight_decay, save_ckpt_deepspeed, load_from_deepspeed_ckpt
+from utils.bev_utils import render_bev_comparison, render_rangeview_comparison
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 logger = logging.getLogger('base')
@@ -63,6 +65,8 @@ def add_arguments():
                         help='W&B run name (defaults to --exp_name)')
     parser.add_argument('--no_wandb', action='store_true',
                         help='Disable Weights & Biases logging')
+    parser.add_argument('--vis_steps', type=int, default=500,
+                        help='Save training visualizations every N steps (0 = disabled)')
 
     args = parser.parse_args()
     cfg = Config.fromfile(args.config)
@@ -156,6 +160,104 @@ def create_rangeview_dataset(args):
 
     print(f"KITTI training dataset created with {len(train_dataset)} samples")
     return train_dataset
+
+
+def save_training_visualization(
+    step, args, features_cond, features_gt, predict_decoded, projector, vis_dir
+):
+    """Save range-view and BEV comparison images for one training batch.
+
+    Visualises the first sample in the batch:
+      - All conditioning frames (range-view, depth channel coloured by plasma)
+      - GT next frame vs predicted next frame (range-view + BEV side-by-side)
+
+    Args:
+        step:             Current training step (used for filename).
+        args:             Config namespace (provides proj_img_mean/stds, bev_range etc.)
+        features_cond:    ``[B, CF, C, H, W]`` conditioning range-view images (normalised).
+        features_gt:      ``[B, 1, C, H, W]``  GT next frame (normalised).
+        predict_decoded:  ``[(B*CF), C, H, W]`` or ``[B, C, H, W]`` predicted frame
+                          (normalised), or None if not available.
+        projector:        :class:`RangeProjection` for depth back-projection to 3-D.
+        vis_dir:          Directory to save PNG files into.
+    """
+    if predict_decoded is None:
+        return
+
+    os.makedirs(vis_dir, exist_ok=True)
+
+    range_mean = args.proj_img_mean[0]
+    range_std  = args.proj_img_stds[0]
+
+    # Work with the first batch sample only, move to CPU numpy
+    # features_cond: [B, CF, C, H, W] — take b=0
+    cond_np  = features_cond[0].float().cpu().numpy()   # [CF, C, H, W]
+    gt_np    = features_gt[0, 0].float().cpu().numpy()  # [C, H, W]
+
+    # predict_decoded may be [(B*CF), C, H, W] (multifw) or [B, C, H, W]
+    # We want the prediction corresponding to the first batch item's last forward step.
+    # predict_decoded is [(B*CF), C, H, W].  For batch item 0, the prediction
+    # matching features_gt (the frame immediately after the CF conditioning frames)
+    # is at index CF-1 (the last target for the first batch item).
+    cf = cond_np.shape[0]
+    pred_np  = predict_decoded[cf - 1].float().cpu().numpy()  # [C, H, W]
+
+    # --- unnormalise depth channel (ch 0) to metres ---
+    def to_depth(feat_chw):
+        return feat_chw[0] * range_std + range_mean   # (H, W)
+
+    gt_depth   = to_depth(gt_np)
+    pred_depth = to_depth(pred_np)
+
+    # --- 1. Conditioning frames — saved as a single wide range-view strip ---
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    CF = cond_np.shape[0]
+    max_depth = 80.0
+    fig, axes = plt.subplots(1, CF, figsize=(6 * CF, 4))
+    if CF == 1:
+        axes = [axes]
+    for t, ax in enumerate(axes):
+        depth_t = to_depth(cond_np[t])
+        im = ax.imshow(np.clip(depth_t, 0, max_depth), cmap='plasma',
+                       vmin=0, vmax=max_depth, aspect='auto')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
+        ax.set_title(f'Cond frame t-{CF - t}', fontsize=10)
+        ax.set_xlabel('azimuth'); ax.set_ylabel('elevation')
+    fig.suptitle(f'Step {step} — Conditioning frames (depth)', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_cond.png'), dpi=80, bbox_inches='tight')
+    plt.close(fig)
+
+    # --- 2. GT vs Predicted range-view + abs error ---
+    rv_path = os.path.join(vis_dir, f'step{step:07d}_rv.png')
+    render_rangeview_comparison(
+        gt_depth=gt_depth,
+        pred_depth=pred_depth,
+        output_path=rv_path,
+        frame_idx=step,
+        max_depth=max_depth,
+        metrics={
+            'range_l1': float(np.abs(pred_depth - gt_depth)[gt_depth > 0.5].mean())
+            if (gt_depth > 0.5).any() else 0.0
+        },
+    )
+
+    # --- 3. BEV comparison (GT vs predicted point cloud) ---
+    try:
+        pts_gt   = projector.back_project_range(np.clip(gt_depth,   0, max_depth))
+        pts_pred = projector.back_project_range(np.clip(pred_depth, 0, max_depth))
+        bev_path = os.path.join(vis_dir, f'step{step:07d}_bev.png')
+        bev_range = float(getattr(args, 'bev_range', 50.0))
+        render_bev_comparison(
+            points_gt=pts_gt, points_pred=pts_pred,
+            bev_range=bev_range, resolution=0.2,
+            output_path=bev_path, frame_idx=step,
+        )
+    except Exception:
+        pass   # BEV is optional; don't crash training if back-projection fails
 
 
 def main(args):
@@ -304,6 +406,14 @@ def train(local_rank, args):
 
     torch.set_float32_matmul_precision('high')
 
+    # Projector for training visualizations (back-projects depth → 3D for BEV)
+    vis_projector = RangeProjection(
+        fov_up=args.fov_up, fov_down=args.fov_down,
+        proj_w=args.range_w, proj_h=args.range_h,
+        fov_left=args.fov_left, fov_right=args.fov_right,
+    )
+    vis_dir = os.path.join(args.validation_path, 'train_vis')
+
     print('Starting training loop...')
     torch.cuda.synchronize()
     time_stamp = time.time()
@@ -399,6 +509,7 @@ def train(local_rank, args):
                 loss_diff_val  = loss_final["loss_diff"].item()
                 loss_rl1_val   = loss_final["loss_range_l1"].item()
                 loss_cd_val    = loss_final["loss_chamfer"].item()
+                loss_elbo_val  = loss_final["loss_elbo"].item()
 
                 # TensorBoard
                 writer.add_scalar('learning_rate/lr',   current_lr,    step)
@@ -406,6 +517,7 @@ def train(local_rank, args):
                 writer.add_scalar('loss/loss_diff',     loss_diff_val, step)
                 writer.add_scalar('loss/loss_range_l1', loss_rl1_val,  step)
                 writer.add_scalar('loss/loss_chamfer',  loss_cd_val,   step)
+                writer.add_scalar('loss/loss_elbo',     loss_elbo_val, step)
                 writer.flush()
 
                 # Weights & Biases
@@ -415,6 +527,7 @@ def train(local_rank, args):
                         'loss/loss_diff':     loss_diff_val,
                         'loss/loss_range_l1': loss_rl1_val,
                         'loss/loss_chamfer':  loss_cd_val,
+                        'loss/loss_elbo':     loss_elbo_val,
                         'learning_rate/lr':   current_lr,
                     }, step=step)
 
@@ -425,8 +538,24 @@ def train(local_rank, args):
                     f'loss_avg:{loss_final["loss_all"].item():.4e} '
                     f'diff_loss:{loss_final["loss_diff"].item():.4e} '
                     f'range_l1:{loss_final["loss_range_l1"].item():.4e} '
-                    f'chamfer:{loss_final["loss_chamfer"].item():.4e}'
+                    f'chamfer:{loss_final["loss_chamfer"].item():.4e} '
+                    f'elbo:{loss_final["loss_elbo"].item():.4e}'
                 )
+
+            # Training visualizations (rank 0 only)
+            vis_steps = getattr(args, 'vis_steps', 500)
+            if vis_steps > 0 and step % vis_steps == 0 and rank == 0:
+                predict_vis = loss_final.get("predict")
+                with torch.no_grad():
+                    save_training_visualization(
+                        step=step,
+                        args=args,
+                        features_cond=features_cond.detach(),
+                        features_gt=features_gt.detach(),
+                        predict_decoded=predict_vis.detach() if predict_vis is not None else None,
+                        projector=vis_projector,
+                        vis_dir=vis_dir,
+                    )
 
             # Save checkpoint
             if step % args.eval_steps == 0:

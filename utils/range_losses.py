@@ -224,6 +224,8 @@ def batch_chamfer_distance(
     gt_valid: torch.Tensor,
     projector: RangeViewProjection,
     max_pts: int = 2048,
+    blank_penalty: float = 10.0,
+    min_pred_fraction: float = 0.05,
 ) -> torch.Tensor:
     """Batched Chamfer Distance using the CUDA-accelerated pyTorchChamferDistance kernel.
 
@@ -234,16 +236,27 @@ def batch_chamfer_distance(
     the pairwise nearest-neighbour distances.  Random subsampling keeps the
     O(N²) distance matrix tractable for full-resolution range images.
 
+    Blank-prediction penalty: when the predicted cloud has fewer than
+    ``min_pred_fraction`` of the GT cloud's valid points, the standard
+    Chamfer kernel is skipped (it would silently return zero for an empty
+    cloud) and a fixed ``blank_penalty`` is added instead, scaled by the
+    fraction of GT points that are missing.  This provides a strong gradient
+    signal for the case where the model predicts a uniform / near-zero depth
+    map that contains no valid LiDAR returns.
+
     Args:
-        pred_depth:  ``[B, L]`` predicted depth in metres (0 = invalid).
-        gt_depth:    ``[B, L]`` GT depth in metres (0 = invalid).
-        pred_valid:  ``[B, L]`` bool mask — True where predicted pixel is valid.
-        gt_valid:    ``[B, L]`` bool mask — True where GT pixel is valid.
-        projector:   :class:`RangeViewProjection` for depth → xyz back-projection.
-        max_pts:     Maximum points sampled per cloud (reduces O(N²) cost).
+        pred_depth:          ``[B, L]`` predicted depth in metres (0 = invalid).
+        gt_depth:            ``[B, L]`` GT depth in metres (0 = invalid).
+        pred_valid:          ``[B, L]`` bool mask — True where predicted pixel is valid.
+        gt_valid:            ``[B, L]`` bool mask — True where GT pixel is valid.
+        projector:           :class:`RangeViewProjection` for depth → xyz back-projection.
+        max_pts:             Maximum points sampled per cloud (reduces O(N²) cost).
+        blank_penalty:       Loss magnitude applied when prediction is too sparse.
+        min_pred_fraction:   Minimum ratio of pred-valid / gt-valid points below
+                             which the blank penalty is applied instead of Chamfer.
 
     Returns:
-        Mean symmetric Chamfer distance over valid batch elements (scalar tensor).
+        Mean symmetric Chamfer distance (+ blank penalties) over the batch (scalar).
     """
     chamfer_fn = _get_chamfer_fn()
 
@@ -251,18 +264,33 @@ def batch_chamfer_distance(
     pred_xyz = projector.depth_to_xyz(pred_depth)
     gt_xyz   = projector.depth_to_xyz(gt_depth)
 
-    B         = pred_xyz.shape[0]
+    B        = pred_xyz.shape[0]
     # Always accumulate in float32: the CUDA kernel returns float32 tensors
     # regardless of the input dtype (e.g. bfloat16 under autocast).
-    total_cd  = torch.zeros((), device=pred_depth.device, dtype=torch.float32)
-    valid_cnt = 0
+    total_cd = torch.zeros((), device=pred_depth.device, dtype=torch.float32)
 
     for b in range(B):
+        n_gt   = int(gt_valid[b].sum().item())
+        n_pred = int(pred_valid[b].sum().item())
+
+        # ------------------------------------------------------------------ #
+        # Blank-prediction penalty
+        # When the predicted cloud is nearly empty (< min_pred_fraction of GT
+        # points), the Chamfer kernel would silently return 0. Instead we
+        # apply a penalty proportional to the missing-point fraction so that
+        # blank/uniform predictions always receive a non-zero gradient.
+        # ------------------------------------------------------------------ #
+        if n_gt < 2:
+            # Skip: GT cloud itself is degenerate (edge case).
+            continue
+
+        if n_pred < max(2, int(min_pred_fraction * n_gt)):
+            missing_fraction = 1.0 - n_pred / n_gt
+            total_cd += blank_penalty * missing_fraction
+            continue
+
         pc1 = pred_xyz[b][pred_valid[b]]   # [N, 3]
         pc2 = gt_xyz[b][gt_valid[b]]       # [M, 3]
-
-        if pc1.shape[0] < 2 or pc2.shape[0] < 2:
-            continue
 
         if pc1.shape[0] > max_pts:
             idx = torch.randperm(pc1.shape[0], device=pc1.device)[:max_pts]
@@ -273,9 +301,6 @@ def batch_chamfer_distance(
 
         # ChamferDistance expects [1, N, 3]; returns squared distances [1, N] and [1, M]
         dist1, dist2 = chamfer_fn(pc1.unsqueeze(0).float(), pc2.unsqueeze(0).float())
-        total_cd  += torch.mean(dist1) + torch.mean(dist2)
-        valid_cnt += 1
+        total_cd += torch.mean(dist1) + torch.mean(dist2)
 
-    if valid_cnt == 0:
-        return total_cd.to(pred_depth.dtype)   # zero; keeps computation graph intact
-    return (total_cd / valid_cnt).to(pred_depth.dtype)
+    return (total_cd / B).to(pred_depth.dtype)

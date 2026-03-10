@@ -92,6 +92,10 @@ augmentation_config = {
 # Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
 # n_embd halved → params scale as n_embd², giving ~7× fewer trainable params (~370M).
 # axes_dim_dit must sum to n_embd_dit // n_head_dit = 1024 // 8 = 128 (unchanged).
+#
+# With patch_size_h=4, patch_size_w=32:
+#   latent_C = 4*4*32 = 512  (DiT in_channels; projected internally to n_embd_dit)
+#   L        = 4*16   = 64   (img_token_size; feeds STT block_size)
 n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
 n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
 n_embd = 1024  # Embedding dimension for STT
@@ -125,26 +129,85 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 #     h_lat_vae = 64   // 4 = 16
 #     w_lat_vae = 2048 // 4 = 512
 #
-# patch_size: Further spatial grouping applied after VAE encoding.
-#   With patch_size=8 and 4× VAE compression:
-#     h_tok = 16  // 8 = 2
-#     w_tok = 512 // 8 = 64
-#   → img_token_size = 2 × 64 = 128 tokens per frame  (same as DC-AE path)
-#   → latent_C = vae_embed_dim × patch_size² = 4 × 64 = 256
+# patch_size_h / patch_size_w: Non-uniform patchification after VAE encoding.
+#
+#   The VAE latent for a 64×2048 range image is 16×512 (4× compression).
+#   A square patch_size=8 gives a 2×64 token grid — the elevation axis is
+#   crushed to just 2 tokens, destroying most vertical structure.
+#
+#   Using asymmetric patches preserves more elevation detail and can reduce
+#   the total token count simultaneously:
+#
+#   patch_size_h  patch_size_w  h_tok  w_tok  L    latent_C  notes
+#   -----------  ------------  -----  -----  ---  --------  ------
+#       8             8          2     64    128    256     original (square)
+#       4            32          4     16     64    512     half tokens, better shape ← default
+#       4            16          4     32    128    256     same L, better shape
+#       2            16          8     32    256    128     more tokens, best elevation
+#
+#   Changing patch_size_h / patch_size_w also changes:
+#     latent_C  = vae_embed_dim × patch_size_h × patch_size_w
+#     L         = h_tok × w_tok  (img_token_size)
+#   The DiT in_channels must equal latent_C, so update n_embd_dit accordingly.
 vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
-add_encoder_temporal = False
-add_decoder_temporal = False
-temporal_patch_size = 1
+patch_size   = 8         # legacy square fallback (used when patch_size_h/w absent)
+patch_size_h = 4         # elevation patch size  → h_tok = 16 // 4 = 4
+patch_size_w = 32        # azimuth  patch size   → w_tok = 512 // 32 = 16
+# Derived: L = 4×16 = 64,  latent_C = 4×4×32 = 512
+add_decoder_temporal = False  # unused for RangeView path (DCAE-only)
+temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
+
+# ===== Temporal Latent Encoder (RangeView-specific) =====
+# Causal temporal + spatial attention applied in the patchified latent space
+# [B, T, L=64, C=512] between the VAE encoder and the STT.
+# (L and C are derived from patch_size_h / patch_size_w above.)
+#
+# When enabled, each conditioning frame's latent tokens attend (causally) to
+# all past frames' tokens before being passed to the STT, embedding motion /
+# delta information directly into the conditioning representation.
+#
+# All blocks are zero-initialised → identity residual at training start,
+# so enabling this does not disturb a pretrained VAE checkpoint.
+#
+# n_temporal_blocks: number of interleaved (causal-time, spatial) pairs.
+#   4 pairs ≈ 6.5 M extra parameters (dim=256, n_heads=8).
+#   Start with 2–4; increase if the model has capacity to spare.
+add_encoder_temporal = False   # set True to enable TemporalLatentEncoder
+n_temporal_blocks = 4          # interleaved time+space block pairs
 
 # Feature processing
 downsample_size = 4   # RangeLDM VAE spatial compression factor (4×)
-patch_size = 8        # Patchification after VAE (keeps img_token_size = 128)
+patch_size = 8        # Square fallback — used by DCAE path and getattr defaults only.
+                      # RangeView path uses patch_size_h / patch_size_w (defined above).
 drop_feature = 0  # Dropout probability for features
 
 # ===== Diffusion Configuration =====
 diffusion_model_type = "flow"  # Type of diffusion model
 num_sampling_steps = 100  # Number of sampling steps during inference
+
+# ===== VAE ELBO Loss (active only when vae_ckpt = None) =====
+# When the VAE has no pretrained checkpoint, the ELBO gives the encoder and
+# decoder a direct reconstruction objective so they learn a meaningful codec
+# in parallel with the DiT.
+#
+# ELBO = NLL(rec_loss) + kl_weight * KL(q(z|x) || N(0,I))
+#   rec_loss = vae_range_weight * L1(range) + vae_intensity_weight * L1(intensity)
+#   NLL      = rec_loss / exp(logvar) + logvar   (learnable Laplacian NLL)
+#   KL       = 0.5 * sum(mu² + sigma² - 1 - log_sigma²)
+#
+# Tuning guide (all losses operate on *normalised* features):
+#   elbo_weight:          overall scale; 1.0 puts ELBO on par with diff loss (~0.05)
+#   kl_weight:            1e-6–1e-4  (small → near-deterministic VAE, good for LDM)
+#   vae_range_weight:     1.0  (depth channel; dominant signal)
+#   vae_intensity_weight: 0.5  (intensity channel; lower weight, noisier signal)
+#   vae_logvar_init:      0.0  (start with log σ²=0, i.e. σ=1; adapts during training)
+elbo_weight          = 1.0    # weight on total ELBO loss term
+                              # NLL is now mean over all pixels → ELBO ≈ 0.5-2 (same scale as diff_loss)
+kl_weight            = 1e-6   # β-VAE KL weight (small keeps latents near standard normal)
+vae_range_weight     = 1.0    # L1 weight for range/depth channel (normalised space)
+vae_intensity_weight = 0.5    # L1 weight for intensity channel   (normalised space)
+vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 
 # ===== Auxiliary Loss Weights =====
 # These are applied to the denoised *predict* estimate produced during training,
@@ -167,8 +230,12 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #
 # chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
 #   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
-range_view_loss_weight = 0.1   # weight for per-pixel L1 range-view loss
-chamfer_loss_weight    = 0.01  # weight for 3-D Chamfer distance loss (requires pyTorchChamferDistance)
+range_view_loss_weight = 0.1   # L1 between decode(pred_latent) and original GT range image:
+                               # both pred and target pass through the same (learning) VAE
+                               # decoder, making their difference small even for blank preds.
+chamfer_loss_weight    = 0.05  # raised from 0.001 — Chamfer is the primary geometric signal;
+                               # blank-prediction penalty in batch_chamfer_distance ensures
+                               # empty predictions are no longer silently ignored.
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== Training Settings =====

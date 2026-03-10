@@ -75,18 +75,19 @@ class RangeViewDiT(nn.Module):
         # ------------------------------------------------------------------ #
         self.vae_tokenizer = RangeViewVAETokenizer(args, local_rank)
 
-        # Latent embedding dimension after patchification
-        # vae_embed_dim = DCAE latent channels (32 for f32c32)
-        # vae_emb_dim   = latent_channels × patch_size²
-        self.vae_emb_dim = self.args.vae_embed_dim * self.args.patch_size ** 2
+        # Non-uniform patch support: patch_size_h / patch_size_w may differ.
+        # Falls back to square patch_size when only patch_size is set.
+        patch_h = int(getattr(args, 'patch_size_h', args.patch_size))
+        patch_w = int(getattr(args, 'patch_size_w', args.patch_size))
 
-        # ------------------------------------------------------------------ #
-        # Spatial dimensions in latent space
-        # downsample_size = 32 (DCAE f32c32 compression factor)
-        # ------------------------------------------------------------------ #
+        # Latent embedding dimension after patchification:
+        # vae_emb_dim = vae_embed_dim × patch_size_h × patch_size_w
+        self.vae_emb_dim = self.args.vae_embed_dim * patch_h * patch_w
+
+        # Spatial token grid dimensions in patchified latent space
         self.image_size = self.args.image_size
-        self.h = self.image_size[0] // (self.args.downsample_size * self.args.patch_size)
-        self.w = self.image_size[1] // (self.args.downsample_size * self.args.patch_size)
+        self.h = self.image_size[0] // (self.args.downsample_size * patch_h)
+        self.w = self.image_size[1] // (self.args.downsample_size * patch_w)
         self.pkeep = args.pkeep
 
         self.img_token_size = self.h * self.w
@@ -168,6 +169,47 @@ class RangeViewDiT(nn.Module):
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
 
+        # ------------------------------------------------------------------ #
+        # VAE ELBO loss (used when vae_ckpt is None — VAE trained from scratch)
+        #
+        # When no pre-trained VAE checkpoint is provided the encoder/decoder
+        # start from random weights and have no external reconstruction
+        # objective.  The ELBO loss gives them a direct training signal:
+        #
+        #   ELBO = NLL(reconstruction) + kl_weight * KL(posterior || N(0,I))
+        #
+        # where NLL uses a learnable log-variance (Laplacian NLL formulation
+        # matching RangeLDM's RangeImageReconstructionLoss).
+        #
+        # The ELBO is computed on the raw input frames (before patchification)
+        # using a reparameterised sample, so gradients reach both the encoder
+        # (via KL) and the decoder (via reconstruction).  The DiT pipeline
+        # continues to use the deterministic mode() latents for stability.
+        # ------------------------------------------------------------------ #
+        vae_ckpt = getattr(args, 'vae_ckpt', None)
+        self.vae_is_trainable = (vae_ckpt is None)
+
+        self.elbo_weight          = float(getattr(args, 'elbo_weight',          1.0))
+        self.kl_weight            = float(getattr(args, 'kl_weight',            1e-6))
+        self.vae_range_weight     = float(getattr(args, 'vae_range_weight',     1.0))
+        self.vae_intensity_weight = float(getattr(args, 'vae_intensity_weight', 0.5))
+
+        if self.vae_is_trainable:
+            logvar_init = float(getattr(args, 'vae_logvar_init', 0.0))
+            self.logvar = nn.Parameter(
+                torch.ones(size=(), dtype=torch.float32) * logvar_init
+            )
+            print(
+                f"RangeViewDiT: VAE is trainable (no checkpoint). "
+                f"ELBO loss enabled — elbo_weight={self.elbo_weight}, "
+                f"kl_weight={self.kl_weight}, "
+                f"vae_range_weight={self.vae_range_weight}, "
+                f"vae_intensity_weight={self.vae_intensity_weight}"
+            )
+        else:
+            self.logvar = None
+            print("RangeViewDiT: VAE is frozen (checkpoint loaded). ELBO disabled.")
+
         # Spherical back-projection for Chamfer distance loss.
         # Precomputes per-pixel (x, y, z) ray-direction factors from the
         # LiDAR FOV so that xyz = depth * factor at training time.
@@ -210,6 +252,7 @@ class RangeViewDiT(nn.Module):
         rel_pose_cond=None,
         rel_yaw_cond=None,
         step=0,
+        gt_images=None,
     ):
         """Forward pass for training.
 
@@ -222,6 +265,11 @@ class RangeViewDiT(nn.Module):
             rel_pose_cond:   Optional pre-computed relative pose  (B, T, 2).
             rel_yaw_cond:    Optional pre-computed relative yaw   (B, T, 1).
             step:            Training step counter.
+            gt_images:       ``[(B*F), C, H, W]`` original (unnormalised-then-
+                             normalised) GT range view images.  When provided,
+                             range L1 is computed against these raw pixels rather
+                             than re-decoded latents, so the target is never
+                             corrupted by a still-learning VAE decoder.
 
         Returns:
             dict with keys: loss_all, loss_diff, loss_range_l1, loss_chamfer,
@@ -246,7 +294,8 @@ class RangeViewDiT(nn.Module):
                 )
 
         pose_indices_total = poses_to_indices(
-            rel_pose_total, self.pose_x_vocab_size, self.pose_y_vocab_size
+            rel_pose_total, self.pose_x_vocab_size, self.pose_y_vocab_size,
+            x_range=float(self.pose_x_bound), y_range=float(self.pose_y_bound * 2),
         )
         yaw_indices_total = yaws_to_indices(rel_yaw_total, self.yaw_vocab_size)
 
@@ -285,45 +334,54 @@ class RangeViewDiT(nn.Module):
         predict_decoded  = None
 
         if predict is not None:
-            # Decode predicted latents → range view features [(B*F), C, H, W]
+            # Decode predicted latents → range view image [(B*F), C, H, W]
             predict_decoded = self.vae_tokenizer.decode_from_z(predict, self.h, self.w)
 
             if self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0:
-                # Decode target latents for supervision (no grad needed for targets)
-                with torch.no_grad():
-                    targets_decoded = self.vae_tokenizer.decode_from_z(
-                        latent_targets.detach(), self.h, self.w
-                    )  # [(B*F), C, H, W]
+                range_mean = self.proj_img_mean[0]
+                range_std  = self.proj_img_stds[0]
 
-                # Reshape to [..., L, C] for aux-loss helpers
-                pred_tok   = rearrange(predict_decoded, 'b c h w -> b (h w) c')
-                target_tok = rearrange(targets_decoded, 'b c h w -> b (h w) c')
+                # ---------------------------------------------------------- #
+                # GT target: use the original range view image (gt_images)
+                # instead of re-decoding the GT latents.  This ensures the
+                # target is always the clean 64×2048 pixel image, not an
+                # approximation produced by a still-learning VAE decoder.
+                # ---------------------------------------------------------- #
+                if gt_images is not None:
+                    gt_range_img = gt_images                 # [(B*F), C, H, W]
+                else:
+                    # Fallback (e.g. during eval) — decode GT latents as before
+                    with torch.no_grad():
+                        gt_range_img = self.vae_tokenizer.decode_from_z(
+                            latent_targets.detach(), self.h, self.w
+                        )
 
-                gt_valid = make_valid_mask(
-                    target_tok,
-                    range_mean=self.proj_img_mean[0],
-                    range_std=self.proj_img_stds[0],
-                )  # [(B*F), L]
+                # Valid mask from the original GT image (range ch > 0.5 m).
+                # Invalid pixels (empty LiDAR returns projected to 0) are excluded
+                # from both the L1 and Chamfer losses.
+                gt_range_unnorm = gt_range_img[:, 0] * range_std + range_mean  # [B*F, H, W]
+                gt_valid_spatial = gt_range_unnorm > 0.5                        # [B*F, H, W]
 
+                # ---- Range L1 loss (pred decoded image vs original GT) ---- #
                 if self.range_view_loss_weight > 0:
-                    range_l1_loss = range_view_l1_loss(
-                        pred_tok, target_tok, valid_mask=gt_valid
-                    )
+                    pred_range = predict_decoded[:, 0]       # [B*F, H, W]
+                    gt_range   = gt_range_img[:, 0]          # [B*F, H, W]
+                    l1_map     = torch.abs(pred_range - gt_range)            # [B*F, H, W]
+                    mask_f     = gt_valid_spatial.float()
+                    range_l1_loss = (l1_map * mask_f).sum() / (mask_f.sum() + 1e-8)
 
+                # ---- Chamfer loss (pred decoded depth vs original GT) ----- #
                 if self.chamfer_loss_weight > 0:
-                    range_mean = self.proj_img_mean[0]
-                    range_std  = self.proj_img_stds[0]
+                    pred_range_unnorm = (
+                        predict_decoded[:, 0] * range_std + range_mean
+                    )  # [B*F, H, W]
 
-                    # Unnormalize depth channel (ch 0) from feature space to metres.
-                    # Works for any number of feature channels — no xyz channels needed.
-                    pred_depth = pred_tok[..., 0] * range_std + range_mean    # [B, L]
-                    gt_depth   = target_tok[..., 0] * range_std + range_mean  # [B, L]
+                    # Flatten spatial dims: [B*F, H*W]
+                    pred_depth = pred_range_unnorm.reshape(pred_range_unnorm.shape[0], -1)
+                    gt_depth   = gt_range_unnorm.reshape(gt_range_unnorm.shape[0], -1)
 
-                    pred_valid = make_valid_mask(
-                        pred_tok,
-                        range_mean=range_mean,
-                        range_std=range_std,
-                    )
+                    pred_valid = pred_depth > 0.5
+                    gt_valid   = gt_valid_spatial.reshape(gt_valid_spatial.shape[0], -1)
 
                     chamfer_loss_val = batch_chamfer_distance(
                         pred_depth, gt_depth,
@@ -375,9 +433,32 @@ class RangeViewDiT(nn.Module):
         """
         self.model.train()
 
-        # Concatenate all frames and encode to latent space with frozen DCAE
+        # Concatenate all frames and encode to latent space
         features_all = torch.cat([features, features_gt], dim=1)  # [B, CF+1, C, H, W]
         latents_all  = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
+
+        # ------------------------------------------------------------------ #
+        # VAE ELBO loss (only when VAE has no pretrained checkpoint)
+        #
+        # Computed on a reparameterised sample from the encoder posterior so
+        # that gradients reach all VAE parameters via:
+        #   - KL term  →  encoder (mean + logvar parameters)
+        #   - NLL term →  encoder (via z_sample) + decoder
+        #
+        # The DiT pipeline above uses mode() latents (deterministic) for
+        # training stability — the ELBO branch is a separate side-objective.
+        # ------------------------------------------------------------------ #
+        elbo_loss = torch.zeros(1, device=features.device, dtype=features.dtype)
+        if self.vae_is_trainable:
+            B, T_all, C, H, W = features_all.shape
+            x_flat = features_all.reshape(B * T_all, C, H, W).detach()
+            elbo_loss = self.vae_tokenizer.compute_vae_elbo(
+                x_flat,
+                logvar=self.logvar,
+                range_weight=self.vae_range_weight,
+                intensity_weight=self.vae_intensity_weight,
+                kl_weight=self.kl_weight,
+            )
 
         latents_total = latents_all  # may be replaced by augmented version below
 
@@ -400,10 +481,27 @@ class RangeViewDiT(nn.Module):
         latent_targets = latents_all[:, 1:]                          # [B, CF, L, latent_C]
         latent_targets = rearrange(latent_targets, 'B F L C -> (B F) L C')
 
-        return self.model_forward(
+        # Original GT range view images for each target frame — used in range L1
+        # loss so the target is the raw pixel image, not a re-decoded latent.
+        # Shape: [(B*CF), C, H, W]
+        gt_images = rearrange(
+            features_all[:, 1:].detach(), 'B F C H W -> (B F) C H W'
+        )
+
+        result = self.model_forward(
             latents_total, rot_matrix, latent_targets,
             rel_pose_cond=rel_pose_cond, rel_yaw_cond=rel_yaw_cond, step=step,
+            gt_images=gt_images,
         )
+
+        # Fold ELBO into total loss (zero when VAE is frozen / ckpt is set).
+        if self.vae_is_trainable:
+            result["loss_all"]  = result["loss_all"] + self.elbo_weight * elbo_loss
+            result["loss_elbo"] = elbo_loss
+        else:
+            result["loss_elbo"] = torch.zeros(1, device=features.device, dtype=features.dtype)
+
+        return result
 
     # ---------------------------------------------------------------------- #
     # Unified forward
@@ -456,7 +554,10 @@ class RangeViewDiT(nn.Module):
         feature_latents = self.vae_tokenizer.encode_to_z(features)  # [B, CF, L, latent_C]
 
         # Pose / yaw indices
-        pose_total = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size)
+        pose_total = poses_to_indices(
+            rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size,
+            x_range=float(self.pose_x_bound), y_range=float(self.pose_y_bound * 2),
+        )
         yaw_total  = yaws_to_indices(rel_yaw,  self.yaw_vocab_size)
 
         # Spatial-Temporal Transformer

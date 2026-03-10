@@ -204,9 +204,14 @@ class KITTIRangeViewDataset(Dataset):
                   if pc.shape[1] >= 4 else torch.zeros_like(depth))  # [H, W]
         mask   = torch.from_numpy(proj_mask.astype(np.float32))  # [H, W]
 
+        # Empty pixels have proj_range = -1 (from doProjection).  After
+        # normalisation they land at ≈ (-1 - mean) / std ≈ -1.27 for range and
+        # (-1 - 0) / 1 = -1 for intensity — both safely below any valid reading.
+        # We do NOT apply the mask here so that make_valid_mask can recover
+        # validity from the naturally-negative sentinel values.
         feat = torch.stack([depth, intens], dim=0)              # [2, H, W]
         feat = (feat - self.mean[:, None, None]) / self.std[:, None, None]
-        return feat * mask.unsqueeze(0)
+        return feat
 
     # ── Dataset interface ──────────────────────────────────────────────────────
 

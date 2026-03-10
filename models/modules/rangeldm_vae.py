@@ -61,11 +61,13 @@ class Conv2d(nn.Conv2d):
 
     def _conv_forward(self, input, weight, bias):
         if self.circular:
-            # Circular padding along W (azimuth), zero padding along H (elevation)
-            input = F.pad(input, (0, 0, self.padding[0], self.padding[0]),
-                          mode="circular")
+            # F.pad format for 4-D input: (left, right, top, bottom)
+            # → (left, right, 0, 0) pads W (azimuth) — should be circular
+            # → (0, 0, top, bottom) pads H (elevation) — should be zero
             input = F.pad(input, (self.padding[1], self.padding[1], 0, 0),
-                          mode="constant")
+                          mode="circular")   # W (azimuth) — wraps at ±180°
+            input = F.pad(input, (0, 0, self.padding[0], self.padding[0]),
+                          mode="constant")   # H (elevation) — zero pad
             return F.conv2d(input, weight, bias, self.stride, _pair(0),
                             self.dilation, self.groups)
         if self.padding_mode != 'zeros':
@@ -464,6 +466,24 @@ class RangeLDMVAE(nn.Module):
         """
         h = self.encoder(x)                        # [B, 2*z_ch, H', W']
         return DiagonalGaussianDistribution(h).mode()  # [B, z_ch, H', W']
+
+    def encode_posterior(self, x: torch.Tensor) -> 'DiagonalGaussianDistribution':
+        """Encode to the full diagonal Gaussian posterior (for ELBO training).
+
+        Unlike ``encode()`` which returns the deterministic mode, this method
+        returns the full distribution object so that the caller can:
+          - draw a reparameterised sample  (``dist.sample()``)
+          - compute the KL divergence      (``dist.kl()``)
+
+        Args:
+            x: ``[B, 2, H, W]`` normalised [range, intensity] range image.
+
+        Returns:
+            :class:`DiagonalGaussianDistribution` with mean and log-variance
+            derived from the encoder output.
+        """
+        h = self.encoder(x)                        # [B, 2*z_ch, H', W']
+        return DiagonalGaussianDistribution(h)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """Decode a latent tensor back to a 2-channel range image.
