@@ -14,6 +14,8 @@ eval_results/
 
 wandb/
 
+RamgeLDM/
+
 logs/*
 logs/*/*
 logs/*/*/*

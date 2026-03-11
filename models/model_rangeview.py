@@ -39,6 +39,7 @@ from utils.range_losses import (
     RangeViewProjection,
     batch_chamfer_distance,
 )
+from utils.bev_perceptual import BEVPerceptualLoss
 
 
 class RangeViewDiT(nn.Module):
@@ -170,6 +171,53 @@ class RangeViewDiT(nn.Module):
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
 
         # ------------------------------------------------------------------ #
+        # Learned uncertainty weights for auxiliary losses (Kendall et al.)
+        #
+        # Instead of manual weight * loss, we use:
+        #   exp(-log_w) * loss + log_w
+        # where log_w is a learnable parameter.  This auto-calibrates each
+        # loss to a common scale while the +log_w regulariser prevents the
+        # weight from collapsing to zero (infinite log_w).
+        #
+        # Initialised so exp(-log_w_init) == the manual weight, making the
+        # learned-weight run identical to the manual-weight run at step 0.
+        # ------------------------------------------------------------------ #
+        import math as _math
+        if self.range_view_loss_weight > 0:
+            _log_w_l1_init = _math.log(1.0 / self.range_view_loss_weight)
+            self.log_w_l1 = nn.Parameter(
+                torch.tensor(_log_w_l1_init, dtype=torch.float32)
+            )
+        else:
+            self.log_w_l1 = None
+
+        if self.chamfer_loss_weight > 0:
+            _log_w_cd_init = _math.log(1.0 / self.chamfer_loss_weight)
+            self.log_w_chamfer = nn.Parameter(
+                torch.tensor(_log_w_cd_init, dtype=torch.float32)
+            )
+        else:
+            self.log_w_chamfer = None
+
+        # ------------------------------------------------------------------ #
+        # BEV perceptual loss — VGG16 multi-scale feature distance on BEV
+        # occupancy grids (inspired by RangeLDM bev_perceptual branch).
+        # ------------------------------------------------------------------ #
+        self.bev_perceptual_weight = float(getattr(args, 'bev_perceptual_weight', 0.0))
+        if self.bev_perceptual_weight > 0:
+            _log_w_bev_init = _math.log(1.0 / self.bev_perceptual_weight)
+            self.log_w_bev = nn.Parameter(
+                torch.tensor(_log_w_bev_init, dtype=torch.float32)
+            )
+            # BEVPerceptualLoss is instantiated here; the RangeViewProjection
+            # is shared with Chamfer (created below) — we store args and build
+            # bev_perceptual_fn after range_projector is constructed.
+            self._build_bev_loss = True
+        else:
+            self.log_w_bev     = None
+            self._build_bev_loss = False
+
+        # ------------------------------------------------------------------ #
         # VAE ELBO loss (used when vae_ckpt is None — VAE trained from scratch)
         #
         # When no pre-trained VAE checkpoint is provided the encoder/decoder
@@ -219,6 +267,18 @@ class RangeViewDiT(nn.Module):
             H=int(getattr(args, 'range_h', 64)),
             W=int(getattr(args, 'range_w', 2048)),
         )
+
+        # BEV perceptual loss — built after range_projector so it can be shared.
+        if self._build_bev_loss:
+            self.bev_perceptual_fn = BEVPerceptualLoss(
+                projector=self.range_projector,
+                bev_h=int(getattr(args, 'bev_h', 256)),
+                bev_w=int(getattr(args, 'bev_w', 256)),
+                x_range=float(getattr(args, 'bev_x_range', 25.6)),
+                y_range=float(getattr(args, 'bev_y_range', 25.6)),
+            )
+        else:
+            self.bev_perceptual_fn = None
 
         # ------------------------------------------------------------------ #
         # Optional checkpoint loading (STT + DiT only; tokenizer is separate)
@@ -331,13 +391,14 @@ class RangeViewDiT(nn.Module):
         # ------------------------------------------------------------------ #
         range_l1_loss    = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
         chamfer_loss_val = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
+        bev_percep_loss  = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
         predict_decoded  = None
 
         if predict is not None:
             # Decode predicted latents → range view image [(B*F), C, H, W]
             predict_decoded = self.vae_tokenizer.decode_from_z(predict, self.h, self.w)
 
-            if self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0:
+            if self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0 or self.bev_perceptual_weight > 0:
                 range_mean = self.proj_img_mean[0]
                 range_std  = self.proj_img_stds[0]
 
@@ -370,8 +431,8 @@ class RangeViewDiT(nn.Module):
                     mask_f     = gt_valid_spatial.float()
                     range_l1_loss = (l1_map * mask_f).sum() / (mask_f.sum() + 1e-8)
 
-                # ---- Chamfer loss (pred decoded depth vs original GT) ----- #
-                if self.chamfer_loss_weight > 0:
+                # ---- Depth maps shared by Chamfer + BEV perceptual --------- #
+                if self.chamfer_loss_weight > 0 or self.bev_perceptual_weight > 0:
                     pred_range_unnorm = (
                         predict_decoded[:, 0] * range_std + range_mean
                     )  # [B*F, H, W]
@@ -379,10 +440,11 @@ class RangeViewDiT(nn.Module):
                     # Flatten spatial dims: [B*F, H*W]
                     pred_depth = pred_range_unnorm.reshape(pred_range_unnorm.shape[0], -1)
                     gt_depth   = gt_range_unnorm.reshape(gt_range_unnorm.shape[0], -1)
-
                     pred_valid = pred_depth > 0.5
                     gt_valid   = gt_valid_spatial.reshape(gt_valid_spatial.shape[0], -1)
 
+                # ---- Chamfer loss (pred decoded depth vs original GT) ----- #
+                if self.chamfer_loss_weight > 0:
                     chamfer_loss_val = batch_chamfer_distance(
                         pred_depth, gt_depth,
                         pred_valid, gt_valid,
@@ -390,17 +452,40 @@ class RangeViewDiT(nn.Module):
                         max_pts=self.chamfer_max_pts,
                     )
 
-        total_loss = (
-            diff_loss
-            + self.range_view_loss_weight * range_l1_loss
-            + self.chamfer_loss_weight    * chamfer_loss_val
+                # ---- BEV perceptual loss (VGG16 on BEV occupancy grid) ---- #
+                if self.bev_perceptual_weight > 0:
+                    bev_percep_loss = self.bev_perceptual_fn(
+                        pred_depth, gt_depth, pred_valid, gt_valid
+                    )
+
+        # Uncertainty-weighted auxiliary losses: exp(-log_w)*L + log_w
+        # log_w is clamped to >= 0 so the effective weight never exceeds exp(0)=1.0,
+        # preventing any aux loss from sending gradients larger than the raw loss
+        # value itself — this stops a drifting log_w from destabilising the DiT.
+        def _uw(log_w, loss):
+            lw = log_w.clamp(min=0.0)
+            return torch.exp(-lw) * loss + lw
+
+        aux_l1 = (
+            _uw(self.log_w_l1, range_l1_loss)
+            if self.log_w_l1 is not None else range_l1_loss.new_zeros(())
         )
+        aux_cd = (
+            _uw(self.log_w_chamfer, chamfer_loss_val)
+            if self.log_w_chamfer is not None else chamfer_loss_val.new_zeros(())
+        )
+        aux_bev = (
+            _uw(self.log_w_bev, bev_percep_loss)
+            if self.log_w_bev is not None else bev_percep_loss.new_zeros(())
+        )
+        total_loss = diff_loss + aux_l1 + aux_cd + aux_bev
 
         return {
-            "loss_all":      total_loss,
-            "loss_diff":     diff_loss,
-            "loss_range_l1": range_l1_loss,
-            "loss_chamfer":  chamfer_loss_val,
+            "loss_all":       total_loss,
+            "loss_diff":      diff_loss,
+            "loss_range_l1":  range_l1_loss,
+            "loss_chamfer":   chamfer_loss_val,
+            "loss_bev_percep": bev_percep_loss,
             # predict_decoded: [(B*F), C, H, W] or None
             # Callers use this for autoregressive conditioning (next iteration).
             "predict": predict_decoded,
@@ -436,6 +521,13 @@ class RangeViewDiT(nn.Module):
         # Concatenate all frames and encode to latent space
         features_all = torch.cat([features, features_gt], dim=1)  # [B, CF+1, C, H, W]
         latents_all  = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
+
+        # When the VAE is trainable, detach latents so that the DiT flow-matching
+        # loss does NOT back-propagate through the VAE encoder.  The VAE is trained
+        # exclusively via the ELBO below; flow-matching gradients would corrupt the
+        # codec with a non-reconstruction objective.
+        if self.vae_is_trainable:
+            latents_all = latents_all.detach()
 
         # ------------------------------------------------------------------ #
         # VAE ELBO loss (only when VAE has no pretrained checkpoint)

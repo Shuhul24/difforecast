@@ -13,7 +13,7 @@ kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequen
 kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
-train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
+train_sequences = [0] # [0, 1, 2, 3, 4, 5]  # Training sequences
 val_sequences = [6, 7]  # Validation sequences
 test_sequences = [8, 9, 10]  # Test sequences
 
@@ -197,46 +197,58 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #   KL       = 0.5 * sum(mu² + sigma² - 1 - log_sigma²)
 #
 # Tuning guide (all losses operate on *normalised* features):
-#   elbo_weight:          overall scale; 1.0 puts ELBO on par with diff loss (~0.05)
+#   elbo_weight:          scale ELBO down since range_weight=40 makes NLL ~10-40×larger;
+#                         use 0.01-0.05 to keep ELBO contribution on par with diff_loss (~0.05)
 #   kl_weight:            1e-6–1e-4  (small → near-deterministic VAE, good for LDM)
-#   vae_range_weight:     1.0  (depth channel; dominant signal)
-#   vae_intensity_weight: 0.5  (intensity channel; lower weight, noisier signal)
+#   vae_range_weight:     40.0  matches RangeLDM — depth channel heavily weighted
+#   vae_intensity_weight: 10.0  matches RangeLDM — intensity channel
 #   vae_logvar_init:      0.0  (start with log σ²=0, i.e. σ=1; adapts during training)
-elbo_weight          = 1.0    # weight on total ELBO loss term
-                              # NLL is now mean over all pixels → ELBO ≈ 0.5-2 (same scale as diff_loss)
+elbo_weight          = 0.01   # down-scaled because range_weight=40 inflates NLL; keeps ELBO ~ diff_loss
 kl_weight            = 1e-6   # β-VAE KL weight (small keeps latents near standard normal)
-vae_range_weight     = 1.0    # L1 weight for range/depth channel (normalised space)
-vae_intensity_weight = 0.5    # L1 weight for intensity channel   (normalised space)
+vae_range_weight     = 40.0   # L1 weight for range/depth channel — matches RangeLDM (was 1.0)
+vae_intensity_weight = 10.0   # L1 weight for intensity channel   — matches RangeLDM (was 0.5)
 vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 
 # ===== Auxiliary Loss Weights =====
-# These are applied to the denoised *predict* estimate produced during training,
-# giving direct image-space and 3-D geometric supervision on top of the
-# flow-matching loss.
+# These control the auxiliary losses (Range L1, Chamfer) applied on top of the
+# flow-matching diffusion loss.
 #
-# range_view_loss_weight: scales the per-pixel L1 loss between the predicted
-#   and GT normalised range-view features.  Start small (0.1) and tune up.
-#   Set to 0.0 to disable.
+# The model uses *learned uncertainty weighting* (Kendall et al., NeurIPS 2018)
+# instead of fixed multipliers.  Each auxiliary loss L_i is combined as:
 #
-# chamfer_loss_weight: scales the Chamfer Distance between the 3-D point
-#   clouds recovered from the predicted and GT range-view depth maps.  The
-#   depth channel (ch 0) is unnormalised to metres and back-projected via
-#   RangeViewProjection (spherical geometry), so xyz channels in the feature
-#   tensor are NOT required — works with any number of channels including the
-#   default 2-ch [range, intensity] format.
-#   Requires: git submodule update --init && pip install -e pyTorchChamferDistance
-#   Chamfer values are typically in tens of metres²; start with 0.01.
-#   Set to 0.0 to disable.
+#   exp(-log_w_i) * L_i + log_w_i
 #
-# chamfer_max_pts: maximum number of LiDAR points sampled per cloud before
-#   computing the O(N*M) distance matrix.  Reduces memory and compute cost.
-range_view_loss_weight = 0.1   # L1 between decode(pred_latent) and original GT range image:
-                               # both pred and target pass through the same (learning) VAE
-                               # decoder, making their difference small even for blank preds.
-chamfer_loss_weight    = 0.05  # raised from 0.001 — Chamfer is the primary geometric signal;
-                               # blank-prediction penalty in batch_chamfer_distance ensures
-                               # empty predictions are no longer silently ignored.
-chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
+# where log_w_i is a learnable nn.Parameter.  The +log_w_i regulariser prevents
+# the weight from collapsing to zero (i.e. the loss being ignored).
+#
+# These static values are used ONLY to initialise log_w_i at training start:
+#   log_w_i_init = ln(1 / weight)
+# so that step-0 behaviour is identical to the manual-weight run, and the model
+# then adapts the weights freely.
+#
+# Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
+#
+# chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
+range_view_loss_weight = 0.1   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
+chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
+
+# ===== BEV Perceptual Loss =====
+# Converts depth maps → BEV occupancy grids → VGG16 multi-scale feature distance.
+# Penalises structural/shape errors (missing walls, broken objects) that L1 misses.
+# Inspired by RangeLDM's bev_perceptual branch (losses/__init__.py L267-275).
+#
+# bev_perceptual_weight: init for learned uncertainty weight (exp(-log_w) at step 0).
+#   VGG16 feature distances are ~0.1–0.5 per scale; 0.1 keeps BEV loss ~flow loss scale.
+#   Set to 0.0 to disable (no VGG16 loaded, no extra memory cost).
+#
+# bev_h / bev_w: BEV grid resolution in pixels. 256×256 covers ±25.6 m at 0.2 m/cell.
+# bev_x_range / bev_y_range: half-extent of the BEV grid in metres.
+bev_perceptual_weight = 0.1   # init: log_w_bev = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+bev_h         = 256           # BEV grid height (forward direction)
+bev_w         = 256           # BEV grid width  (lateral direction)
+bev_x_range   = 25.6          # ±25.6 m forward coverage
+bev_y_range   = 25.6          # ±25.6 m lateral coverage
 
 # ===== Training Settings =====
 return_predict = True  # Return predictions during training for visualization

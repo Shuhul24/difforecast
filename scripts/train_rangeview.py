@@ -510,36 +510,40 @@ def train(local_rank, args):
                 loss_rl1_val   = loss_final["loss_range_l1"].item()
                 loss_cd_val    = loss_final["loss_chamfer"].item()
                 loss_elbo_val  = loss_final["loss_elbo"].item()
+                loss_bev_val   = loss_final.get("loss_bev_percep", loss_final["loss_all"].new_zeros(())).item()
 
                 # TensorBoard
-                writer.add_scalar('learning_rate/lr',   current_lr,    step)
-                writer.add_scalar('loss/loss_all',      loss_all_val,  step)
-                writer.add_scalar('loss/loss_diff',     loss_diff_val, step)
-                writer.add_scalar('loss/loss_range_l1', loss_rl1_val,  step)
-                writer.add_scalar('loss/loss_chamfer',  loss_cd_val,   step)
-                writer.add_scalar('loss/loss_elbo',     loss_elbo_val, step)
+                writer.add_scalar('learning_rate/lr',    current_lr,    step)
+                writer.add_scalar('loss/loss_all',       loss_all_val,  step)
+                writer.add_scalar('loss/loss_diff',      loss_diff_val, step)
+                writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,  step)
+                writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
+                writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
+                writer.add_scalar('loss/loss_bev_percep', loss_bev_val, step)
                 writer.flush()
 
                 # Weights & Biases
                 if not getattr(args, 'no_wandb', False) and wandb.run is not None:
                     wandb.log({
-                        'loss/loss_all':      loss_all_val,
-                        'loss/loss_diff':     loss_diff_val,
-                        'loss/loss_range_l1': loss_rl1_val,
-                        'loss/loss_chamfer':  loss_cd_val,
-                        'loss/loss_elbo':     loss_elbo_val,
-                        'learning_rate/lr':   current_lr,
+                        'loss/loss_all':       loss_all_val,
+                        'loss/loss_diff':      loss_diff_val,
+                        'loss/loss_range_l1':  loss_rl1_val,
+                        'loss/loss_chamfer':   loss_cd_val,
+                        'loss/loss_elbo':      loss_elbo_val,
+                        'loss/loss_bev_percep': loss_bev_val,
+                        'learning_rate/lr':    current_lr,
                     }, step=step)
 
             if rank == 0:
                 logger.info(
                     f'step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
                     f'lr:{optimizer.param_groups[0]["lr"]:.4e} '
-                    f'loss_avg:{loss_final["loss_all"].item():.4e} '
-                    f'diff_loss:{loss_final["loss_diff"].item():.4e} '
-                    f'range_l1:{loss_final["loss_range_l1"].item():.4e} '
-                    f'chamfer:{loss_final["loss_chamfer"].item():.4e} '
-                    f'elbo:{loss_final["loss_elbo"].item():.4e}'
+                    f'loss_avg:{loss_all_val:.4e} '
+                    f'diff_loss:{loss_diff_val:.4e} '
+                    f'range_l1:{loss_rl1_val:.4e} '
+                    f'chamfer:{loss_cd_val:.4e} '
+                    f'elbo:{loss_elbo_val:.4e} '
+                    f'bev:{loss_bev_val:.4e}'
                 )
 
             # Training visualizations (rank 0 only)
