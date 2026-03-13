@@ -1,7 +1,7 @@
 import math
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import MultiStepLR
+from torch.optim.lr_scheduler import MultiStepLR, LambdaLR
 import imageio
 import os
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
@@ -19,6 +19,14 @@ def init_optimizer(model, lr=1e-4, weight_decay=1e-3):
 def init_lr_schedule(optimizer, milstones=[1000000, 1500000, 2000000], gamma=0.5):
     scheduler = MultiStepLR(optimizer, milestones=milstones, gamma=gamma)
     return scheduler
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.5, last_epoch=-1):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate with half-cycle cosine after warmup"""

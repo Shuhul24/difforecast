@@ -42,6 +42,104 @@ from utils.range_losses import (
 from utils.bev_perceptual import BEVPerceptualLoss
 
 
+class RangeViewVAE(nn.Module):
+    """
+    VAE-only model wrapper for Stage 1 training.
+    Trains the encoder/decoder using ELBO loss without the DiT/STT overhead.
+    """
+    def __init__(self, args, local_rank=-1):
+        super().__init__()
+        self.args = args
+        self.local_rank = local_rank
+
+        self.vae_tokenizer = RangeViewVAETokenizer(args, local_rank)
+
+        if hasattr(self.vae_tokenizer, 'vae'):
+            for p in self.vae_tokenizer.vae.parameters():
+                p.requires_grad = True
+
+        self.elbo_weight          = float(getattr(args, 'elbo_weight',          1.0))
+        self.vae_range_weight     = float(getattr(args, 'vae_range_weight',     40.0))
+        self.vae_intensity_weight = float(getattr(args, 'vae_intensity_weight', 10.0))
+        self.kl_weight            = float(getattr(args, 'kl_weight',            1e-6))
+        self.proj_img_mean        = list(getattr(args, 'proj_img_mean', [10.839, 0.0]))
+        self.proj_img_stds        = list(getattr(args, 'proj_img_stds', [9.314,  1.0]))
+
+        logvar_init = float(getattr(args, 'vae_logvar_init', 0.0))
+        self.register_buffer('logvar', torch.tensor(logvar_init, dtype=torch.float32))
+
+        self.range_projector = RangeViewProjection(
+            fov_up=float(getattr(args, 'fov_up',   3.0)),
+            fov_down=float(getattr(args, 'fov_down', -25.0)),
+            H=int(getattr(args, 'range_h', 64)),
+            W=int(getattr(args, 'range_w', 2048)),
+        )
+
+        import math as _math
+        self.bev_perceptual_weight = float(getattr(args, 'bev_perceptual_weight', 0.0))
+        if self.bev_perceptual_weight > 0:
+            self.log_w_bev = nn.Parameter(
+                torch.tensor(_math.log(1.0 / self.bev_perceptual_weight), dtype=torch.float32)
+            )
+            self.bev_perceptual_fn = BEVPerceptualLoss(
+                projector=self.range_projector,
+                bev_h=int(getattr(args, 'bev_h', 256)),
+                bev_w=int(getattr(args, 'bev_w', 256)),
+                x_range=float(getattr(args, 'bev_x_range', 25.6)),
+                y_range=float(getattr(args, 'bev_y_range', 25.6)),
+            )
+        else:
+            self.log_w_bev         = None
+            self.bev_perceptual_fn = None
+
+        print(f"RangeViewVAE initialized. logvar_init={logvar_init}, "
+              f"bev_perceptual_weight={self.bev_perceptual_weight}")
+
+    def forward(self, features, step=0):
+        """
+        Args:
+            features: [B, C, H, W] Input range view images
+            step: Training step
+        """
+        elbo_loss, x_recon = self.vae_tokenizer.compute_vae_elbo(
+            features,
+            logvar=self.logvar,
+            range_weight=self.vae_range_weight,
+            intensity_weight=self.vae_intensity_weight,
+            kl_weight=self.kl_weight,
+            return_recon=True,
+        )
+        total_loss = self.elbo_weight * elbo_loss
+
+        bev_percep_loss = torch.zeros(1, device=features.device, dtype=features.dtype)
+        if self.bev_perceptual_weight > 0:
+            range_std  = self.proj_img_stds[0]
+            range_mean = self.proj_img_mean[0]
+
+            pred_depth = (x_recon[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
+            gt_depth   = (features[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
+            pred_valid = pred_depth > 0.5
+            gt_valid   = gt_depth   > 0.5
+
+            bev_percep_loss = self.bev_perceptual_fn(pred_depth, gt_depth, pred_valid, gt_valid)
+            lw = self.log_w_bev.clamp(min=0.0)
+            total_loss = total_loss + torch.exp(-lw) * bev_percep_loss + lw
+
+        return {
+            "loss_all":        total_loss,
+            "loss_elbo":       elbo_loss,
+            "loss_bev_percep": bev_percep_loss,
+            "predict":         None,
+        }
+
+    def save_model(self, path, epoch, rank=0):
+        if rank == 0:
+            torch.save(
+                {'model_state_dict': self.state_dict(), 'epoch': epoch},
+                f'{path}/rangeview_vae_{epoch}.pkl',
+            )
+
+
 class RangeViewDiT(nn.Module):
     """DiT model for range view image prediction using DCAE tokenization.
 
@@ -244,8 +342,8 @@ class RangeViewDiT(nn.Module):
 
         if self.vae_is_trainable:
             logvar_init = float(getattr(args, 'vae_logvar_init', 0.0))
-            self.logvar = nn.Parameter(
-                torch.ones(size=(), dtype=torch.float32) * logvar_init
+            self.register_buffer(
+                'logvar', torch.ones(size=(), dtype=torch.float32) * logvar_init
             )
             print(
                 f"RangeViewDiT: VAE is trainable (no checkpoint). "
@@ -522,13 +620,6 @@ class RangeViewDiT(nn.Module):
         features_all = torch.cat([features, features_gt], dim=1)  # [B, CF+1, C, H, W]
         latents_all  = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
 
-        # When the VAE is trainable, detach latents so that the DiT flow-matching
-        # loss does NOT back-propagate through the VAE encoder.  The VAE is trained
-        # exclusively via the ELBO below; flow-matching gradients would corrupt the
-        # codec with a non-reconstruction objective.
-        if self.vae_is_trainable:
-            latents_all = latents_all.detach()
-
         # ------------------------------------------------------------------ #
         # VAE ELBO loss (only when VAE has no pretrained checkpoint)
         #
@@ -543,7 +634,7 @@ class RangeViewDiT(nn.Module):
         elbo_loss = torch.zeros(1, device=features.device, dtype=features.dtype)
         if self.vae_is_trainable:
             B, T_all, C, H, W = features_all.shape
-            x_flat = features_all.reshape(B * T_all, C, H, W).detach()
+            x_flat = features_all.reshape(B * T_all, C, H, W)
             elbo_loss = self.vae_tokenizer.compute_vae_elbo(
                 x_flat,
                 logvar=self.logvar,

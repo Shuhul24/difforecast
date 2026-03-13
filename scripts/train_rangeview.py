@@ -1,6 +1,19 @@
 """
 Training script for Range View DiT Model
 Simplified training without trajectory prediction
+
+The script now supports a stage-wise workflow inspired by the
+RangeLDM project.  The user may select one of three modes via
+``--stage``:
+
+    1   pretrain the RangeLDM VAE component only (ELBO loss);
+    2   train the DiT/STT modules with a frozen VAE (requires a
+        pretrained ``vae_ckpt`` for best behaviour);
+    all full training (default) which behaves as before.
+
+Stage 1 automatically freezes DiT/STT, and stage 2 will freeze the
+VAE if a checkpoint path is provided.  The loss function and logging
+are adjusted accordingly.
 """
 
 import os
@@ -32,11 +45,15 @@ sys.path.append(root_path)
 from utils.config_utils import Config
 from utils.deepspeed_utils import get_deepspeed_config
 from utils.utils import *
-from models.model_rangeview import RangeViewDiT
-from dataset.dataset_kitti_rangeview import KITTIRangeViewTrainDataset, KITTIRangeViewValDataset
+from models.model_rangeview import RangeViewDiT, RangeViewVAE
+from dataset.dataset_kitti_rangeview import (
+    KITTIRangeViewTrainDataset,
+    KITTIRangeViewValDataset,
+    KITTIRangeViewVAEDataset
+)
 from dataset.projection import RangeProjection
 from utils.comm import _init_dist_envi
-from utils.running import init_lr_schedule, save_ckpt, load_parameters, add_weight_decay, save_ckpt_deepspeed, load_from_deepspeed_ckpt
+from utils.running import init_lr_schedule, get_cosine_schedule_with_warmup, save_ckpt, load_parameters, add_weight_decay, save_ckpt_deepspeed, load_from_deepspeed_ckpt
 from utils.bev_utils import render_bev_comparison, render_rangeview_comparison
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -67,6 +84,11 @@ def add_arguments():
                         help='Disable Weights & Biases logging')
     parser.add_argument('--vis_steps', type=int, default=500,
                         help='Save training visualizations every N steps (0 = disabled)')
+    parser.add_argument('--warmup_steps', type=int, default=500, help='Warmup steps for LR scheduler')
+
+    # Stage-wise training support (1 = VAE only, 2 = DiT/STT only, all = default/full)
+    parser.add_argument('--stage', type=str, default='all', choices=['1','2','all'],
+                        help='Which stage to run: 1 for VAE pretraining, 2 for DiT/STT training, all for both (default)')
 
     args = parser.parse_args()
     cfg = Config.fromfile(args.config)
@@ -76,7 +98,7 @@ def add_arguments():
 
 def init_logs(global_rank, args):
     """Initialize logging directories and loggers"""
-    print('Initializing logs...')
+    print(f'Initializing logs... (stage={getattr(args, "stage", "all")})')
     log_path = os.path.join(args.logdir, args.exp_name)
     save_model_path = os.path.join(args.outdir, args.exp_name)
     tdir_path = os.path.join(args.tdir, args.exp_name)
@@ -137,26 +159,49 @@ def create_rangeview_dataset(args):
     """Create KITTI range view dataset"""
     print("Creating KITTI range view dataset...")
 
-    # Training dataset
-    train_dataset = KITTIRangeViewTrainDataset(
-        sequences_path=args.kitti_sequences_path,
-        poses_path=args.kitti_poses_path,
-        sequences=args.train_sequences,
-        condition_frames=args.condition_frames,
-        forward_iter=args.forward_iter,
-        h=args.range_h,
-        w=args.range_w,
-        fov_up=args.fov_up,
-        fov_down=args.fov_down,
-        fov_left=args.fov_left,
-        fov_right=args.fov_right,
-        proj_img_mean=args.proj_img_mean,
-        proj_img_stds=args.proj_img_stds,
-        augmentation_config=args.augmentation_config if hasattr(args, 'augmentation_config') else None,
-        pc_extension=args.pc_extension,
-        pc_dtype=getattr(np, args.pc_dtype),
-        pc_reshape=tuple(args.pc_reshape),
-    )
+    stage = getattr(args, 'stage', 'all')
+    
+    if stage == '1':
+        print("Stage 1 selected: Using KITTIRangeViewVAEDataset (single frames, stride=1).")
+        train_dataset = KITTIRangeViewVAEDataset(
+            sequences_path=args.kitti_sequences_path,
+            poses_path=args.kitti_poses_path,
+            sequences=args.train_sequences,
+            # condition_frames/forward_iter are ignored/overridden by VAE dataset class
+            h=args.range_h,
+            w=args.range_w,
+            fov_up=args.fov_up,
+            fov_down=args.fov_down,
+            fov_left=args.fov_left,
+            fov_right=args.fov_right,
+            proj_img_mean=args.proj_img_mean,
+            proj_img_stds=args.proj_img_stds,
+            augmentation_config=args.augmentation_config if hasattr(args, 'augmentation_config') else None,
+            pc_extension=args.pc_extension,
+            pc_dtype=getattr(np, args.pc_dtype),
+            pc_reshape=tuple(args.pc_reshape),
+        )
+    else:
+        print("Stage 2/All selected: Using KITTIRangeViewTrainDataset (sequences).")
+        train_dataset = KITTIRangeViewTrainDataset(
+            sequences_path=args.kitti_sequences_path,
+            poses_path=args.kitti_poses_path,
+            sequences=args.train_sequences,
+            condition_frames=args.condition_frames,
+            forward_iter=args.forward_iter,
+            h=args.range_h,
+            w=args.range_w,
+            fov_up=args.fov_up,
+            fov_down=args.fov_down,
+            fov_left=args.fov_left,
+            fov_right=args.fov_right,
+            proj_img_mean=args.proj_img_mean,
+            proj_img_stds=args.proj_img_stds,
+            augmentation_config=args.augmentation_config if hasattr(args, 'augmentation_config') else None,
+            pc_extension=args.pc_extension,
+            pc_dtype=getattr(np, args.pc_dtype),
+            pc_reshape=tuple(args.pc_reshape),
+        )
 
     print(f"KITTI training dataset created with {len(train_dataset)} samples")
     return train_dataset
@@ -184,23 +229,28 @@ def save_training_visualization(
     if predict_decoded is None:
         return
 
+    is_vae_mode = features_cond is None
     os.makedirs(vis_dir, exist_ok=True)
 
     range_mean = args.proj_img_mean[0]
     range_std  = args.proj_img_stds[0]
 
     # Work with the first batch sample only, move to CPU numpy
-    # features_cond: [B, CF, C, H, W] — take b=0
-    cond_np  = features_cond[0].float().cpu().numpy()   # [CF, C, H, W]
-    gt_np    = features_gt[0, 0].float().cpu().numpy()  # [C, H, W]
+    if is_vae_mode:
+        # VAE Mode: features_gt is [B*T, C, H, W], predict_decoded is [B*T, C, H, W]
+        # We just visualize the first sample in the flattened batch
+        gt_np = features_gt[0].float().cpu().numpy()      # [C, H, W]
+        pred_np = predict_decoded[0].float().cpu().numpy() # [C, H, W]
+    else:
+        # Forecast Mode: features_cond is [B, CF, C, H, W]
+        cond_np  = features_cond[0].float().cpu().numpy()   # [CF, C, H, W]
+        # features_gt is [B, 1, C, H, W]
+        gt_np    = features_gt[0, 0].float().cpu().numpy()  # [C, H, W]
+        # predict_decoded logic below...
 
-    # predict_decoded may be [(B*CF), C, H, W] (multifw) or [B, C, H, W]
-    # We want the prediction corresponding to the first batch item's last forward step.
-    # predict_decoded is [(B*CF), C, H, W].  For batch item 0, the prediction
-    # matching features_gt (the frame immediately after the CF conditioning frames)
-    # is at index CF-1 (the last target for the first batch item).
-    cf = cond_np.shape[0]
-    pred_np  = predict_decoded[cf - 1].float().cpu().numpy()  # [C, H, W]
+    if not is_vae_mode:
+        cf = cond_np.shape[0]
+        pred_np  = predict_decoded[cf - 1].float().cpu().numpy()  # [C, H, W]
 
     # --- unnormalise depth channel (ch 0) to metres ---
     def to_depth(feat_chw):
@@ -214,25 +264,55 @@ def save_training_visualization(
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    CF = cond_np.shape[0]
     max_depth = 80.0
-    fig, axes = plt.subplots(1, CF, figsize=(6 * CF, 4))
-    if CF == 1:
-        axes = [axes]
-    for t, ax in enumerate(axes):
-        depth_t = to_depth(cond_np[t])
-        im = ax.imshow(np.clip(depth_t, 0, max_depth), cmap='plasma',
-                       vmin=0, vmax=max_depth, aspect='auto')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
-        ax.set_title(f'Cond frame t-{CF - t}', fontsize=10)
-        ax.set_xlabel('azimuth'); ax.set_ylabel('elevation')
-    fig.suptitle(f'Step {step} — Conditioning frames (depth)', fontsize=12)
-    plt.tight_layout()
-    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_cond.png'), dpi=80, bbox_inches='tight')
-    plt.close(fig)
+    if not is_vae_mode:
+        CF = cond_np.shape[0]
+        fig, axes = plt.subplots(1, CF, figsize=(6 * CF, 4))
+        if CF == 1:
+            axes = [axes]
+        for t, ax in enumerate(axes):
+            depth_t = to_depth(cond_np[t])
+            im = ax.imshow(np.clip(depth_t, 0, max_depth), cmap='plasma',
+                           vmin=0, vmax=max_depth, aspect='auto')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
+            ax.set_title(f'Cond frame t-{CF - t}', fontsize=10)
+            ax.set_xlabel('azimuth'); ax.set_ylabel('elevation')
+        fig.suptitle(f'Step {step} — Conditioning frames (depth)', fontsize=12)
+        plt.tight_layout()
+        plt.savefig(os.path.join(vis_dir, f'step{step:07d}_cond.png'), dpi=80, bbox_inches='tight')
+        plt.close(fig)
+
+    # --- 1b. Intensity Comparison (If input has >= 2 channels) ---
+    # Channel 0 is Range, Channel 1 is Intensity (usually)
+    if gt_np.shape[0] >= 2:
+        int_mean = args.proj_img_mean[1]
+        int_std  = args.proj_img_stds[1]
+
+        def to_intensity(feat_chw):
+            # Unnormalize: x * std + mean
+            return feat_chw[1] * int_std + int_mean
+
+        gt_int   = to_intensity(gt_np)
+        pred_int = to_intensity(pred_np)
+        
+        # Plot GT vs Recon Intensity
+        fig_int, ax_int = plt.subplots(2, 1, figsize=(10, 6))
+        
+        im_gt = ax_int[0].imshow(gt_int, cmap='gray', aspect='auto', vmin=0, vmax=1)
+        ax_int[0].set_title(f'GT Intensity (Step {step})')
+        plt.colorbar(im_gt, ax=ax_int[0], fraction=0.046, pad=0.04)
+        
+        im_pr = ax_int[1].imshow(pred_int, cmap='gray', aspect='auto', vmin=0, vmax=1)
+        ax_int[1].set_title(f'Reconstructed Intensity (Step {step})')
+        plt.colorbar(im_pr, ax=ax_int[1], fraction=0.046, pad=0.04)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(vis_dir, f'step{step:07d}_{"vae_rec" if is_vae_mode else "forecast"}_intensity.png'), dpi=100)
+        plt.close(fig_int)
 
     # --- 2. GT vs Predicted range-view + abs error ---
-    rv_path = os.path.join(vis_dir, f'step{step:07d}_rv.png')
+    suffix = "vae_rec" if is_vae_mode else "forecast"
+    rv_path = os.path.join(vis_dir, f'step{step:07d}_{suffix}_rv.png')
     render_rangeview_comparison(
         gt_depth=gt_depth,
         pred_depth=pred_depth,
@@ -249,7 +329,7 @@ def save_training_visualization(
     try:
         pts_gt   = projector.back_project_range(np.clip(gt_depth,   0, max_depth))
         pts_pred = projector.back_project_range(np.clip(pred_depth, 0, max_depth))
-        bev_path = os.path.join(vis_dir, f'step{step:07d}_bev.png')
+        bev_path = os.path.join(vis_dir, f'step{step:07d}_{suffix}_bev.png')
         bev_range = float(getattr(args, 'bev_range', 50.0))
         render_bev_comparison(
             points_gt=pts_gt, points_pred=pts_pred,
@@ -258,6 +338,117 @@ def save_training_visualization(
         )
     except Exception:
         pass   # BEV is optional; don't crash training if back-projection fails
+
+
+def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, vis_dir):
+    """Save two images for multi-step forecast quality:
+
+    1. ``_multistep_rv.png``  — range-view grid:
+       rows = future frames (+1 … +N), cols = [GT depth | Pred depth | |Error|]
+
+    2. ``_multistep_bev.png`` — BEV grid:
+       rows = future frames (+1 … +N), cols = [GT BEV | Pred BEV | Overlay (G=GT, R=Pred)]
+
+    Args:
+        step:        Training step.
+        args:        Config namespace.
+        pred_frames: List of N tensors, each [B, C, H, W] — predicted frame at chain step j.
+        gt_frames:   List of N tensors, each [B, C, H, W] — GT frame at chain step j.
+        projector:   RangeProjection for BEV back-projection.
+        vis_dir:     Output directory.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    n = len(pred_frames)
+    if n == 0:
+        return
+
+    os.makedirs(vis_dir, exist_ok=True)
+    range_mean = args.proj_img_mean[0]
+    range_std  = args.proj_img_stds[0]
+    max_depth  = 80.0
+    bev_range  = float(getattr(args, 'bev_range', 50.0))
+
+    def to_depth(chw):
+        return np.clip(chw[0].float().cpu().numpy() * range_std + range_mean, 0, max_depth)
+
+    def make_bev(depth_hw):
+        try:
+            pts = projector.back_project_range(depth_hw)
+            res  = 0.2
+            grid = int(2 * bev_range / res)
+            img  = np.zeros((grid, grid), dtype=np.float32)
+            xi = ((pts[:, 0] + bev_range) / res).astype(int)
+            yi = ((pts[:, 1] + bev_range) / res).astype(int)
+            mask = (xi >= 0) & (xi < grid) & (yi >= 0) & (yi < grid)
+            img[yi[mask], xi[mask]] = 1.0
+            return img
+        except Exception:
+            return np.zeros((100, 100), dtype=np.float32)
+
+    # Pre-compute depths and BEVs for all frames
+    gt_depths, pred_depths, gt_bevs, pred_bevs = [], [], [], []
+    for fi in range(n):
+        gd = to_depth(gt_frames[fi][0])
+        pd = to_depth(pred_frames[fi][0])
+        gt_depths.append(gd);   pred_depths.append(pd)
+        gt_bevs.append(make_bev(gd)); pred_bevs.append(make_bev(pd))
+
+    # ------------------------------------------------------------------ #
+    # Image 1: Range-view — rows=frames, cols=[GT | Pred | |Error|]
+    # ------------------------------------------------------------------ #
+    fig_rv, axes_rv = plt.subplots(n, 3, figsize=(18, 2.8 * n))
+    if n == 1:
+        axes_rv = axes_rv[np.newaxis, :]
+
+    for c, title in enumerate(['GT depth (m)', 'Pred depth (m)', '|Error| (m)']):
+        axes_rv[0, c].set_title(title, fontsize=9, fontweight='bold')
+
+    for fi in range(n):
+        err = np.abs(pred_depths[fi] - gt_depths[fi])
+        axes_rv[fi, 0].imshow(gt_depths[fi],   cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        axes_rv[fi, 1].imshow(pred_depths[fi],  cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        im_err = axes_rv[fi, 2].imshow(err,     cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
+        axes_rv[fi, 0].set_ylabel(f'+{fi+1} frame', fontsize=8)
+        plt.colorbar(im_err, ax=axes_rv[fi, 2], fraction=0.015, pad=0.02, label='m')
+        for ax in axes_rv[fi]:
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig_rv.suptitle(f'Step {step} — {n}-Frame Range-View Forecast', fontsize=11)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_multistep_rv.png'), dpi=90, bbox_inches='tight')
+    plt.close(fig_rv)
+
+    # ------------------------------------------------------------------ #
+    # Image 2: BEV — rows=frames, cols=[GT BEV | Pred BEV | Overlay]
+    # ------------------------------------------------------------------ #
+    fig_bev, axes_bev = plt.subplots(n, 3, figsize=(12, 4 * n))
+    if n == 1:
+        axes_bev = axes_bev[np.newaxis, :]
+
+    for c, title in enumerate(['GT BEV', 'Pred BEV', 'Overlay (green=GT, red=Pred)']):
+        axes_bev[0, c].set_title(title, fontsize=9, fontweight='bold')
+
+    for fi in range(n):
+        gb, pb = gt_bevs[fi], pred_bevs[fi]
+        h_b, w_b = gb.shape
+        overlay = np.zeros((h_b, w_b, 3), dtype=np.float32)
+        overlay[..., 1] = np.clip(gb, 0, 1)   # green = GT
+        overlay[..., 0] = np.clip(pb, 0, 1)   # red   = Pred
+
+        axes_bev[fi, 0].imshow(gb,      cmap='gray', aspect='equal', origin='lower')
+        axes_bev[fi, 1].imshow(pb,      cmap='gray', aspect='equal', origin='lower')
+        axes_bev[fi, 2].imshow(overlay,              aspect='equal', origin='lower')
+        axes_bev[fi, 0].set_ylabel(f'+{fi+1} frame', fontsize=8)
+        for ax in axes_bev[fi]:
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig_bev.suptitle(f'Step {step} — {n}-Frame BEV Forecast', fontsize=11)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_multistep_bev.png'), dpi=90, bbox_inches='tight')
+    plt.close(fig_bev)
 
 
 def main(args):
@@ -320,23 +511,55 @@ def train(local_rank, args):
     # (which temporarily holds both copies, doubling CPU RAM usage).
     print("Creating Range View DiT model...")
     torch.set_default_dtype(torch.bfloat16)
-    model = RangeViewDiT(
-        args,
-        local_rank=local_rank,
-        condition_frames=args.condition_frames // args.block_size
-    )
+    
+    stage = getattr(args, 'stage', 'all')
+    if stage == '1':
+        model = RangeViewVAE(args, local_rank=local_rank)
+    else:
+        model = RangeViewDiT(
+            args,
+            local_rank=local_rank,
+            condition_frames=args.condition_frames // args.block_size
+        )
+        
     torch.set_default_dtype(torch.float32)
 
+    # stage-specific parameter freezing
+    if stage == '1':
+        print("Stage 1 selected: Using RangeViewVAE model for ELBO optimization.")
+        # ensure a checkpoint is not provided, otherwise VAE will be frozen
+        if getattr(args, 'vae_ckpt', None) is not None:
+            print("Warning: vae_ckpt is provided but will be ignored for stage 1 pretraining.")
+            args.vae_ckpt = None
+    elif stage == '2':
+        # DiT/STT training: freeze VAE
+        print("Stage 2 selected: freezing VAE (if checkpoint exists) and training DiT/STT.")
+        # If no checkpoint supplied we still freeze the VAE parameters so that
+        # only DiT/STT update; this mirrors the behaviour of RangeLDM stage-2.
+        if hasattr(model, 'vae_tokenizer') and hasattr(model.vae_tokenizer, 'vae'):
+            for p in model.vae_tokenizer.vae.parameters():
+                p.requires_grad = False
+        if getattr(args, 'vae_ckpt', None) is None:
+            print("Warning: no vae_ckpt provided for stage 2; the model will start with random VAE weights but they will be frozen.")
+    else:
+        print("Full training (stage=all): no additional freezing applied.")
+
     # Count parameters
-    total_params = count_parameters(model)
-    stt_params = count_parameters(model.model)
-    dit_params = count_parameters(model.dit)
-    print(f"Total Parameters: {format_number(total_params)}")
-    print(f"STT Parameters: {format_number(stt_params)}")
-    print(f"DiT Parameters: {format_number(dit_params)}")
+    if stage == '1':
+        total_params = count_parameters(model)
+        print(f"Total VAE Parameters: {format_number(total_params)}")
+    else:
+        total_params = count_parameters(model)
+        stt_params = count_parameters(model.model)
+        dit_params = count_parameters(model.dit)
+        print(f"Total Parameters: {format_number(total_params)}")
+        print(f"STT Parameters: {format_number(stt_params)}")
+        print(f"DiT Parameters: {format_number(dit_params)}")
 
     # Calculate effective batch size
-    eff_batch_size = args.batch_size * args.condition_frames // args.block_size * dist.get_world_size()
+    # Stage 1 processes single frames; stages 2/all process condition_frames per sample.
+    frames_per_sample = 1 if stage == '1' else args.condition_frames // args.block_size
+    eff_batch_size = args.batch_size * frames_per_sample * dist.get_world_size()
 
     # Set learning rate
     if args.lr is None:
@@ -356,7 +579,8 @@ def train(local_rank, args):
     print(f"Optimizer: {optimizer}")
 
     # Learning rate schedule
-    lr_schedule = init_lr_schedule(optimizer, milstones=[1000000, 1500000, 2000000], gamma=0.5)
+    # lr_schedule = init_lr_schedule(optimizer, milstones=[1000000, 1500000, 2000000], gamma=0.5)
+    lr_schedule = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.iter)
 
     # Load checkpoint if provided
     if args.resume_path is not None:
@@ -424,77 +648,136 @@ def train(local_rank, args):
         for i, (range_views, rot_matrix) in enumerate(train_data):
             model.train()
 
-            # Move data to GPU — keep [B, T, C, H, W]; the model's DCAE
-            # tokenizer handles the encode/decode internally.
-            range_views = range_views.cuda()  # [B, T, C, H, W]
-            rot_matrix  = rot_matrix.cuda()   # [B, T, 4, 4]
-
-            B, T, C, H, W = range_views.shape
+            range_views = range_views.cuda()  # Stage 1: [B, C, H, W], Stage 2: [B, T, C, H, W]
+            rot_matrix  = rot_matrix.cuda()   # Stage 1: [B, 4, 4],    Stage 2: [B, T, 4, 4]
 
             data_time_interval = time.time() - time_stamp
             torch.cuda.synchronize()
             time_stamp = time.time()
 
+            stage = getattr(args, 'stage', 'all')
             cf = args.condition_frames // args.block_size
-            features_cond = range_views[:, :cf, ...]   # [B, CF, C, H, W]
-            rel_pose_cond, rel_yaw_cond = None, None
 
-            # Forward iterations
-            fw_iter = 1
-            if step % args.multifw_perstep == 0:
-                fw_iter = args.forward_iter
+            if stage == '1':
+                # --- STAGE 1 (VAE Only) ---
+                # Data is already [B, C, H, W] from KITTIRangeViewVAEDataset
+                features_gt = range_views
+                
+                # Get dimensions for reshaping logic (though simple here)
+                B, C, H, W = features_gt.shape
 
-            # Number of rotation matrices needed per forward pass:
-            # (condition_frames + 1) * block_size
-            n_rot = (args.condition_frames + 1) * args.block_size
-            for j in range(fw_iter):
-                rot_matrix_cond = rot_matrix[
-                    :, j * args.block_size:j * args.block_size + n_rot, ...
-                ]
-                features_gt = range_views[:, j + cf:j + cf + 1, ...]  # [B, 1, C, H, W]
-
-                # Forward pass with mixed precision
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    loss_final = model(
-                        features_cond,
-                        rot_matrix_cond,
-                        features_gt,
-                        rel_pose_cond=rel_pose_cond,
-                        rel_yaw_cond=rel_yaw_cond,
-                        step=step,
-                    )
-
+                    # RangeViewVAE forward: (features, step)
+                    loss_final = model(features_gt, step=step)
+                
                 loss_value = loss_final["loss_all"]
-
-                # Check for NaN
+                
                 if not math.isfinite(loss_value):
                     print(f"Loss is {loss_value}, stopping training")
                     sys.exit(1)
 
-                # Backward and optimize
                 model.backward(loss_value)
                 model.step()
+                
+            else:
+                # --- STAGE 2 / ALL (Diffusion Forecasting) ---
+                
+                # Data is [B, T, C, H, W]
+                B, T, C, H, W = range_views.shape
+                
+                features_cond = range_views[:, :cf, ...]   # [B, CF, C, H, W]
+                rel_pose_cond, rel_yaw_cond = None, None
 
-                # Prepare for next autoregressive iteration.
-                # predict is [(B*CF), C, H, W] decoded range view features.
-                if j < fw_iter - 1:
-                    if args.return_predict:
-                        predict_features = loss_final["predict"].detach()
-                    else:
-                        model.eval()
-                        predict_features = model(
+                # Forward iterations
+                fw_iter = 1
+                if step % args.multifw_perstep == 0:
+                    fw_iter = args.forward_iter
+
+                # Collect chain predictions for multi-step visualization (rank 0, vis steps only).
+                vis_steps = getattr(args, 'vis_steps', 500)
+                collect_chain_vis = (
+                    vis_steps > 0 and step % vis_steps == 0 and rank == 0 and fw_iter > 1
+                )
+                chain_pred_frames = []   # [B, C, H, W] per chain step
+                chain_gt_frames   = []   # [B, C, H, W] per chain step
+
+                # Number of rotation matrices needed per forward pass:
+                # (condition_frames + 1) * block_size
+                n_rot = (args.condition_frames + 1) * args.block_size
+                for j in range(fw_iter):
+                    rot_matrix_cond = rot_matrix[
+                        :, j * args.block_size:j * args.block_size + n_rot, ...
+                    ]
+                    features_gt = range_views[:, j + cf:j + cf + 1, ...]  # [B, 1, C, H, W]
+
+                    # Forward pass with mixed precision
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        loss_final = model(
                             features_cond,
                             rot_matrix_cond,
                             features_gt,
-                            sample_last=False,
+                            rel_pose_cond=rel_pose_cond,
+                            rel_yaw_cond=rel_yaw_cond,
+                            step=step,
                         )
-                        model.train()
 
-                    # Reshape [(B*CF), C, H, W] → [B, CF, C, H, W] for next iter
-                    features_cond = rearrange(
-                        predict_features, '(b t) c h w -> b t c h w',
-                        b=B, t=cf,
-                    )
+                    loss_value = loss_final["loss_all"]
+
+                    # Check for NaN
+                    if not math.isfinite(loss_value):
+                        print(f"Loss is {loss_value}, stopping training")
+                        sys.exit(1)
+
+                    # Backward and optimize
+                    model.backward(loss_value)
+                    model.step()
+
+                    # Collect this step's prediction for multi-step visualization.
+                    # The last CF positions in predict contain the x_0 for features_gt.
+                    if collect_chain_vis and loss_final["predict"] is not None:
+                        pred_cf = rearrange(
+                            loss_final["predict"].detach(),
+                            '(b t) c h w -> b t c h w', b=B, t=cf,
+                        )
+                        chain_pred_frames.append(pred_cf[:, -1, ...])  # [B, C, H, W]
+                        chain_gt_frames.append(features_gt[:, 0, ...].detach())
+
+                    # Prepare for next autoregressive iteration.
+                    if j < fw_iter - 1:
+                        if args.return_predict and loss_final["predict"] is not None:
+                            # Use the flow-matching x_0 estimate — already computed,
+                            # no extra forward pass needed.
+                            predict_features = loss_final["predict"].detach()
+                        else:
+                            # Full diffusion sampling fallback (slower).
+                            model.eval()
+                            with torch.no_grad():
+                                predict_features = model(
+                                    features_cond,
+                                    rot_matrix_cond,
+                                    features_gt,
+                                    sample_last=False,
+                                )
+                            model.train()
+
+                        # Slide the conditioning window forward by 1 frame:
+                        # [(B*CF), C, H, W] → [B, CF, C, H, W]
+                        features_cond = rearrange(
+                            predict_features, '(b t) c h w -> b t c h w',
+                            b=B, t=cf,
+                        )
+
+                # Multi-step visualization after the chain (rank 0, vis steps, chain steps only).
+                if collect_chain_vis and chain_pred_frames:
+                    with torch.no_grad():
+                        save_multistep_visualization(
+                            step=step,
+                            args=args,
+                            pred_frames=chain_pred_frames,
+                            gt_frames=chain_gt_frames,
+                            projector=vis_projector,
+                            vis_dir=vis_dir,
+                        )
 
             step += 1
             train_time_interval = time.time() - time_stamp
@@ -503,41 +786,28 @@ def train(local_rank, args):
             torch.cuda.synchronize()
 
             # Logging
-            if step % 100 == 1 and rank == 0:
-                current_lr     = optimizer.param_groups[0]['lr']
-                loss_all_val   = loss_final["loss_all"].item()
-                loss_diff_val  = loss_final["loss_diff"].item()
-                loss_rl1_val   = loss_final["loss_range_l1"].item()
-                loss_cd_val    = loss_final["loss_chamfer"].item()
-                loss_elbo_val  = loss_final["loss_elbo"].item()
-                loss_bev_val   = loss_final.get("loss_bev_percep", loss_final["loss_all"].new_zeros(())).item()
-
-                # TensorBoard
-                writer.add_scalar('learning_rate/lr',    current_lr,    step)
-                writer.add_scalar('loss/loss_all',       loss_all_val,  step)
-                writer.add_scalar('loss/loss_diff',      loss_diff_val, step)
-                writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,  step)
-                writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
-                writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
-                writer.add_scalar('loss/loss_bev_percep', loss_bev_val, step)
-                writer.flush()
-
-                # Weights & Biases
-                if not getattr(args, 'no_wandb', False) and wandb.run is not None:
-                    wandb.log({
-                        'loss/loss_all':       loss_all_val,
-                        'loss/loss_diff':      loss_diff_val,
-                        'loss/loss_range_l1':  loss_rl1_val,
-                        'loss/loss_chamfer':   loss_cd_val,
-                        'loss/loss_elbo':      loss_elbo_val,
-                        'loss/loss_bev_percep': loss_bev_val,
-                        'learning_rate/lr':    current_lr,
-                    }, step=step)
-
             if rank == 0:
+                # Fetch loss values for logging every step
+                current_lr = optimizer.param_groups[0]['lr']
+                # log values depending on stage
+                stage = getattr(args, 'stage', 'all')
+                if stage == '1':
+                    loss_elbo_val = loss_final.get("loss_elbo", 0.0).item()
+                    loss_bev_val  = loss_final.get("loss_bev_percep", 0.0).item()
+                    loss_all_val  = loss_final["loss_all"].item()
+                    loss_diff_val = loss_rl1_val = loss_cd_val = 0.0
+                else:
+                    loss_all_val = loss_final["loss_all"].item()
+                    loss_diff_val = loss_final.get("loss_diff", 0.0).item()
+                    loss_rl1_val = loss_final.get("loss_range_l1", 0.0).item()
+                    loss_cd_val = loss_final.get("loss_chamfer", 0.0).item()
+                    loss_elbo_val = loss_final.get("loss_elbo", 0.0).item()
+                    loss_bev_val = loss_final.get("loss_bev_percep", 0.0).item()
+
+                # Log to console every step
                 logger.info(
-                    f'step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
-                    f'lr:{optimizer.param_groups[0]["lr"]:.4e} '
+                    f'stage:{stage} step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
+                    f'lr:{current_lr:.4e} '
                     f'loss_avg:{loss_all_val:.4e} '
                     f'diff_loss:{loss_diff_val:.4e} '
                     f'range_l1:{loss_rl1_val:.4e} '
@@ -546,15 +816,72 @@ def train(local_rank, args):
                     f'bev:{loss_bev_val:.4e}'
                 )
 
+                # Log to TensorBoard/W&B less frequently
+                if step % 100 == 1:
+                    # TensorBoard
+                    writer.add_scalar('learning_rate/lr',    current_lr,    step)
+                    writer.add_scalar('loss/loss_all',       loss_all_val,  step)
+                    writer.add_scalar('loss/loss_diff',      loss_diff_val, step)
+                    writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,  step)
+                    writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
+                    writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
+                    writer.add_scalar('loss/loss_bev_percep', loss_bev_val, step)
+                    writer.flush()
+
+                    # Weights & Biases
+                    if not getattr(args, 'no_wandb', False) and wandb.run is not None:
+                        wandb.log({
+                            'loss/loss_all':       loss_all_val,
+                            'loss/loss_diff':      loss_diff_val,
+                            'loss/loss_range_l1':  loss_rl1_val,
+                            'loss/loss_chamfer':   loss_cd_val,
+                            'loss/loss_elbo':      loss_elbo_val,
+                            'loss/loss_bev_percep': loss_bev_val,
+                            'learning_rate/lr':    current_lr,
+                        }, step=step)
+
             # Training visualizations (rank 0 only)
             vis_steps = getattr(args, 'vis_steps', 500)
             if vis_steps > 0 and step % vis_steps == 0 and rank == 0:
                 predict_vis = loss_final.get("predict")
+                
+                # Prepare conditioning frames for visualization
+                if stage == '1':
+                    features_cond_vis = None
+                else:
+                    # Stage 2: Always use the ground-truth initial frames, not the autoregressive loop variable
+                    features_cond_vis = range_views[:, :cf, ...].detach()
+                
+                # For Stage 1, we defer prediction to here to avoid overhead in training step
+                if stage == '1' and predict_vis is None:
+                    with torch.no_grad():
+                        # Unwrap model if DDP/DeepSpeed wrapped
+                        raw_model = model.module if hasattr(model, 'module') else model
+                        if hasattr(raw_model, 'vae_tokenizer'):
+                            # The VAE tokenizer's encode/decode methods expect sequences.
+                            # In stage 1, features_gt is a batch of single images [B, C, H, W].
+                            # We add a temporal dimension of size 1 to match the expected input shape.
+                            features_gt_seq = features_gt.unsqueeze(1)  # [B, 1, C, H, W]
+
+                            # Encode to latent tokens
+                            z_seq = raw_model.vae_tokenizer.encode_to_z(features_gt_seq)  # [B, 1, L, C]
+
+                            # Flatten for decoding, as decode_from_z expects [B*T, L, C]
+                            z_flat = rearrange(z_seq, 'b t l c -> (b t) l c')
+
+                            # Calculate latent grid dimensions for the decoder
+                            patch_h = int(getattr(args, 'patch_size_h', args.patch_size))
+                            patch_w = int(getattr(args, 'patch_size_w', args.patch_size))
+                            h_lat = args.range_h // (args.downsample_size * patch_h)
+                            w_lat = args.range_w // (args.downsample_size * patch_w)
+
+                            predict_vis = raw_model.vae_tokenizer.decode_from_z(z_flat, h_lat, w_lat)
+                
                 with torch.no_grad():
                     save_training_visualization(
                         step=step,
                         args=args,
-                        features_cond=features_cond.detach(),
+                        features_cond=features_cond_vis,
                         features_gt=features_gt.detach(),
                         predict_decoded=predict_vis.detach() if predict_vis is not None else None,
                         projector=vis_projector,
@@ -569,6 +896,16 @@ def train(local_rank, args):
                 dist.barrier()
                 if rank == 0:
                     save_ckpt(args, save_model_path, model.module, optimizer, lr_schedule, step)
+                    # if we are in stage 1 pretraining, also dump a VAE-only
+                    # checkpoint that can be passed to stage 2 via ``--vae_ckpt``.
+                    if getattr(args, 'stage', 'all') == '1':
+                        try:
+                            vae_state = model.module.vae_tokenizer.vae.state_dict()
+                            vae_path = os.path.join(save_model_path, f"vae_stage1_step{step}.pth")
+                            torch.save(vae_state, vae_path)
+                            print(f"Saved standalone VAE checkpoint: {vae_path}")
+                        except Exception as e:
+                            print(f"Warning: failed to save stage1 VAE checkpoint: {e}")
                 torch.cuda.synchronize()
                 dist.barrier()
 

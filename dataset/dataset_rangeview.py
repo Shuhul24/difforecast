@@ -18,7 +18,7 @@ corresponding point-cloud file.
 Uses RangeProjection and Augmentor utilities.
 
 Returns per sample:
-    range_views : FloatTensor [T, 6, H, W]   (condition_frames + 1 frames)
+    range_views : FloatTensor [T, 2, H, W]   (condition_frames + 1 frames)
     poses       : FloatTensor [T, 4, 4]       absolute 4×4 pose matrices
 """
 
@@ -141,22 +141,19 @@ class _BaseRangeViewDataset(Dataset):
     # ── Projection ────────────────────────────────────────────────────────────
 
     def _project(self, pc):
-        """Project a point cloud → normalised [6, H, W] feature tensor.
+        """Project a point cloud → normalised [2, H, W] feature tensor.
 
-        Channels: [range, x, y, z, intensity, label].
+        Channels: [range, intensity].
         Unoccupied pixels are zeroed via the projection mask.
         """
         proj_pc, proj_range, _, proj_mask = self.projection.doProjection(pc)
 
         depth  = torch.from_numpy(proj_range)                               # [H, W]
-        xyz    = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)        # [3, H, W]
         intens = (torch.from_numpy(proj_pc[..., 3])
                   if pc.shape[1] >= 4 else torch.zeros_like(depth))         # [H, W]
-        label  = (torch.from_numpy(proj_pc[..., 4])
-                  if pc.shape[1] >= 5 else torch.zeros_like(depth))         # [H, W]
         mask   = torch.from_numpy(proj_mask.astype(np.float32))             # [H, W]
 
-        feat = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0), label.unsqueeze(0)], 0)
+        feat = torch.cat([depth.unsqueeze(0), intens.unsqueeze(0)], 0)
         feat = (feat - self.mean[:, None, None]) / self.std[:, None, None]
         return feat * mask.unsqueeze(0)
 

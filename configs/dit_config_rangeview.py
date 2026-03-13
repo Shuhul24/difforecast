@@ -13,7 +13,7 @@ kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequen
 kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
-train_sequences = [0] # [0, 1, 2, 3, 4, 5]  # Training sequences
+train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
 val_sequences = [6, 7]  # Validation sequences
 test_sequences = [8, 9, 10]  # Test sequences
 
@@ -45,6 +45,11 @@ proj_img_mean = [10.839, 0.0]  # [range, intensity]
 proj_img_stds = [9.314,  1.0]  # [range, intensity]
 
 # ===== Training Parameters =====
+# Stage-wise training is supported by the script via the ``--stage`` CLI
+# option.  Use ``stage=1`` to pretrain the VAE only (ELBO loss with STT/DiT
+# frozen), ``stage=2`` to train the DiT/STT portion with a frozen VAE
+# (supply a pretrained ``vae_ckpt`` or resume from a stage‑1 checkpoint),
+# and ``stage=all`` (the default) to run the full pipeline as before.
 downsample_fps = 10  # KITTI is at 10 Hz
 condition_frames = 5  # Number of past frames (N_PAST_STEPS from KITTI config)
 block_size = 1  # Temporal block size
@@ -90,20 +95,18 @@ augmentation_config = {
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
 # Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
-# n_embd halved → params scale as n_embd², giving ~7× fewer trainable params (~370M).
-# axes_dim_dit must sum to n_embd_dit // n_head_dit = 1024 // 8 = 128 (unchanged).
-#
-# With patch_size_h=4, patch_size_w=32:
-#   latent_C = 4*4*32 = 512  (DiT in_channels; projected internally to n_embd_dit)
+# With patch_size_h=4, patch_size_w=32, vae_embed_dim=4:
+#   latent_C = 4*4*32 = 512  (DiT in_channels == n_embd_dit)
 #   L        = 4*16   = 64   (img_token_size; feeds STT block_size)
+#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 512 // 8 = 64
 n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
 n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
 n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 1024  # Hidden size for DiT
-n_head_dit = 8  # Number of attention heads for DiT (head_dim = 1024 // 8 = 128)
-axes_dim_dit = [16, 48, 64]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 128
+n_embd_dit = 512   # Hidden size for DiT; must equal latent_C = vae_embed_dim * patch_size_h * patch_size_w = 4*4*32
+n_head_dit = 8  # Number of attention heads for DiT (head_dim = 512 // 8 = 64)
+axes_dim_dit = [8, 24, 32]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 64
 
 # Pose/Trajectory encoding
 pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
@@ -203,8 +206,8 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #   vae_range_weight:     40.0  matches RangeLDM — depth channel heavily weighted
 #   vae_intensity_weight: 10.0  matches RangeLDM — intensity channel
 #   vae_logvar_init:      0.0  (start with log σ²=0, i.e. σ=1; adapts during training)
-elbo_weight          = 0.01   # down-scaled because range_weight=40 inflates NLL; keeps ELBO ~ diff_loss
-kl_weight            = 1e-6   # β-VAE KL weight (small keeps latents near standard normal)
+elbo_weight          = 1   # down-scaled because range_weight=40 inflates NLL; keeps ELBO ~ diff_loss
+kl_weight            = 1e-6   # β-VAE KL weight — matches RangeLDM (small keeps latents near standard normal)
 vae_range_weight     = 40.0   # L1 weight for range/depth channel — matches RangeLDM (was 1.0)
 vae_intensity_weight = 10.0   # L1 weight for intensity channel   — matches RangeLDM (was 0.5)
 vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
@@ -229,7 +232,7 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 # Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
-range_view_loss_weight = 0.1   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+range_view_loss_weight = 1   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
 chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
 
@@ -281,34 +284,34 @@ To train with this config on KITTI:
 export NODES_NUM=1
 export GPUS_NUM=1
 
-torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
-  scripts/train_rangeview.py \\
-  --batch_size 4 \\
-  --lr 0.0003 \\
-  --exp_name "kitti-rangeview-training" \\
-  --config configs/dit_config_rangeview.py \\
+torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \
+  scripts/train_rangeview.py \
+  --batch_size 4 \
+  --lr 0.0003 \
+  --exp_name "kitti-rangeview-training" \
+  --config configs/dit_config_rangeview.py \
   --eval_steps 2000
 
 # Multi-GPU training (if available)
 export NODES_NUM=1
 export GPUS_NUM=4
 
-torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
-  scripts/train_rangeview.py \\
-  --batch_size 1 \\
-  --lr 0.0003 \\
-  --exp_name "kitti-rangeview-training-multigpu" \\
-  --config configs/dit_config_rangeview.py \\
+torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \
+  scripts/train_rangeview.py \
+  --batch_size 1 \
+  --lr 0.0003 \
+  --exp_name "kitti-rangeview-training-multigpu" \
+  --config configs/dit_config_rangeview.py \
   --eval_steps 2000
 
 # To resume from a checkpoint:
-torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \\
-  scripts/train_rangeview.py \\
-  --batch_size 4 \\
-  --lr 0.0003 \\
-  --exp_name "kitti-rangeview-resume" \\
-  --config configs/dit_config_rangeview.py \\
-  --resume_path "exp/ckpt/kitti-rangeview-training/rangeview_dit_10000.pkl" \\
-  --resume_step 10000 \\
+torchrun --nnodes=$NODES_NUM --nproc_per_node=$GPUS_NUM \
+  scripts/train_rangeview.py \
+  --batch_size 4 \
+  --lr 0.0003 \
+  --exp_name "kitti-rangeview-resume" \
+  --config configs/dit_config_rangeview.py \
+  --resume_path "exp/ckpt/kitti-rangeview-training/rangeview_dit_10000.pkl" \
+  --resume_step 10000 \
   --eval_steps 2000
 """

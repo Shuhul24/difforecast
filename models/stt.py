@@ -284,7 +284,7 @@ class SpatialTemporalTransformer(nn.Module):
     def __init__(self, block_size, n_layer=[12, 6], n_head=8, n_embd=1024, 
                  embd_pdrop=0., resid_pdrop=0., attn_pdrop=0., n_unmasked=0, 
                  local_rank=0, condition_frames = 3, latent_size = (32, 32),
-                 token_size_dict=None, vae_emb_dim = 8, temporal_block=1,
+                 token_size_dict=None, vae_emb_dim = 4, temporal_block=1,
                  pose_x_vocab_size=512, pose_y_vocab_size=512, yaw_vocab_size=512,
                  ):
         super().__init__()
@@ -297,7 +297,7 @@ class SpatialTemporalTransformer(nn.Module):
                            token_size_dict=token_size_dict)
 
         self.C = n_embd
-        self.Cvae = vae_emb_dim # 8 or 32
+        self.Cvae = vae_emb_dim # 4 or 32
         self.yaw_pose_emb_dim = 512
         self.pose_x_vocab_num = pose_x_vocab_size
         self.pose_y_vocab_num = pose_y_vocab_size

@@ -77,6 +77,15 @@ The default sequence splits used are:
 
 ## Training
 
+The training script now supports a two‑stage workflow similar to RangeLDM.
+Using the `--stage` argument you can run:
+
+* `--stage 1` – VAE pre‑training only (optimises ELBO, STT/DiT are frozen).
+* `--stage 2` – DiT/STT training with a frozen VAE (provide `--vae_ckpt` or
+  resume from a stage‑1 checkpoint).
+* `--stage all` (default) – the original full end‑to‑end pipeline.
+
+
 ### Single GPU
 
 ```bash

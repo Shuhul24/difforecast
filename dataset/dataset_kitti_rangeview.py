@@ -112,6 +112,7 @@ class KITTIRangeViewDataset(Dataset):
         pc_dtype=np.float32,
         pc_reshape=(-1, 4),
         is_train=True,
+        stride=None,
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
@@ -121,6 +122,7 @@ class KITTIRangeViewDataset(Dataset):
         self.pc_dtype        = pc_dtype
         self.pc_reshape      = pc_reshape
         self.is_train        = is_train
+        self.stride          = stride
 
         # Range projection
         self.projection = RangeProjection(
@@ -148,7 +150,7 @@ class KITTIRangeViewDataset(Dataset):
     def _build_index(self, sequences, poses_path):
         """Return a list of (seq_str, start_frame, pose_window) tuples."""
         index  = []
-        stride = self.TRAIN_STRIDE if self.is_train else 1
+        stride = (self.stride if self.stride is not None else self.TRAIN_STRIDE) if self.is_train else 1
         W      = self.condition_frames + self.forward_iter  # window size
 
         for sid in sequences:
@@ -254,3 +256,24 @@ class KITTIRangeViewTestDataset(KITTIRangeViewDataset):
     """Test split — all windows, no augmentation."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **dict(kwargs, is_train=False))
+
+
+class KITTIRangeViewVAEDataset(KITTIRangeViewDataset):
+    """
+    VAE Training Dataset (Stage 1).
+    Iterates over individual frames with stride=1 (dense sampling),
+    returning single [C, H, W] images instead of sequences.
+    """
+    def __init__(self, *args, **kwargs):
+        # Force parameters for single-frame VAE training
+        kwargs['condition_frames'] = 0
+        kwargs['forward_iter'] = 1
+        kwargs['is_train'] = True
+        kwargs['stride'] = 1  # Visit every frame
+        super().__init__(*args, **kwargs)
+
+    def __getitem__(self, idx):
+        # Parent returns sequence [T=1, C, H, W] and poses [T=1, 4, 4]
+        views, poses = super().__getitem__(idx)
+        # Return [C, H, W] and [4, 4]
+        return views[0], poses[0]

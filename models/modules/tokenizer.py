@@ -409,7 +409,8 @@ class RangeViewVAETokenizer(nn.Module):
         range_weight: float = 1.0,
         intensity_weight: float = 0.5,
         kl_weight: float = 1e-6,
-    ) -> torch.Tensor:
+        return_recon: bool = False,
+    ):
         """Compute the ELBO loss for VAE training (reconstruction + KL divergence).
 
         Follows the RangeLDM ``RangeImageReconstructionLoss`` formulation:
@@ -455,10 +456,12 @@ class RangeViewVAETokenizer(nn.Module):
         nll_loss = nll_loss.mean()                                # scalar (mean over B*T, H, W)
 
         # --- KL divergence ----------------------------------------------------
-        # posterior.kl() sums over spatial dims and returns [B*T].
-        # Divide by the number of latent elements to get a per-element mean,
-        # keeping it in the same normalised scale as nll_loss.
-        z_elements = z_sample.shape[1] * z_sample.shape[2] * z_sample.shape[3]  # C*H*W
-        kl_loss = posterior.kl().sum() / (x_flat.shape[0] * z_elements)
+        # posterior.kl() already sums over dims [1,2,3] (C, H, W) and returns
+        # shape [B].  Take the mean over the batch to get a per-sample KL.
+        # Do NOT divide by z_elements again — that spatial sum is already done.
+        kl_loss = posterior.kl().mean()
 
-        return nll_loss + kl_weight * kl_loss
+        elbo = nll_loss + kl_weight * kl_loss
+        if return_recon:
+            return elbo, x_recon
+        return elbo
