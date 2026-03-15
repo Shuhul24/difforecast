@@ -24,6 +24,7 @@ import torch
 import random
 import logging
 import argparse
+import shutil
 from einops import rearrange
 import numpy as np
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -89,6 +90,8 @@ def add_arguments():
                         help='W&B run name (defaults to --exp_name)')
     parser.add_argument('--no_wandb', action='store_true',
                         help='Disable Weights & Biases logging')
+    parser.add_argument('--no_log_file', action='store_true',
+                        help='Disable saving a log file (useful on HPC where stdout is captured in .out files)')
     parser.add_argument('--vis_steps', type=int, default=500,
                         help='Save training visualizations every N steps (0 = disabled)')
     parser.add_argument('--warmup_steps', type=int, default=500, help='Warmup steps for LR scheduler')
@@ -129,7 +132,7 @@ def init_logs(global_rank, args):
         os.makedirs(tdir_path, exist_ok=True)
 
         # Setup logger
-        setup_logger('base', log_path, 'train', level=logging.INFO, screen=True, to_file=True)
+        setup_logger('base', log_path, 'train', level=logging.INFO, screen=True, to_file=not getattr(args, 'no_log_file', False))
 
         # Setup tensorboard
         writer = SummaryWriter(os.path.join(tdir_path, 'train'))
@@ -696,6 +699,8 @@ def train(local_rank, args):
     torch.cuda.synchronize()
     time_stamp = time.time()
 
+    last_ckpt_step = None  # tracks the previous checkpoint step for cleanup
+
     while step < args.iter:
         sampler.set_epoch(epoch)
 
@@ -1047,6 +1052,27 @@ def train(local_rank, args):
                                 print(f"Saved discriminator checkpoint: {disc_path}")
                             except Exception as e:
                                 print(f"Warning: failed to save discriminator checkpoint: {e}")
+
+                    # Delete previous checkpoint files to save disk space
+                    if last_ckpt_step is not None:
+                        old_ds_dir = os.path.join(save_model_path, str(last_ckpt_step))
+                        if os.path.isdir(old_ds_dir):
+                            shutil.rmtree(old_ds_dir)
+                            print(f"Deleted old DeepSpeed checkpoint: {old_ds_dir}")
+                        old_pkl = os.path.join(save_model_path, f"tvar_{last_ckpt_step}.pkl")
+                        if os.path.isfile(old_pkl):
+                            os.remove(old_pkl)
+                            print(f"Deleted old checkpoint: {old_pkl}")
+                        old_vae = os.path.join(save_model_path, f"vae_stage1_step{last_ckpt_step}.pth")
+                        if os.path.isfile(old_vae):
+                            os.remove(old_vae)
+                            print(f"Deleted old VAE checkpoint: {old_vae}")
+                        old_disc = os.path.join(save_model_path, f"disc_step{last_ckpt_step}.pth")
+                        if os.path.isfile(old_disc):
+                            os.remove(old_disc)
+                            print(f"Deleted old discriminator checkpoint: {old_disc}")
+
+                last_ckpt_step = step
                 torch.cuda.synchronize()
                 dist.barrier()
 
