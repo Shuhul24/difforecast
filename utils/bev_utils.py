@@ -321,6 +321,7 @@ def render_rangeview_comparison(
     frame_idx: int = 0,
     max_depth: float = 80.0,
     metrics: dict | None = None,
+    title_suffix: str = '',
 ) -> None:
     """Save a 3-panel range-view comparison PNG: GT | Predicted | Abs Error.
 
@@ -353,7 +354,7 @@ def render_rangeview_comparison(
         ax.set_xlabel('azimuth (pixel)')
         ax.set_ylabel('elevation (pixel)')
 
-    suptitle_parts = [f'Frame {frame_idx}  —  Range-View Comparison']
+    suptitle_parts = [f'Frame {frame_idx}  —  Range-View Comparison{title_suffix}']
     if metrics:
         suptitle_parts.append('   |   '.join(f'{k}: {v:.4f}' for k, v in metrics.items()))
     fig.suptitle('\n'.join(suptitle_parts), fontsize=12, y=1.02)

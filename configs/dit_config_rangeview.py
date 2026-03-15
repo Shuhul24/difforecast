@@ -95,18 +95,18 @@ augmentation_config = {
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
 # Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
-# With patch_size_h=4, patch_size_w=32, vae_embed_dim=4:
-#   latent_C = 4*4*32 = 512  (DiT in_channels == n_embd_dit)
-#   L        = 4*16   = 64   (img_token_size; feeds STT block_size)
-#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 512 // 8 = 64
+# With patch_size_h=4, patch_size_w=16, vae_embed_dim=4:
+#   latent_C = 4*4*16 = 256  (DiT in_channels == n_embd_dit)
+#   L        = 4*32   = 128  (img_token_size; feeds STT block_size)
+#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 256 // 8 = 32
 n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
 n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
 n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 512   # Hidden size for DiT; must equal latent_C = vae_embed_dim * patch_size_h * patch_size_w = 4*4*32
-n_head_dit = 8  # Number of attention heads for DiT (head_dim = 512 // 8 = 64)
-axes_dim_dit = [8, 24, 32]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 64
+n_embd_dit = 256   # Hidden size for DiT; must equal latent_C = vae_embed_dim * patch_size_h * patch_size_w = 4*4*16
+n_head_dit = 8  # Number of attention heads for DiT (head_dim = 256 // 8 = 32)
+axes_dim_dit = [4, 12, 16]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 32
 
 # Pose/Trajectory encoding
 pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
@@ -144,8 +144,8 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 #   patch_size_h  patch_size_w  h_tok  w_tok  L    latent_C  notes
 #   -----------  ------------  -----  -----  ---  --------  ------
 #       8             8          2     64    128    256     original (square)
-#       4            32          4     16     64    512     half tokens, better shape ← default
-#       4            16          4     32    128    256     same L, better shape
+#       4            32          4     16     64    512     half tokens, better shape
+#       4            16          4     32    128    256     same L, better shape      ← default
 #       2            16          8     32    256    128     more tokens, best elevation
 #
 #   Changing patch_size_h / patch_size_w also changes:
@@ -156,8 +156,8 @@ vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
 patch_size   = 8         # legacy square fallback (used when patch_size_h/w absent)
 patch_size_h = 4         # elevation patch size  → h_tok = 16 // 4 = 4
-patch_size_w = 32        # azimuth  patch size   → w_tok = 512 // 32 = 16
-# Derived: L = 4×16 = 64,  latent_C = 4×4×32 = 512
+patch_size_w = 16        # azimuth  patch size   → w_tok = 512 // 16 = 32
+# Derived: L = 4×32 = 128,  latent_C = 4×4×16 = 256
 add_decoder_temporal = False  # unused for RangeView path (DCAE-only)
 temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 
@@ -206,7 +206,7 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #   vae_range_weight:     40.0  matches RangeLDM — depth channel heavily weighted
 #   vae_intensity_weight: 10.0  matches RangeLDM — intensity channel
 #   vae_logvar_init:      0.0  (start with log σ²=0, i.e. σ=1; adapts during training)
-elbo_weight          = 1   # down-scaled because range_weight=40 inflates NLL; keeps ELBO ~ diff_loss
+elbo_weight          = 0.0    # Disabled for Stage 2 (No ELBO)
 kl_weight            = 1e-6   # β-VAE KL weight — matches RangeLDM (small keeps latents near standard normal)
 vae_range_weight     = 40.0   # L1 weight for range/depth channel — matches RangeLDM (was 1.0)
 vae_intensity_weight = 10.0   # L1 weight for intensity channel   — matches RangeLDM (was 0.5)
@@ -247,11 +247,43 @@ chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Cham
 #
 # bev_h / bev_w: BEV grid resolution in pixels. 256×256 covers ±25.6 m at 0.2 m/cell.
 # bev_x_range / bev_y_range: half-extent of the BEV grid in metres.
-bev_perceptual_weight = 0.1   # init: log_w_bev = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+bev_perceptual_weight = 0.0   # Disabled for Stage 2 (No BEV perceptual loss)
 bev_h         = 256           # BEV grid height (forward direction)
 bev_w         = 256           # BEV grid width  (lateral direction)
 bev_x_range   = 25.6          # ±25.6 m forward coverage
 bev_y_range   = 25.6          # ±25.6 m lateral coverage
+
+# ===== Stage 1 Discriminator Configuration =====
+# Adversarial training for the VAE encoder-decoder following the RangeLDM
+# training recipe (GeneralLPIPSWithDiscriminator, kitti360.yaml).
+#
+# disc_start:      Step at which the discriminator loss is activated.
+#                  The ELBO reconstruction loss runs alone for the first
+#                  disc_start steps so the VAE learns a sensible codec
+#                  before adversarial pressure is applied.
+#                  RangeLDM uses 200 000; 50 000 is a good starting point
+#                  for KITTI Odometry (~20 000 steps/epoch at bs=4, 8 GPU).
+#
+# disc_weight:     Scalar multiplier on the adaptive GAN generator weight.
+#                  Adaptive weight = disc_weight × ||∇NLL|| / ||∇g_loss||
+#                  (Esser et al., VQGAN).  0.5 matches RangeLDM.
+#
+# disc_factor:     Hard multiplier on disc loss once disc_start is reached.
+#                  Set to 0.0 to disable the discriminator entirely.
+#
+# disc_ndf:        Base filter count for the discriminator (64 in RangeLDM).
+# disc_num_layers: PatchGAN conv layers (3 in RangeLDM).
+# disc_lr:         Discriminator Adam learning rate (2e-4 is standard for GANs).
+#
+# disc_resume_path: Optional path to a previously saved disc_stepN.pth to
+#                   resume discriminator training.
+disc_start      = 50000  # Activate discriminator after this many steps
+disc_weight     = 0.5    # Adaptive GAN weight scale (matches RangeLDM)
+disc_factor     = 1.0    # Hard scale on disc loss after disc_start
+disc_ndf        = 64     # Discriminator base filter count
+disc_num_layers = 3      # PatchGAN conv layers
+disc_lr         = 2e-4   # Discriminator Adam learning rate
+disc_resume_path = None  # Path to resume discriminator from (optional)
 
 # ===== Training Settings =====
 return_predict = True  # Return predictions during training for visualization

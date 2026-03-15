@@ -101,7 +101,7 @@ class RangeViewVAE(nn.Module):
             features: [B, C, H, W] Input range view images
             step: Training step
         """
-        elbo_loss, x_recon = self.vae_tokenizer.compute_vae_elbo(
+        elbo_loss, x_recon, nll_loss = self.vae_tokenizer.compute_vae_elbo(
             features,
             logvar=self.logvar,
             range_weight=self.vae_range_weight,
@@ -129,6 +129,8 @@ class RangeViewVAE(nn.Module):
             "loss_all":        total_loss,
             "loss_elbo":       elbo_loss,
             "loss_bev_percep": bev_percep_loss,
+            "nll_loss":        nll_loss,
+            "x_recon":         x_recon,
             "predict":         None,
         }
 

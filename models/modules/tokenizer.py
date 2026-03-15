@@ -463,5 +463,5 @@ class RangeViewVAETokenizer(nn.Module):
 
         elbo = nll_loss + kl_weight * kl_loss
         if return_recon:
-            return elbo, x_recon
+            return elbo, x_recon, nll_loss
         return elbo

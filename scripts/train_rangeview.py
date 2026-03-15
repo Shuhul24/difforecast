@@ -56,6 +56,13 @@ from utils.comm import _init_dist_envi
 from utils.running import init_lr_schedule, get_cosine_schedule_with_warmup, save_ckpt, load_parameters, add_weight_decay, save_ckpt_deepspeed, load_from_deepspeed_ckpt
 from utils.bev_utils import render_bev_comparison, render_rangeview_comparison
 from torch.nn.parallel import DistributedDataParallel as DDP
+from models.modules.range_discriminator import (
+    NLayerDiscriminatorMetaKernel,
+    weights_init as disc_weights_init,
+    hinge_d_loss,
+    adopt_weight as disc_adopt_weight,
+    calculate_adaptive_weight,
+)
 
 logger = logging.getLogger('base')
 
@@ -86,6 +93,9 @@ def add_arguments():
                         help='Save training visualizations every N steps (0 = disabled)')
     parser.add_argument('--warmup_steps', type=int, default=500, help='Warmup steps for LR scheduler')
 
+    parser.add_argument('--vae_ckpt', type=str, default=None, help='Path to pretrained VAE checkpoint for stage 2')
+    parser.add_argument('--disc_resume_path', type=str, default=None, help='Path to resume discriminator checkpoint (Stage 1 only)')
+
     # Stage-wise training support (1 = VAE only, 2 = DiT/STT only, all = default/full)
     parser.add_argument('--stage', type=str, default='all', choices=['1','2','all'],
                         help='Which stage to run: 1 for VAE pretraining, 2 for DiT/STT training, all for both (default)')
@@ -93,6 +103,13 @@ def add_arguments():
     args = parser.parse_args()
     cfg = Config.fromfile(args.config)
     cfg.merge_from_dict(args.__dict__)
+
+    # Enforce stage 2 specific loss configurations dynamically
+    if getattr(cfg, 'stage', 'all') == '2':
+        cfg.elbo_weight = 0.0
+        cfg.bev_perceptual_weight = 0.0
+        cfg.chamfer_loss_weight = 0.0
+
     return cfg
 
 
@@ -275,7 +292,9 @@ def save_training_visualization(
             im = ax.imshow(np.clip(depth_t, 0, max_depth), cmap='plasma',
                            vmin=0, vmax=max_depth, aspect='auto')
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
-            ax.set_title(f'Cond frame t-{CF - t}', fontsize=10)
+            # t=0 is oldest frame, t=CF-1 is most recent (t=0 in absolute time)
+            time_label = f't-{CF - 1 - t}' if CF - 1 - t > 0 else 't'
+            ax.set_title(f'Cond [{time_label}]', fontsize=10)
             ax.set_xlabel('azimuth'); ax.set_ylabel('elevation')
         fig.suptitle(f'Step {step} — Conditioning frames (depth)', fontsize=12)
         plt.tight_layout()
@@ -319,6 +338,7 @@ def save_training_visualization(
         output_path=rv_path,
         frame_idx=step,
         max_depth=max_depth,
+        title_suffix=' [t+1]' if not is_vae_mode else ' [VAE recon]',
         metrics={
             'range_l1': float(np.abs(pred_depth - gt_depth)[gt_depth > 0.5].mean())
             if (gt_depth > 0.5).any() else 0.0
@@ -411,7 +431,7 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
         axes_rv[fi, 0].imshow(gt_depths[fi],   cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
         axes_rv[fi, 1].imshow(pred_depths[fi],  cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
         im_err = axes_rv[fi, 2].imshow(err,     cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
-        axes_rv[fi, 0].set_ylabel(f'+{fi+1} frame', fontsize=8)
+        axes_rv[fi, 0].set_ylabel(f't+{fi+1}', fontsize=9, fontweight='bold')
         plt.colorbar(im_err, ax=axes_rv[fi, 2], fraction=0.015, pad=0.02, label='m')
         for ax in axes_rv[fi]:
             ax.set_xticks([]); ax.set_yticks([])
@@ -441,7 +461,7 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
         axes_bev[fi, 0].imshow(gb,      cmap='gray', aspect='equal', origin='lower')
         axes_bev[fi, 1].imshow(pb,      cmap='gray', aspect='equal', origin='lower')
         axes_bev[fi, 2].imshow(overlay,              aspect='equal', origin='lower')
-        axes_bev[fi, 0].set_ylabel(f'+{fi+1} frame', fontsize=8)
+        axes_bev[fi, 0].set_ylabel(f't+{fi+1}', fontsize=9, fontweight='bold')
         for ax in axes_bev[fi]:
             ax.set_xticks([]); ax.set_yticks([])
 
@@ -628,6 +648,40 @@ def train(local_rank, args):
     )
     load_from_deepspeed_ckpt(args, model)
 
+    # ------------------------------------------------------------------ #
+    # Stage 1: Discriminator setup (adversarial VAE training)
+    # Following RangeLDM: PatchGAN with MetaKernel geometry-aware blocks,
+    # delayed start after disc_start steps, hinge GAN loss, fixed disc_lr.
+    # ------------------------------------------------------------------ #
+    disc = None
+    disc_optimizer = None
+    if stage == '1' and getattr(args, 'disc_weight', 0.5) > 0:
+        disc = NLayerDiscriminatorMetaKernel(
+            input_nc=int(getattr(args, 'range_channels', 2)),
+            ndf=int(getattr(args, 'disc_ndf', 64)),
+            n_layers=int(getattr(args, 'disc_num_layers', 3)),
+            range_mean=float(args.proj_img_mean[0]),
+            range_std=float(args.proj_img_stds[0]),
+        ).apply(disc_weights_init).cuda(local_rank)
+        disc = DDP(disc, device_ids=[local_rank], find_unused_parameters=True)
+        disc_lr = float(getattr(args, 'disc_lr', 2e-4))
+        disc_optimizer = torch.optim.Adam(
+            disc.parameters(), lr=disc_lr, betas=(0.5, 0.9)
+        )
+        # Resume discriminator checkpoint if provided
+        disc_resume = getattr(args, 'disc_resume_path', None)
+        if disc_resume and os.path.isfile(disc_resume):
+            _sd = torch.load(disc_resume, map_location='cpu')
+            disc.module.load_state_dict(_sd.get('disc_state_dict', _sd))
+            print(f"Loaded discriminator from {disc_resume}")
+        print(
+            f"Discriminator created: ndf={getattr(args,'disc_ndf',64)}, "
+            f"n_layers={getattr(args,'disc_num_layers',3)}, "
+            f"disc_start={getattr(args,'disc_start',50000)}, "
+            f"disc_weight={getattr(args,'disc_weight',0.5)}, "
+            f"disc_lr={disc_lr}"
+        )
+
     torch.set_float32_matmul_precision('high')
 
     # Projector for training visualizations (back-projects depth → 3D for BEV)
@@ -659,25 +713,64 @@ def train(local_rank, args):
             cf = args.condition_frames // args.block_size
 
             if stage == '1':
-                # --- STAGE 1 (VAE Only) ---
+                # --- STAGE 1 (VAE + adversarial discriminator) ---
                 # Data is already [B, C, H, W] from KITTIRangeViewVAEDataset
                 features_gt = range_views
-                
-                # Get dimensions for reshaping logic (though simple here)
+
                 B, C, H, W = features_gt.shape
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    # RangeViewVAE forward: (features, step)
                     loss_final = model(features_gt, step=step)
-                
+
                 loss_value = loss_final["loss_all"]
-                
+
                 if not math.isfinite(loss_value):
                     print(f"Loss is {loss_value}, stopping training")
                     sys.exit(1)
 
+                # --- Generator adversarial loss (active after disc_start) ---
+                disc_start_step  = int(getattr(args, 'disc_start',  50000))
+                disc_factor_cfg  = float(getattr(args, 'disc_factor',  1.0))
+                disc_weight_cfg  = float(getattr(args, 'disc_weight',  0.5))
+                disc_is_active   = disc is not None and step >= disc_start_step
+                g_loss_val = 0.0
+
+                if disc_is_active:
+                    disc.train()
+                    x_recon = loss_final['x_recon']   # [B, C, H, W], grad retained
+                    logits_fake_g = disc(x_recon)
+                    g_loss = -torch.mean(logits_fake_g)
+                    g_loss_val = float(g_loss.item())
+
+                    # Adaptive weight: balance NLL and GAN gradients at last
+                    # decoder layer (falls back to fixed weight on RuntimeError).
+                    raw_model = model.module if hasattr(model, 'module') else model
+                    last_layer = raw_model.vae_tokenizer.vae.decoder.conv_out.weight
+                    d_weight = calculate_adaptive_weight(
+                        loss_final['nll_loss'], g_loss, last_layer, disc_weight_cfg
+                    )
+                    disc_factor_val = disc_adopt_weight(
+                        disc_factor_cfg, step, threshold=disc_start_step
+                    )
+                    loss_value = loss_value + d_weight * disc_factor_val * g_loss
+
                 model.backward(loss_value)
                 model.step()
+
+                # --- Discriminator update (after generator backward) ---
+                d_loss_val = 0.0
+                if disc_is_active:
+                    disc_optimizer.zero_grad()
+                    x_recon_d = loss_final['x_recon'].detach()
+                    logits_real = disc(features_gt.detach())
+                    logits_fake_d = disc(x_recon_d)
+                    disc_factor_val = disc_adopt_weight(
+                        disc_factor_cfg, step, threshold=disc_start_step
+                    )
+                    d_loss = disc_factor_val * hinge_d_loss(logits_real, logits_fake_d)
+                    d_loss_val = float(d_loss.item())
+                    d_loss.backward()
+                    disc_optimizer.step()
                 
             else:
                 # --- STAGE 2 / ALL (Diffusion Forecasting) ---
@@ -791,30 +884,58 @@ def train(local_rank, args):
                 current_lr = optimizer.param_groups[0]['lr']
                 # log values depending on stage
                 stage = getattr(args, 'stage', 'all')
+
+                def get_loss_val(key):
+                    val = loss_final.get(key, 0.0)
+                    return val.item() if isinstance(val, torch.Tensor) else val
+
                 if stage == '1':
-                    loss_elbo_val = loss_final.get("loss_elbo", 0.0).item()
-                    loss_bev_val  = loss_final.get("loss_bev_percep", 0.0).item()
                     loss_all_val  = loss_final["loss_all"].item()
+                    loss_elbo_val = get_loss_val("loss_elbo")
+                    loss_bev_val  = get_loss_val("loss_bev_percep")
                     loss_diff_val = loss_rl1_val = loss_cd_val = 0.0
+                    # discriminator losses (defined in Stage 1 block above,
+                    # default to 0.0 if disc is not yet active)
+                    try:
+                        _g_loss_val = g_loss_val
+                        _d_loss_val = d_loss_val
+                    except NameError:
+                        _g_loss_val = _d_loss_val = 0.0
                 else:
                     loss_all_val = loss_final["loss_all"].item()
-                    loss_diff_val = loss_final.get("loss_diff", 0.0).item()
-                    loss_rl1_val = loss_final.get("loss_range_l1", 0.0).item()
-                    loss_cd_val = loss_final.get("loss_chamfer", 0.0).item()
-                    loss_elbo_val = loss_final.get("loss_elbo", 0.0).item()
-                    loss_bev_val = loss_final.get("loss_bev_percep", 0.0).item()
+                    loss_diff_val = get_loss_val("loss_diff")
+                    loss_rl1_val  = get_loss_val("loss_range_l1")
+                    loss_cd_val   = get_loss_val("loss_chamfer")
+                    loss_elbo_val = get_loss_val("loss_elbo")
+                    loss_bev_val  = get_loss_val("loss_bev_percep")
 
                 # Log to console every step
-                logger.info(
-                    f'stage:{stage} step:{step} time:{data_time_interval:.2f}+{train_time_interval:.2f} '
-                    f'lr:{current_lr:.4e} '
-                    f'loss_avg:{loss_all_val:.4e} '
-                    f'diff_loss:{loss_diff_val:.4e} '
-                    f'range_l1:{loss_rl1_val:.4e} '
-                    f'chamfer:{loss_cd_val:.4e} '
-                    f'elbo:{loss_elbo_val:.4e} '
-                    f'bev:{loss_bev_val:.4e}'
-                )
+                if stage == '1':
+                    disc_suffix = (
+                        f' g_loss:{_g_loss_val:.4e} d_loss:{_d_loss_val:.4e}'
+                        if disc is not None else ''
+                    )
+                    logger.info(
+                        f'stage:{stage} step:{step} '
+                        f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
+                        f'lr:{current_lr:.4e} '
+                        f'loss_avg:{loss_all_val:.4e} '
+                        f'elbo:{loss_elbo_val:.4e} '
+                        f'bev:{loss_bev_val:.4e}'
+                        + disc_suffix
+                    )
+                else:
+                    logger.info(
+                        f'stage:{stage} step:{step} '
+                        f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
+                        f'lr:{current_lr:.4e} '
+                        f'loss_avg:{loss_all_val:.4e} '
+                        f'diff_loss:{loss_diff_val:.4e} '
+                        f'range_l1:{loss_rl1_val:.4e} '
+                        f'chamfer:{loss_cd_val:.4e} '
+                        f'elbo:{loss_elbo_val:.4e} '
+                        f'bev:{loss_bev_val:.4e}'
+                    )
 
                 # Log to TensorBoard/W&B less frequently
                 if step % 100 == 1:
@@ -826,11 +947,17 @@ def train(local_rank, args):
                     writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
                     writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
                     writer.add_scalar('loss/loss_bev_percep', loss_bev_val, step)
+                    if stage == '1' and disc is not None:
+                        try:
+                            writer.add_scalar('loss/g_loss', _g_loss_val, step)
+                            writer.add_scalar('loss/d_loss', _d_loss_val, step)
+                        except NameError:
+                            pass
                     writer.flush()
 
                     # Weights & Biases
                     if not getattr(args, 'no_wandb', False) and wandb.run is not None:
-                        wandb.log({
+                        wb_log = {
                             'loss/loss_all':       loss_all_val,
                             'loss/loss_diff':      loss_diff_val,
                             'loss/loss_range_l1':  loss_rl1_val,
@@ -838,7 +965,14 @@ def train(local_rank, args):
                             'loss/loss_elbo':      loss_elbo_val,
                             'loss/loss_bev_percep': loss_bev_val,
                             'learning_rate/lr':    current_lr,
-                        }, step=step)
+                        }
+                        if stage == '1' and disc is not None:
+                            try:
+                                wb_log['loss/g_loss'] = _g_loss_val
+                                wb_log['loss/d_loss'] = _d_loss_val
+                            except NameError:
+                                pass
+                        wandb.log(wb_log, step=step)
 
             # Training visualizations (rank 0 only)
             vis_steps = getattr(args, 'vis_steps', 500)
@@ -896,8 +1030,7 @@ def train(local_rank, args):
                 dist.barrier()
                 if rank == 0:
                     save_ckpt(args, save_model_path, model.module, optimizer, lr_schedule, step)
-                    # if we are in stage 1 pretraining, also dump a VAE-only
-                    # checkpoint that can be passed to stage 2 via ``--vae_ckpt``.
+                    # Stage 1: save standalone VAE checkpoint (for stage 2 --vae_ckpt)
                     if getattr(args, 'stage', 'all') == '1':
                         try:
                             vae_state = model.module.vae_tokenizer.vae.state_dict()
@@ -906,6 +1039,14 @@ def train(local_rank, args):
                             print(f"Saved standalone VAE checkpoint: {vae_path}")
                         except Exception as e:
                             print(f"Warning: failed to save stage1 VAE checkpoint: {e}")
+                        # Save discriminator checkpoint
+                        if disc is not None:
+                            try:
+                                disc_path = os.path.join(save_model_path, f"disc_step{step}.pth")
+                                torch.save({'disc_state_dict': disc.module.state_dict()}, disc_path)
+                                print(f"Saved discriminator checkpoint: {disc_path}")
+                            except Exception as e:
+                                print(f"Warning: failed to save discriminator checkpoint: {e}")
                 torch.cuda.synchronize()
                 dist.barrier()
 
