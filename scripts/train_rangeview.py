@@ -107,11 +107,14 @@ def add_arguments():
     cfg = Config.fromfile(args.config)
     cfg.merge_from_dict(args.__dict__)
 
-    # Enforce stage 2 specific loss configurations dynamically
+    # Enforce stage-specific loss configurations dynamically
     if getattr(cfg, 'stage', 'all') == '2':
         cfg.elbo_weight = 0.0
         cfg.bev_perceptual_weight = 0.0
         cfg.chamfer_loss_weight = 0.0
+    elif getattr(cfg, 'stage', 'all') == '1':
+        # Config default is 0.0 (for stage 2); force it on for stage 1 VAE training.
+        cfg.elbo_weight = 1.0
 
     return cfg
 

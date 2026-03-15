@@ -273,7 +273,8 @@ bev_y_range   = 25.6          # ±25.6 m lateral coverage
 #
 # disc_ndf:        Base filter count for the discriminator (64 in RangeLDM).
 # disc_num_layers: PatchGAN conv layers (3 in RangeLDM).
-# disc_lr:         Discriminator Adam learning rate (2e-4 is standard for GANs).
+# disc_lr:         Discriminator Adam learning rate. RangeLDM uses the same base_learning_rate
+#                  (4.5e-6) for both the VAE and discriminator. Previously 2e-4.
 #
 # disc_resume_path: Optional path to a previously saved disc_stepN.pth to
 #                   resume discriminator training.
@@ -282,7 +283,7 @@ disc_weight     = 0.5    # Adaptive GAN weight scale (matches RangeLDM)
 disc_factor     = 1.0    # Hard scale on disc loss after disc_start
 disc_ndf        = 64     # Discriminator base filter count
 disc_num_layers = 3      # PatchGAN conv layers
-disc_lr         = 2e-4   # Discriminator Adam learning rate
+disc_lr         = 4.5e-6  # Discriminator Adam learning rate (matches RangeLDM base_learning_rate)
 disc_resume_path = None  # Path to resume discriminator from (optional)
 
 # ===== Training Settings =====
