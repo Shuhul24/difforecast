@@ -746,6 +746,10 @@ def train(local_rank, args):
                 if disc_is_active:
                     disc.train()
                     x_recon = loss_final['x_recon']   # [B, C, H, W], grad retained
+                    # Freeze disc during generator backward so DDP allreduce hooks
+                    # do not modify disc parameter tensors in-place, which would
+                    # corrupt the computation graph for the discriminator update.
+                    disc.requires_grad_(False)
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         logits_fake_g = disc(x_recon)
                     g_loss = -torch.mean(logits_fake_g)
@@ -769,6 +773,8 @@ def train(local_rank, args):
                 # --- Discriminator update (after generator backward) ---
                 d_loss_val = 0.0
                 if disc_is_active:
+                    # Re-enable disc gradients for discriminator update
+                    disc.requires_grad_(True)
                     disc_optimizer.zero_grad()
                     x_recon_d = loss_final['x_recon'].detach()
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
