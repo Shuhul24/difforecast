@@ -746,7 +746,8 @@ def train(local_rank, args):
                 if disc_is_active:
                     disc.train()
                     x_recon = loss_final['x_recon']   # [B, C, H, W], grad retained
-                    logits_fake_g = disc(x_recon)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits_fake_g = disc(x_recon)
                     g_loss = -torch.mean(logits_fake_g)
                     g_loss_val = float(g_loss.item())
 
@@ -770,8 +771,9 @@ def train(local_rank, args):
                 if disc_is_active:
                     disc_optimizer.zero_grad()
                     x_recon_d = loss_final['x_recon'].detach()
-                    logits_real = disc(features_gt.detach())
-                    logits_fake_d = disc(x_recon_d)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits_real = disc(features_gt.detach())
+                        logits_fake_d = disc(x_recon_d)
                     disc_factor_val = disc_adopt_weight(
                         disc_factor_cfg, step, threshold=disc_start_step
                     )
