@@ -1,0 +1,34 @@
+#!/bin/bash
+# Job name:
+#SBATCH --job-name=difforecast
+# Partition:
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --partition=phd
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:2
+#SBATCH --output=/csehome/p24cs0005/difforecast/run_stage_1.out
+#SBATCH --error=/csehome/p24cs0005/difforecast/run_stage_1.out
+#SBATCH --nodelist=cn07
+
+nvidia-smi
+
+module load gcc/11.4.0-gcc-12.3.0-73jjveq
+module load cuda/11.8.0-gcc-12.3.0-4pg4hmh
+
+# export GPUS_NUM=2
+# torchrun --nproc_per_node=$GPUS_NUM scripts/train_rangeview.py --batch_size 4 --lr 3e-4 --exp_name "kitti_rangeview" --config configs/dit_config_rangeview.py --eval_steps 2000
+
+# torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 1 --lr 3e-4 --exp_name "kitti_rangeview" --config configs/dit_config_rangeview.py --eval_steps 1000 
+
+# Stage 1 training:
+# torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 13 --lr 3e-4 --exp_name "kitti_rangeview_stage_1" --config configs/dit_config_rangeview.py --eval_steps 1000 --stage 1 --no_log_file
+
+#Stage 1 training from checkpoint:
+torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 13 --lr 3e-4 --exp_name "kitti_rangeview_stage_1" --config configs/dit_config_rangeview.py --eval_steps 1000 --stage 1 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/kitti_rangeview_stage_1/50000" --resume_step 50000 --no_log_file
+
+#Stage 1 testing:
+# python scripts/test/test_rangeview_vae.py --config configs/dit_config_rangeview.py --resume_path .../rangeview_vae_<step>.pkl --exp_name vae_eval --stage 1
+
+#Stage 2 training:
+# torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 1 --lr 3e-4 --exp_name "kitti_rangeview_stage_2" --config configs/dit_config_rangeview.py --eval_steps 1000 --stage 2 --vae_ckpt '/scratch/p24cs0005/weights/vae_stage1_step7000.pth'

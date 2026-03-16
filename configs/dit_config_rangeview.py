@@ -8,9 +8,9 @@ seed = 43
 
 # ===== Dataset Configuration =====
 # KITTI Odometry Dataset
-kitti_root = '/DATA2/shuhul/kitti'  # Root path to KITTI dataset
-kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequences
-kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
+kitti_root = '/scratch/p24cs0005/kitti'  # Root path to KITTI dataset
+kitti_sequences_path = '/scratch/p24cs0005/kitti/dataset/sequences'  # Path to sequences
+kitti_poses_path = '/scratch/p24cs0005/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
 train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
@@ -292,10 +292,10 @@ diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
 
 # ===== Output Directories =====
-outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory
-logdir = "/DATA2/shuhul/exp/job_log"  # Log directory
-tdir = "/DATA2/shuhul/exp/job_tboard"  # TensorBoard directory
-validation_dir = "/DATA2/shuhul/exp/validation"  # Validation output directory
+outdir = "/scratch/p24cs0005/exp/ckpt"  # Checkpoint directory
+logdir = "/scratch/p24cs0005/exp/job_log"  # Log directory
+tdir = "/scratch/p24cs0005/exp/job_tboard"  # TensorBoard directory
+validation_dir = "/scratch/p24cs0005/exp/validation"  # Validation output directory
 
 # ===== Data Loading =====
 num_workers = 8  # Number of data loading workers

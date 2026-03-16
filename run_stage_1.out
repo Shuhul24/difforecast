@@ -1,0 +1,716 @@
+Mon Mar 16 14:10:33 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.54.15              Driver Version: 550.54.15      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:16:00.0 Off |                  Off |
+| 30%   46C    P2            110W /  300W |    2124MiB /  49140MiB |     33%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA RTX A6000               Off |   00000000:46:00.0 Off |                  Off |
+| 33%   62C    P2            200W /  300W |    5929MiB /  49140MiB |     53%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA RTX A6000               Off |   00000000:B8:00.0 Off |                  Off |
+| 30%   35C    P8             22W /  300W |      10MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA RTX A6000               Off |   00000000:D8:00.0 Off |                  Off |
+| 30%   36C    P8             23W /  300W |      10MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A      4848      G   /usr/libexec/Xorg                               9MiB |
+|    0   N/A  N/A      5278      G   /usr/bin/gnome-shell                            4MiB |
+|    0   N/A  N/A    618407      C   python                                       2096MiB |
+|    1   N/A  N/A      4848      G   /usr/libexec/Xorg                               4MiB |
+|    1   N/A  N/A   3417838      C   python3                                      5914MiB |
+|    2   N/A  N/A      4848      G   /usr/libexec/Xorg                               4MiB |
+|    3   N/A  N/A      4848      G   /usr/libexec/Xorg                               4MiB |
++-----------------------------------------------------------------------------------------+
+/csehome/p24cs0005/miniconda3/envs/difforecast/lib/python3.10/site-packages/torch/cuda/__init__.py:58: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/csehome/p24cs0005/miniconda3/envs/difforecast/lib/python3.10/site-packages/torch/cuda/__init__.py:58: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+Warning: The cache directory for DeepSpeed Triton autotune, /csehome/p24cs0005/.triton/autotune, appears to be on an NFS system. While this is generally acceptable, if you experience slowdowns or hanging when DeepSpeed exits, it is recommended to set the TRITON_CACHE_DIR environment variable to a non-NFS path.
+/csehome/p24cs0005/miniconda3/envs/difforecast/lib/python3.10/site-packages/torch/cuda/__init__.py:58: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+Root path: /csehome/p24cs0005/difforecast
+Using PyTorch launcher.
+Initializing logs... (stage=1)
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /csehome/p24cs0005/.netrc.
+wandb: Currently logged in as: p24cs0005 (p24cs0005-indian-institute-of-technology-jodhpur) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run yw2qnhv7
+wandb: Tracking run with wandb version 0.25.0
+wandb: Run data is saved locally in /csehome/p24cs0005/difforecast/wandb/run-20260316_141042-yw2qnhv7
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run kitti_rangeview_stage_1
+wandb: ⭐️ View project at https://wandb.ai/p24cs0005-indian-institute-of-technology-jodhpur/difforecast-rangeview
+wandb: 🚀 View run at https://wandb.ai/p24cs0005-indian-institute-of-technology-jodhpur/difforecast-rangeview/runs/yw2qnhv7
+[743207] (rank = 0, local_rank = 0) starting training...
+Training configuration:
+Config (path: configs/dit_config_rangeview.py): {'seed': 43, 'kitti_root': '/scratch/p24cs0005/kitti', 'kitti_sequences_path': '/scratch/p24cs0005/kitti/dataset/sequences', 'kitti_poses_path': '/scratch/p24cs0005/kitti/poses', 'train_sequences': [0, 1, 2, 3, 4, 5], 'val_sequences': [6, 7], 'test_sequences': [8, 9, 10], 'pc_extension': '.bin', 'pc_dtype': 'float32', 'pc_reshape': (-1, 4), 'fov_up': 3.0, 'fov_down': -25.0, 'fov_left': -180.0, 'fov_right': 180.0, 'range_h': 64, 'range_w': 2048, 'range_channels': 2, 'image_size': (64, 2048), 'proj_img_mean': [10.839, 0.0], 'proj_img_stds': [9.314, 1.0], 'downsample_fps': 10, 'condition_frames': 5, 'block_size': 1, 'forward_iter': 5, 'multifw_perstep': 10, 'mask_data': 0, 'pkeep': 0.7, 'paug': 0, 'reverse_seq': False, 'augmentation_config': {'p_transx': 0.5, 'trans_xmin': -0.5, 'trans_xmax': 0.5, 'p_transy': 0.5, 'trans_ymin': -0.5, 'trans_ymax': 0.5, 'p_transz': 0.5, 'trans_zmin': -0.1, 'trans_zmax': 0.1, 'p_rot_roll': 0.5, 'rot_rollmin': -5.0, 'rot_rollmax': 5.0, 'p_rot_pitch': 0.5, 'rot_pitchmin': -5.0, 'rot_pitchmax': 5.0, 'p_rot_yaw': 0.5, 'rot_yawmin': -5.0, 'rot_yawmax': 5.0, 'p_scale': 0.5, 'scale_min': 0.95, 'scale_max': 1.05}, 'n_layer': [6, 4, 4], 'n_head': 8, 'n_embd': 1024, 'n_embd_dit': 256, 'n_head_dit': 8, 'axes_dim_dit': [4, 12, 16], 'pose_x_vocab_size': 128, 'pose_y_vocab_size': 128, 'yaw_vocab_size': 512, 'pose_x_bound': 50, 'pose_y_bound': 10, 'yaw_bound': 12, 'vae_ckpt': None, 'vae_embed_dim': 4, 'patch_size': 8, 'patch_size_h': 4, 'patch_size_w': 16, 'add_decoder_temporal': False, 'temporal_patch_size': 1, 'add_encoder_temporal': False, 'n_temporal_blocks': 4, 'downsample_size': 4, 'drop_feature': 0, 'diffusion_model_type': 'flow', 'num_sampling_steps': 100, 'elbo_weight': 1.0, 'kl_weight': 1e-06, 'vae_range_weight': 40.0, 'vae_intensity_weight': 10.0, 'vae_logvar_init': 0.0, 'range_view_loss_weight': 1, 'chamfer_loss_weight': 0.0, 'chamfer_max_pts': 2048, 'bev_perceptual_weight': 0.0, 'bev_h': 256, 'bev_w': 256, 'bev_x_range': 25.6, 'bev_y_range': 25.6, 'disc_start': 50000, 'disc_weight': 0.5, 'disc_factor': 1.0, 'disc_ndf': 64, 'disc_num_layers': 3, 'disc_lr': 4.5e-06, 'disc_resume_path': None, 'return_predict': True, 'diff_only': True, 'no_pose': False, 'outdir': '/scratch/p24cs0005/exp/ckpt', 'logdir': '/scratch/p24cs0005/exp/job_log', 'tdir': '/scratch/p24cs0005/exp/job_tboard', 'validation_dir': '/scratch/p24cs0005/exp/validation', 'num_workers': 8, 'distributed': True, 'iter': 60000000, 'batch_size': 13, 'config': 'configs/dit_config_rangeview.py', 'lr': 0.0003, 'blr': 0.0001, 'weight_decay': 0.01, 'resume_path': None, 'resume_step': 50000, 'exp_name': 'kitti_rangeview_stage_1', 'launcher': 'pytorch', 'overfit': False, 'eval_steps': 1000, 'load_from_deepspeed': '/scratch/p24cs0005/exp/ckpt/kitti_rangeview_stage_1/50000', 'wandb_project': 'difforecast-rangeview', 'wandb_run_name': None, 'no_wandb': False, 'no_log_file': True, 'vis_steps': 500, 'warmup_steps': 500, 'stage': '1', 'writer': <torch.utils.tensorboard.writer.SummaryWriter object at 0x7fa7f3497ac0>, 'writer_val': <torch.utils.tensorboard.writer.SummaryWriter object at 0x7fa7f3497580>, 'log_path': '/scratch/p24cs0005/exp/job_log/kitti_rangeview_stage_1', 'save_model_path': '/scratch/p24cs0005/exp/ckpt/kitti_rangeview_stage_1', 'tdir_path': '/scratch/p24cs0005/exp/job_tboard/kitti_rangeview_stage_1', 'validation_path': '/scratch/p24cs0005/exp/validation/kitti_rangeview_stage_1'}
+Creating Range View DiT model...
+RangeViewVAETokenizer (RangeLDM): in_channels=2, z_channels=4, patch_size=(4,16), vae_ckpt=None, add_encoder_temporal=False
+RangeViewVAE initialized. logvar_init=0.0, bev_perceptual_weight=0.0
+Stage 1 selected: Using RangeViewVAE model for ELBO optimization.
+Total VAE Parameters: 13.33M (1,33,30,890)
+Base LR: 5.91e-03
+Actual LR: 3.00e-04
+Effective batch size: 13
+/csehome/p24cs0005/miniconda3/envs/difforecast/lib/python3.10/site-packages/torch/utils/cpp_extension.py:1965: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
+  warnings.warn(
+Optimizer: DeepSpeedCPUAdam (
+Parameter Group 0
+    amsgrad: False
+    betas: (0.9, 0.95)
+    bias_correction: True
+    eps: 1e-08
+    lr: 0.0003
+    weight_decay: 0.0
+
+Parameter Group 1
+    amsgrad: False
+    betas: (0.9, 0.95)
+    bias_correction: True
+    eps: 1e-08
+    lr: 0.0003
+    weight_decay: 0.01
+)
+Creating KITTI range view dataset...
+Stage 1 selected: Using KITTIRangeViewVAEDataset (single frames, stride=1).
+KITTIRangeViewDataset [train]: 14136 samples — sequences [0, 1, 2, 3, 4, 5]
+KITTI training dataset created with 14136 samples
+Training dataloader length: 1087
+Before initializing optimizer states
+MA 0.03 GB         Max_MA 0.05 GB         CA 0.05 GB         Max_CA 0 GB 
+CPU Virtual Memory:  used = 13.28 GB, percent = 2.6%
+After initializing optimizer states
+MA 0.03 GB         Max_MA 0.03 GB         CA 0.05 GB         Max_CA 0 GB 
+CPU Virtual Memory:  used = 13.35 GB, percent = 2.7%
+After initializing ZeRO optimizer
+MA 0.03 GB         Max_MA 0.03 GB         CA 0.05 GB         Max_CA 0 GB 
+CPU Virtual Memory:  used = 13.36 GB, percent = 2.7%
+[2026-03-16 14:10:46,915] [WARNING] [engine.py:3398:load_checkpoint] Unable to find latest file at /scratch/p24cs0005/exp/ckpt/kitti_rangeview_stage_1/50000/latest, if trying to load latest checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint.
+Discriminator created: ndf=64, n_layers=3, disc_start=50000, disc_weight=0.5, disc_lr=4.5e-06
+Starting training loop...
+[2026-03-16 14:10:49,707] [WARNING] [torch_autocast.py:122:autocast_if_enabled] torch.autocast is enabled outside DeepSpeed but disabled within the DeepSpeed engine. If you are using DeepSpeed's built-in mixed precision, the engine will follow the settings in bf16/fp16 section. To use torch's native autocast instead, configure the `torch_autocast` section in the DeepSpeed config.
+[rank0]:[W316 14:10:56.443915566 reducer.cpp:1400] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+26-03-16 14:10:58.046 - INFO: stage:1 step:50001 time:2.68+8.34 lr:6.0000e-07 loss_avg:1.4141e+00 elbo:1.4141e+00 bev:0.0000e+00 g_loss:-2.7588e-02 d_loss:1.0156e+00
+26-03-16 14:10:59.500 - INFO: stage:1 step:50002 time:0.13+1.00 lr:1.2000e-06 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-2.6367e-02 d_loss:1.0156e+00
+26-03-16 14:11:00.822 - INFO: stage:1 step:50003 time:0.32+1.00 lr:1.8000e-06 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:-3.6377e-02 d_loss:1.0234e+00
+26-03-16 14:11:02.132 - INFO: stage:1 step:50004 time:0.32+0.99 lr:2.4000e-06 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:-2.4658e-02 d_loss:1.0234e+00
+26-03-16 14:11:03.440 - INFO: stage:1 step:50005 time:0.32+0.99 lr:3.0000e-06 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:-2.6855e-02 d_loss:1.0156e+00
+26-03-16 14:11:04.748 - INFO: stage:1 step:50006 time:0.32+0.99 lr:3.6000e-06 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:-2.5146e-02 d_loss:1.0078e+00
+26-03-16 14:11:06.053 - INFO: stage:1 step:50007 time:0.32+0.98 lr:4.2000e-06 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:-2.9663e-02 d_loss:1.0156e+00
+26-03-16 14:11:07.361 - INFO: stage:1 step:50008 time:0.32+0.99 lr:4.8000e-06 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:-2.6489e-02 d_loss:1.0078e+00
+26-03-16 14:11:08.676 - INFO: stage:1 step:50009 time:0.32+0.99 lr:5.4000e-06 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:-2.5269e-02 d_loss:1.0000e+00
+26-03-16 14:11:09.994 - INFO: stage:1 step:50010 time:0.32+0.99 lr:6.0000e-06 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:-2.7588e-02 d_loss:1.0078e+00
+26-03-16 14:11:11.300 - INFO: stage:1 step:50011 time:0.32+0.99 lr:6.6000e-06 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-3.0518e-02 d_loss:1.0078e+00
+26-03-16 14:11:12.609 - INFO: stage:1 step:50012 time:0.32+0.99 lr:7.2000e-06 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:-2.5757e-02 d_loss:1.0078e+00
+26-03-16 14:11:13.930 - INFO: stage:1 step:50013 time:0.32+1.00 lr:7.8000e-06 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:-3.0029e-02 d_loss:1.0078e+00
+26-03-16 14:11:15.241 - INFO: stage:1 step:50014 time:0.32+0.99 lr:8.4000e-06 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:-3.1250e-02 d_loss:1.0156e+00
+26-03-16 14:11:16.553 - INFO: stage:1 step:50015 time:0.32+0.99 lr:9.0000e-06 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-2.8931e-02 d_loss:1.0078e+00
+26-03-16 14:11:17.876 - INFO: stage:1 step:50016 time:0.32+1.00 lr:9.6000e-06 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:-2.8076e-02 d_loss:1.0156e+00
+26-03-16 14:11:19.187 - INFO: stage:1 step:50017 time:0.32+0.99 lr:1.0200e-05 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:-3.4912e-02 d_loss:1.0156e+00
+26-03-16 14:11:20.499 - INFO: stage:1 step:50018 time:0.32+0.99 lr:1.0800e-05 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:-2.9785e-02 d_loss:1.0156e+00
+26-03-16 14:11:21.811 - INFO: stage:1 step:50019 time:0.32+0.99 lr:1.1400e-05 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:-2.2339e-02 d_loss:1.0078e+00
+26-03-16 14:11:23.123 - INFO: stage:1 step:50020 time:0.32+0.99 lr:1.2000e-05 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:-2.7710e-02 d_loss:1.0156e+00
+26-03-16 14:11:24.436 - INFO: stage:1 step:50021 time:0.32+0.99 lr:1.2600e-05 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:-2.9175e-02 d_loss:1.0234e+00
+26-03-16 14:11:25.749 - INFO: stage:1 step:50022 time:0.32+0.99 lr:1.3200e-05 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:-1.8433e-02 d_loss:1.0078e+00
+26-03-16 14:11:27.060 - INFO: stage:1 step:50023 time:0.32+0.99 lr:1.3800e-05 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-1.7822e-02 d_loss:1.0078e+00
+26-03-16 14:11:28.372 - INFO: stage:1 step:50024 time:0.32+0.99 lr:1.4400e-05 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:-1.5747e-02 d_loss:1.0078e+00
+26-03-16 14:11:29.688 - INFO: stage:1 step:50025 time:0.32+0.99 lr:1.5000e-05 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:-1.6235e-02 d_loss:1.0156e+00
+26-03-16 14:11:31.002 - INFO: stage:1 step:50026 time:0.32+0.99 lr:1.5600e-05 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-1.2146e-02 d_loss:1.0078e+00
+26-03-16 14:11:32.312 - INFO: stage:1 step:50027 time:0.32+0.99 lr:1.6200e-05 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:-1.3184e-02 d_loss:1.0156e+00
+26-03-16 14:11:33.625 - INFO: stage:1 step:50028 time:0.32+0.99 lr:1.6800e-05 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-1.4709e-02 d_loss:1.0156e+00
+26-03-16 14:11:34.940 - INFO: stage:1 step:50029 time:0.32+0.99 lr:1.7400e-05 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:-7.4463e-03 d_loss:1.0078e+00
+26-03-16 14:11:36.259 - INFO: stage:1 step:50030 time:0.32+1.00 lr:1.8000e-05 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:-7.0496e-03 d_loss:1.0078e+00
+26-03-16 14:11:37.575 - INFO: stage:1 step:50031 time:0.32+0.99 lr:1.8600e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-1.3672e-02 d_loss:1.0078e+00
+26-03-16 14:11:38.890 - INFO: stage:1 step:50032 time:0.32+0.99 lr:1.9200e-05 loss_avg:9.9219e-01 elbo:9.9219e-01 bev:0.0000e+00 g_loss:-1.5320e-02 d_loss:1.0078e+00
+26-03-16 14:11:40.204 - INFO: stage:1 step:50033 time:0.32+0.99 lr:1.9800e-05 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-4.7302e-03 d_loss:1.0156e+00
+26-03-16 14:11:41.519 - INFO: stage:1 step:50034 time:0.32+0.99 lr:2.0400e-05 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-1.6235e-02 d_loss:1.0078e+00
+26-03-16 14:11:42.843 - INFO: stage:1 step:50035 time:0.32+1.00 lr:2.1000e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.1963e-02 d_loss:1.0078e+00
+26-03-16 14:11:44.157 - INFO: stage:1 step:50036 time:0.32+0.99 lr:2.1600e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-1.2085e-02 d_loss:1.0156e+00
+26-03-16 14:11:45.471 - INFO: stage:1 step:50037 time:0.32+0.99 lr:2.2200e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-1.0498e-02 d_loss:1.0078e+00
+26-03-16 14:11:46.786 - INFO: stage:1 step:50038 time:0.32+0.99 lr:2.2800e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-1.3184e-02 d_loss:1.0078e+00
+26-03-16 14:11:48.102 - INFO: stage:1 step:50039 time:0.32+0.99 lr:2.3400e-05 loss_avg:9.5312e-01 elbo:9.5312e-01 bev:0.0000e+00 g_loss:-1.8311e-02 d_loss:1.0078e+00
+26-03-16 14:11:49.420 - INFO: stage:1 step:50040 time:0.32+1.00 lr:2.4000e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-1.4343e-02 d_loss:1.0000e+00
+26-03-16 14:11:50.733 - INFO: stage:1 step:50041 time:0.32+0.99 lr:2.4600e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.9043e-02 d_loss:1.0156e+00
+26-03-16 14:11:52.048 - INFO: stage:1 step:50042 time:0.32+0.99 lr:2.5200e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-1.3672e-02 d_loss:1.0000e+00
+26-03-16 14:11:53.362 - INFO: stage:1 step:50043 time:0.32+0.99 lr:2.5800e-05 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:-1.5015e-02 d_loss:1.0078e+00
+26-03-16 14:11:54.677 - INFO: stage:1 step:50044 time:0.32+0.99 lr:2.6400e-05 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:-1.3123e-02 d_loss:1.0234e+00
+26-03-16 14:11:56.001 - INFO: stage:1 step:50045 time:0.32+1.00 lr:2.7000e-05 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:-1.1658e-02 d_loss:1.0234e+00
+26-03-16 14:11:57.317 - INFO: stage:1 step:50046 time:0.32+0.99 lr:2.7600e-05 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:-1.2817e-02 d_loss:1.0000e+00
+26-03-16 14:11:58.632 - INFO: stage:1 step:50047 time:0.32+0.99 lr:2.8200e-05 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:-1.5259e-02 d_loss:1.0078e+00
+26-03-16 14:11:59.947 - INFO: stage:1 step:50048 time:0.32+0.99 lr:2.8800e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.0498e-02 d_loss:1.0234e+00
+26-03-16 14:12:01.263 - INFO: stage:1 step:50049 time:0.32+0.99 lr:2.9400e-05 loss_avg:9.7656e-01 elbo:9.7656e-01 bev:0.0000e+00 g_loss:-1.0315e-02 d_loss:1.0078e+00
+26-03-16 14:12:02.578 - INFO: stage:1 step:50050 time:0.32+0.99 lr:3.0000e-05 loss_avg:8.9062e-01 elbo:8.9062e-01 bev:0.0000e+00 g_loss:-1.6724e-02 d_loss:1.0078e+00
+26-03-16 14:12:03.893 - INFO: stage:1 step:50051 time:0.32+0.99 lr:3.0600e-05 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-1.0925e-02 d_loss:1.0078e+00
+26-03-16 14:12:05.207 - INFO: stage:1 step:50052 time:0.32+0.99 lr:3.1200e-05 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:-2.0508e-02 d_loss:1.0156e+00
+26-03-16 14:12:06.522 - INFO: stage:1 step:50053 time:0.32+0.99 lr:3.1800e-05 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:-7.4463e-03 d_loss:1.0078e+00
+26-03-16 14:12:07.842 - INFO: stage:1 step:50054 time:0.32+1.00 lr:3.2400e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-1.6235e-02 d_loss:1.0156e+00
+26-03-16 14:12:09.159 - INFO: stage:1 step:50055 time:0.32+0.99 lr:3.3000e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-6.6833e-03 d_loss:1.0078e+00
+26-03-16 14:12:10.475 - INFO: stage:1 step:50056 time:0.32+0.99 lr:3.3600e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.3245e-02 d_loss:1.0078e+00
+26-03-16 14:12:11.792 - INFO: stage:1 step:50057 time:0.32+0.99 lr:3.4200e-05 loss_avg:9.9609e-01 elbo:9.9609e-01 bev:0.0000e+00 g_loss:-1.3123e-02 d_loss:1.0156e+00
+26-03-16 14:12:13.109 - INFO: stage:1 step:50058 time:0.32+0.99 lr:3.4800e-05 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:-6.0120e-03 d_loss:1.0156e+00
+26-03-16 14:12:14.430 - INFO: stage:1 step:50059 time:0.33+1.00 lr:3.5400e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-1.1536e-02 d_loss:1.0000e+00
+26-03-16 14:12:15.747 - INFO: stage:1 step:50060 time:0.32+0.99 lr:3.6000e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-1.0803e-02 d_loss:1.0000e+00
+26-03-16 14:12:17.064 - INFO: stage:1 step:50061 time:0.32+0.99 lr:3.6600e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-1.2329e-02 d_loss:1.0078e+00
+26-03-16 14:12:18.383 - INFO: stage:1 step:50062 time:0.32+0.99 lr:3.7200e-05 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:-9.8877e-03 d_loss:1.0078e+00
+26-03-16 14:12:19.706 - INFO: stage:1 step:50063 time:0.32+1.00 lr:3.7800e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-1.9775e-02 d_loss:1.0156e+00
+26-03-16 14:12:21.025 - INFO: stage:1 step:50064 time:0.33+0.99 lr:3.8400e-05 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:-1.1963e-02 d_loss:1.0078e+00
+26-03-16 14:12:22.343 - INFO: stage:1 step:50065 time:0.32+0.99 lr:3.9000e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.0071e-02 d_loss:1.0078e+00
+26-03-16 14:12:23.662 - INFO: stage:1 step:50066 time:0.32+0.99 lr:3.9600e-05 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:-1.2085e-02 d_loss:1.0078e+00
+26-03-16 14:12:24.979 - INFO: stage:1 step:50067 time:0.32+0.99 lr:4.0200e-05 loss_avg:1.2734e+00 elbo:1.2734e+00 bev:0.0000e+00 g_loss:-8.3008e-03 d_loss:1.0078e+00
+26-03-16 14:12:26.296 - INFO: stage:1 step:50068 time:0.32+0.99 lr:4.0800e-05 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:-9.6436e-03 d_loss:1.0078e+00
+26-03-16 14:12:27.613 - INFO: stage:1 step:50069 time:0.32+0.99 lr:4.1400e-05 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-1.2146e-02 d_loss:1.0000e+00
+26-03-16 14:12:28.932 - INFO: stage:1 step:50070 time:0.32+0.99 lr:4.2000e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-1.3672e-02 d_loss:1.0000e+00
+26-03-16 14:12:30.249 - INFO: stage:1 step:50071 time:0.32+0.99 lr:4.2600e-05 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-1.3489e-02 d_loss:1.0000e+00
+26-03-16 14:12:31.576 - INFO: stage:1 step:50072 time:0.33+1.00 lr:4.3200e-05 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:-3.8452e-03 d_loss:1.0078e+00
+26-03-16 14:12:32.893 - INFO: stage:1 step:50073 time:0.32+0.99 lr:4.3800e-05 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-9.9487e-03 d_loss:1.0078e+00
+26-03-16 14:12:34.212 - INFO: stage:1 step:50074 time:0.32+0.99 lr:4.4400e-05 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:-1.0864e-02 d_loss:1.0078e+00
+26-03-16 14:12:35.530 - INFO: stage:1 step:50075 time:0.32+0.99 lr:4.5000e-05 loss_avg:1.2812e+00 elbo:1.2812e+00 bev:0.0000e+00 g_loss:-9.8877e-03 d_loss:1.0078e+00
+26-03-16 14:12:36.848 - INFO: stage:1 step:50076 time:0.32+0.99 lr:4.5600e-05 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:-1.0925e-02 d_loss:1.0000e+00
+26-03-16 14:12:38.165 - INFO: stage:1 step:50077 time:0.33+0.99 lr:4.6200e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.1902e-02 d_loss:1.0078e+00
+26-03-16 14:12:39.482 - INFO: stage:1 step:50078 time:0.32+0.99 lr:4.6800e-05 loss_avg:9.4531e-01 elbo:9.4531e-01 bev:0.0000e+00 g_loss:-1.2390e-02 d_loss:1.0000e+00
+26-03-16 14:12:40.800 - INFO: stage:1 step:50079 time:0.32+0.99 lr:4.7400e-05 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-1.0742e-02 d_loss:1.0000e+00
+26-03-16 14:12:42.116 - INFO: stage:1 step:50080 time:0.32+0.99 lr:4.8000e-05 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:-8.8501e-03 d_loss:1.0156e+00
+26-03-16 14:12:43.433 - INFO: stage:1 step:50081 time:0.32+0.99 lr:4.8600e-05 loss_avg:9.6094e-01 elbo:9.6094e-01 bev:0.0000e+00 g_loss:-1.2268e-02 d_loss:1.0078e+00
+26-03-16 14:12:44.752 - INFO: stage:1 step:50082 time:0.32+1.00 lr:4.9200e-05 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-1.3367e-02 d_loss:1.0000e+00
+26-03-16 14:12:46.069 - INFO: stage:1 step:50083 time:0.32+0.99 lr:4.9800e-05 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-9.8877e-03 d_loss:1.0156e+00
+26-03-16 14:12:47.386 - INFO: stage:1 step:50084 time:0.32+0.99 lr:5.0400e-05 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:-8.9722e-03 d_loss:1.0156e+00
+26-03-16 14:12:48.703 - INFO: stage:1 step:50085 time:0.32+0.99 lr:5.1000e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.0193e-02 d_loss:1.0000e+00
+26-03-16 14:12:50.021 - INFO: stage:1 step:50086 time:0.32+0.99 lr:5.1600e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-9.7046e-03 d_loss:1.0078e+00
+26-03-16 14:12:51.339 - INFO: stage:1 step:50087 time:0.33+0.99 lr:5.2200e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-7.8735e-03 d_loss:1.0000e+00
+26-03-16 14:12:52.655 - INFO: stage:1 step:50088 time:0.32+0.99 lr:5.2800e-05 loss_avg:9.4531e-01 elbo:9.4531e-01 bev:0.0000e+00 g_loss:-1.1353e-02 d_loss:1.0000e+00
+26-03-16 14:12:53.972 - INFO: stage:1 step:50089 time:0.32+0.99 lr:5.3400e-05 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:-1.1292e-02 d_loss:1.0078e+00
+26-03-16 14:12:55.293 - INFO: stage:1 step:50090 time:0.32+1.00 lr:5.4000e-05 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:-1.0071e-02 d_loss:1.0000e+00
+26-03-16 14:12:56.611 - INFO: stage:1 step:50091 time:0.32+0.99 lr:5.4600e-05 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:-7.4463e-03 d_loss:1.0000e+00
+26-03-16 14:12:57.928 - INFO: stage:1 step:50092 time:0.32+0.99 lr:5.5200e-05 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:-1.0254e-02 d_loss:1.0078e+00
+26-03-16 14:12:59.244 - INFO: stage:1 step:50093 time:0.32+0.99 lr:5.5800e-05 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:-3.5400e-03 d_loss:1.0000e+00
+26-03-16 14:13:00.563 - INFO: stage:1 step:50094 time:0.32+0.99 lr:5.6400e-05 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:-9.6436e-03 d_loss:1.0156e+00
+26-03-16 14:13:01.880 - INFO: stage:1 step:50095 time:0.32+0.99 lr:5.7000e-05 loss_avg:9.4531e-01 elbo:9.4531e-01 bev:0.0000e+00 g_loss:-1.1902e-02 d_loss:1.0078e+00
+26-03-16 14:13:03.241 - INFO: stage:1 step:50096 time:0.33+1.04 lr:5.7600e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-1.4832e-02 d_loss:1.0156e+00
+26-03-16 14:13:04.572 - INFO: stage:1 step:50097 time:0.33+1.01 lr:5.8200e-05 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:-1.3733e-02 d_loss:1.0000e+00
+26-03-16 14:13:05.893 - INFO: stage:1 step:50098 time:0.33+1.00 lr:5.8800e-05 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:-1.2024e-02 d_loss:1.0078e+00
+26-03-16 14:13:07.209 - INFO: stage:1 step:50099 time:0.32+0.99 lr:5.9400e-05 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-1.5198e-02 d_loss:1.0078e+00
+26-03-16 14:13:08.684 - INFO: stage:1 step:50100 time:0.32+1.15 lr:6.0000e-05 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:-1.3245e-02 d_loss:1.0156e+00
+26-03-16 14:13:10.005 - INFO: stage:1 step:50101 time:0.32+1.00 lr:6.0600e-05 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:-7.9956e-03 d_loss:1.0078e+00
+26-03-16 14:13:11.433 - INFO: stage:1 step:50102 time:0.42+1.01 lr:6.1200e-05 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-7.6904e-03 d_loss:1.0156e+00
+26-03-16 14:13:12.754 - INFO: stage:1 step:50103 time:0.33+1.00 lr:6.1800e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-9.3994e-03 d_loss:1.0078e+00
+26-03-16 14:13:14.071 - INFO: stage:1 step:50104 time:0.32+0.99 lr:6.2400e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-9.8267e-03 d_loss:1.0000e+00
+26-03-16 14:13:15.394 - INFO: stage:1 step:50105 time:0.32+1.00 lr:6.3000e-05 loss_avg:9.4531e-01 elbo:9.4531e-01 bev:0.0000e+00 g_loss:-7.6904e-03 d_loss:1.0000e+00
+26-03-16 14:13:16.714 - INFO: stage:1 step:50106 time:0.33+1.00 lr:6.3600e-05 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:-7.2021e-03 d_loss:1.0000e+00
+26-03-16 14:13:18.032 - INFO: stage:1 step:50107 time:0.32+0.99 lr:6.4200e-05 loss_avg:9.6094e-01 elbo:9.6094e-01 bev:0.0000e+00 g_loss:-1.1230e-02 d_loss:1.0078e+00
+26-03-16 14:13:19.351 - INFO: stage:1 step:50108 time:0.32+0.99 lr:6.4800e-05 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:-7.1716e-03 d_loss:1.0156e+00
+26-03-16 14:13:20.668 - INFO: stage:1 step:50109 time:0.32+0.99 lr:6.5400e-05 loss_avg:9.7266e-01 elbo:9.7266e-01 bev:0.0000e+00 g_loss:-7.5378e-03 d_loss:1.0078e+00
+26-03-16 14:13:21.986 - INFO: stage:1 step:50110 time:0.32+0.99 lr:6.6000e-05 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:-8.1177e-03 d_loss:1.0156e+00
+26-03-16 14:13:23.304 - INFO: stage:1 step:50111 time:0.32+0.99 lr:6.6600e-05 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:-3.0212e-03 d_loss:1.0156e+00
+26-03-16 14:13:24.623 - INFO: stage:1 step:50112 time:0.33+0.99 lr:6.7200e-05 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-8.4839e-03 d_loss:1.0078e+00
+26-03-16 14:13:25.941 - INFO: stage:1 step:50113 time:0.32+0.99 lr:6.7800e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-5.3711e-03 d_loss:1.0078e+00
+26-03-16 14:13:27.261 - INFO: stage:1 step:50114 time:0.32+1.00 lr:6.8400e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-6.6528e-03 d_loss:1.0000e+00
+26-03-16 14:13:28.578 - INFO: stage:1 step:50115 time:0.32+0.99 lr:6.9000e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-7.7820e-03 d_loss:1.0000e+00
+26-03-16 14:13:29.897 - INFO: stage:1 step:50116 time:0.32+0.99 lr:6.9600e-05 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:-1.0193e-02 d_loss:1.0078e+00
+26-03-16 14:13:31.214 - INFO: stage:1 step:50117 time:0.32+0.99 lr:7.0200e-05 loss_avg:9.7266e-01 elbo:9.7266e-01 bev:0.0000e+00 g_loss:-9.0942e-03 d_loss:1.0078e+00
+26-03-16 14:13:32.533 - INFO: stage:1 step:50118 time:0.32+0.99 lr:7.0800e-05 loss_avg:9.7656e-01 elbo:9.7656e-01 bev:0.0000e+00 g_loss:-8.9111e-03 d_loss:1.0078e+00
+26-03-16 14:13:33.852 - INFO: stage:1 step:50119 time:0.33+0.99 lr:7.1400e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-5.4321e-03 d_loss:1.0156e+00
+26-03-16 14:13:35.171 - INFO: stage:1 step:50120 time:0.32+0.99 lr:7.2000e-05 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-1.1108e-02 d_loss:1.0078e+00
+26-03-16 14:13:36.490 - INFO: stage:1 step:50121 time:0.33+0.99 lr:7.2600e-05 loss_avg:9.1406e-01 elbo:9.1406e-01 bev:0.0000e+00 g_loss:-8.5449e-03 d_loss:1.0000e+00
+26-03-16 14:13:37.809 - INFO: stage:1 step:50122 time:0.32+0.99 lr:7.3200e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-8.4229e-03 d_loss:1.0000e+00
+26-03-16 14:13:39.129 - INFO: stage:1 step:50123 time:0.32+0.99 lr:7.3800e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-1.0193e-02 d_loss:1.0000e+00
+26-03-16 14:13:40.450 - INFO: stage:1 step:50124 time:0.33+1.00 lr:7.4400e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-8.1177e-03 d_loss:1.0078e+00
+26-03-16 14:13:41.775 - INFO: stage:1 step:50125 time:0.33+1.00 lr:7.5000e-05 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:-8.9111e-03 d_loss:1.0000e+00
+26-03-16 14:13:43.095 - INFO: stage:1 step:50126 time:0.32+1.00 lr:7.5600e-05 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-8.9722e-03 d_loss:1.0000e+00
+26-03-16 14:13:44.415 - INFO: stage:1 step:50127 time:0.32+0.99 lr:7.6200e-05 loss_avg:9.9609e-01 elbo:9.9609e-01 bev:0.0000e+00 g_loss:-6.4697e-03 d_loss:1.0000e+00
+26-03-16 14:13:45.734 - INFO: stage:1 step:50128 time:0.33+0.99 lr:7.6800e-05 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:-5.6458e-03 d_loss:1.0000e+00
+26-03-16 14:13:47.055 - INFO: stage:1 step:50129 time:0.33+1.00 lr:7.7400e-05 loss_avg:1.2891e+00 elbo:1.2891e+00 bev:0.0000e+00 g_loss:-1.7166e-03 d_loss:1.0078e+00
+26-03-16 14:13:48.376 - INFO: stage:1 step:50130 time:0.33+0.99 lr:7.8000e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-6.4697e-03 d_loss:1.0000e+00
+26-03-16 14:13:49.696 - INFO: stage:1 step:50131 time:0.33+0.99 lr:7.8600e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-7.3242e-03 d_loss:1.0078e+00
+26-03-16 14:13:51.015 - INFO: stage:1 step:50132 time:0.33+0.99 lr:7.9200e-05 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:-6.9275e-03 d_loss:1.0000e+00
+26-03-16 14:13:52.335 - INFO: stage:1 step:50133 time:0.33+0.99 lr:7.9800e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-1.2024e-02 d_loss:1.0000e+00
+26-03-16 14:13:53.660 - INFO: stage:1 step:50134 time:0.33+1.00 lr:8.0400e-05 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:-1.2390e-02 d_loss:1.0078e+00
+26-03-16 14:13:54.980 - INFO: stage:1 step:50135 time:0.33+0.99 lr:8.1000e-05 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:-1.2573e-02 d_loss:1.0078e+00
+26-03-16 14:13:56.300 - INFO: stage:1 step:50136 time:0.33+0.99 lr:8.1600e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-1.4587e-02 d_loss:1.0000e+00
+26-03-16 14:13:57.626 - INFO: stage:1 step:50137 time:0.33+0.99 lr:8.2200e-05 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:-1.0132e-02 d_loss:1.0078e+00
+26-03-16 14:13:58.947 - INFO: stage:1 step:50138 time:0.33+1.00 lr:8.2800e-05 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:-7.4463e-03 d_loss:1.0000e+00
+26-03-16 14:14:00.268 - INFO: stage:1 step:50139 time:0.33+1.00 lr:8.3400e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-8.7280e-03 d_loss:1.0000e+00
+26-03-16 14:14:01.589 - INFO: stage:1 step:50140 time:0.33+1.00 lr:8.4000e-05 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-6.1035e-03 d_loss:1.0000e+00
+26-03-16 14:14:02.909 - INFO: stage:1 step:50141 time:0.33+0.99 lr:8.4600e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-7.7820e-03 d_loss:1.0000e+00
+26-03-16 14:14:04.230 - INFO: stage:1 step:50142 time:0.33+1.00 lr:8.5200e-05 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-5.7068e-03 d_loss:1.0078e+00
+26-03-16 14:14:05.551 - INFO: stage:1 step:50143 time:0.32+1.00 lr:8.5800e-05 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-4.8828e-03 d_loss:1.0000e+00
+26-03-16 14:14:06.877 - INFO: stage:1 step:50144 time:0.33+1.00 lr:8.6400e-05 loss_avg:9.4141e-01 elbo:9.4141e-01 bev:0.0000e+00 g_loss:-7.5684e-03 d_loss:1.0078e+00
+26-03-16 14:14:08.198 - INFO: stage:1 step:50145 time:0.33+0.99 lr:8.7000e-05 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:-6.9885e-03 d_loss:1.0000e+00
+26-03-16 14:14:09.519 - INFO: stage:1 step:50146 time:0.33+0.99 lr:8.7600e-05 loss_avg:1.2891e+00 elbo:1.2891e+00 bev:0.0000e+00 g_loss:-1.7853e-03 d_loss:1.0000e+00
+26-03-16 14:14:10.839 - INFO: stage:1 step:50147 time:0.33+0.99 lr:8.8200e-05 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:-4.5776e-03 d_loss:1.0000e+00
+26-03-16 14:14:12.162 - INFO: stage:1 step:50148 time:0.33+1.00 lr:8.8800e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-5.4016e-03 d_loss:1.0000e+00
+26-03-16 14:14:13.483 - INFO: stage:1 step:50149 time:0.33+1.00 lr:8.9400e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-4.4556e-03 d_loss:1.0000e+00
+26-03-16 14:14:14.806 - INFO: stage:1 step:50150 time:0.33+1.00 lr:9.0000e-05 loss_avg:9.9609e-01 elbo:9.9609e-01 bev:0.0000e+00 g_loss:-5.0049e-03 d_loss:1.0078e+00
+26-03-16 14:14:16.129 - INFO: stage:1 step:50151 time:0.32+1.00 lr:9.0600e-05 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:1.1597e-03 d_loss:1.0078e+00
+26-03-16 14:14:17.450 - INFO: stage:1 step:50152 time:0.33+0.99 lr:9.1200e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-3.7537e-03 d_loss:1.0000e+00
+26-03-16 14:14:18.771 - INFO: stage:1 step:50153 time:0.33+1.00 lr:9.1800e-05 loss_avg:9.4531e-01 elbo:9.4531e-01 bev:0.0000e+00 g_loss:-5.2795e-03 d_loss:1.0000e+00
+26-03-16 14:14:20.094 - INFO: stage:1 step:50154 time:0.33+1.00 lr:9.2400e-05 loss_avg:9.9609e-01 elbo:9.9609e-01 bev:0.0000e+00 g_loss:5.7602e-04 d_loss:1.0078e+00
+26-03-16 14:14:21.415 - INFO: stage:1 step:50155 time:0.32+1.00 lr:9.3000e-05 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-7.5150e-04 d_loss:1.0000e+00
+26-03-16 14:14:22.736 - INFO: stage:1 step:50156 time:0.33+1.00 lr:9.3600e-05 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:-3.1738e-03 d_loss:1.0078e+00
+26-03-16 14:14:24.059 - INFO: stage:1 step:50157 time:0.33+1.00 lr:9.4200e-05 loss_avg:9.7266e-01 elbo:9.7266e-01 bev:0.0000e+00 g_loss:-5.1270e-03 d_loss:1.0000e+00
+26-03-16 14:14:25.382 - INFO: stage:1 step:50158 time:0.33+1.00 lr:9.4800e-05 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-4.5776e-03 d_loss:1.0000e+00
+26-03-16 14:14:26.704 - INFO: stage:1 step:50159 time:0.33+1.00 lr:9.5400e-05 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-3.6774e-03 d_loss:1.0000e+00
+26-03-16 14:14:28.026 - INFO: stage:1 step:50160 time:0.33+0.99 lr:9.6000e-05 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-3.9368e-03 d_loss:1.0000e+00
+26-03-16 14:14:29.346 - INFO: stage:1 step:50161 time:0.33+0.99 lr:9.6600e-05 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:-4.5776e-03 d_loss:1.0000e+00
+26-03-16 14:14:30.667 - INFO: stage:1 step:50162 time:0.33+1.00 lr:9.7200e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-7.1411e-03 d_loss:1.0000e+00
+26-03-16 14:14:31.989 - INFO: stage:1 step:50163 time:0.33+1.00 lr:9.7800e-05 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-8.1177e-03 d_loss:1.0000e+00
+26-03-16 14:14:33.309 - INFO: stage:1 step:50164 time:0.33+0.99 lr:9.8400e-05 loss_avg:9.7656e-01 elbo:9.7656e-01 bev:0.0000e+00 g_loss:-5.9509e-03 d_loss:1.0000e+00
+26-03-16 14:14:34.636 - INFO: stage:1 step:50165 time:0.33+1.00 lr:9.9000e-05 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:-5.2795e-03 d_loss:1.0000e+00
+26-03-16 14:14:35.958 - INFO: stage:1 step:50166 time:0.33+1.00 lr:9.9600e-05 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-5.4321e-03 d_loss:1.0000e+00
+26-03-16 14:14:37.280 - INFO: stage:1 step:50167 time:0.33+1.00 lr:1.0020e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-1.5869e-03 d_loss:1.0000e+00
+26-03-16 14:14:38.615 - INFO: stage:1 step:50168 time:0.32+1.01 lr:1.0080e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:-3.7537e-03 d_loss:1.0000e+00
+26-03-16 14:14:39.937 - INFO: stage:1 step:50169 time:0.33+1.00 lr:1.0140e-04 loss_avg:9.7656e-01 elbo:9.7656e-01 bev:0.0000e+00 g_loss:2.6855e-03 d_loss:1.0000e+00
+26-03-16 14:14:41.259 - INFO: stage:1 step:50170 time:0.33+1.00 lr:1.0200e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-3.4180e-03 d_loss:1.0000e+00
+26-03-16 14:14:42.580 - INFO: stage:1 step:50171 time:0.33+1.00 lr:1.0260e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:1.8024e-04 d_loss:1.0000e+00
+26-03-16 14:14:43.901 - INFO: stage:1 step:50172 time:0.33+1.00 lr:1.0320e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-4.9210e-04 d_loss:1.0078e+00
+26-03-16 14:14:45.223 - INFO: stage:1 step:50173 time:0.32+1.00 lr:1.0380e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:-9.9182e-04 d_loss:1.0156e+00
+26-03-16 14:14:46.544 - INFO: stage:1 step:50174 time:0.33+1.00 lr:1.0440e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:3.2616e-04 d_loss:1.0000e+00
+26-03-16 14:14:47.865 - INFO: stage:1 step:50175 time:0.33+1.00 lr:1.0500e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-1.1063e-04 d_loss:1.0156e+00
+26-03-16 14:14:49.187 - INFO: stage:1 step:50176 time:0.33+1.00 lr:1.0560e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:-2.8381e-03 d_loss:1.0078e+00
+26-03-16 14:14:50.508 - INFO: stage:1 step:50177 time:0.33+1.00 lr:1.0620e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:-3.0518e-03 d_loss:1.0078e+00
+26-03-16 14:14:51.830 - INFO: stage:1 step:50178 time:0.33+1.00 lr:1.0680e-04 loss_avg:9.8438e-01 elbo:9.8438e-01 bev:0.0000e+00 g_loss:-3.9101e-04 d_loss:1.0000e+00
+26-03-16 14:14:53.151 - INFO: stage:1 step:50179 time:0.33+1.00 lr:1.0740e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:-1.7090e-03 d_loss:1.0078e+00
+26-03-16 14:14:54.472 - INFO: stage:1 step:50180 time:0.33+1.00 lr:1.0800e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:5.1498e-04 d_loss:1.0078e+00
+26-03-16 14:14:55.793 - INFO: stage:1 step:50181 time:0.33+1.00 lr:1.0860e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:-1.2665e-03 d_loss:1.0078e+00
+26-03-16 14:14:57.114 - INFO: stage:1 step:50182 time:0.33+1.00 lr:1.0920e-04 loss_avg:9.5312e-01 elbo:9.5312e-01 bev:0.0000e+00 g_loss:-1.5945e-03 d_loss:1.0000e+00
+26-03-16 14:14:58.439 - INFO: stage:1 step:50183 time:0.33+1.00 lr:1.0980e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:-1.5869e-03 d_loss:1.0000e+00
+26-03-16 14:14:59.761 - INFO: stage:1 step:50184 time:0.33+0.99 lr:1.1040e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:1.1673e-03 d_loss:1.0000e+00
+26-03-16 14:15:01.081 - INFO: stage:1 step:50185 time:0.33+0.99 lr:1.1100e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:-5.2795e-03 d_loss:1.0000e+00
+26-03-16 14:15:02.405 - INFO: stage:1 step:50186 time:0.33+1.00 lr:1.1160e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:1.5831e-04 d_loss:1.0000e+00
+26-03-16 14:15:03.726 - INFO: stage:1 step:50187 time:0.33+1.00 lr:1.1220e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:-9.2697e-04 d_loss:1.0078e+00
+26-03-16 14:15:05.049 - INFO: stage:1 step:50188 time:0.33+1.00 lr:1.1280e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:-5.6458e-04 d_loss:1.0000e+00
+26-03-16 14:15:06.370 - INFO: stage:1 step:50189 time:0.33+1.00 lr:1.1340e-04 loss_avg:9.8438e-01 elbo:9.8438e-01 bev:0.0000e+00 g_loss:-1.9150e-03 d_loss:1.0078e+00
+26-03-16 14:15:07.692 - INFO: stage:1 step:50190 time:0.33+1.00 lr:1.1400e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:3.5400e-03 d_loss:1.0000e+00
+26-03-16 14:15:09.012 - INFO: stage:1 step:50191 time:0.32+1.00 lr:1.1460e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-2.8381e-03 d_loss:1.0000e+00
+26-03-16 14:15:10.333 - INFO: stage:1 step:50192 time:0.33+0.99 lr:1.1520e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:5.0354e-04 d_loss:1.0000e+00
+26-03-16 14:15:11.654 - INFO: stage:1 step:50193 time:0.33+1.00 lr:1.1580e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:3.7994e-03 d_loss:1.0000e+00
+26-03-16 14:15:12.977 - INFO: stage:1 step:50194 time:0.33+1.00 lr:1.1640e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:2.7771e-03 d_loss:1.0000e+00
+26-03-16 14:15:14.299 - INFO: stage:1 step:50195 time:0.33+1.00 lr:1.1700e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:8.3160e-04 d_loss:1.0000e+00
+26-03-16 14:15:15.621 - INFO: stage:1 step:50196 time:0.33+1.00 lr:1.1760e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.3651e-04 d_loss:1.0000e+00
+26-03-16 14:15:16.942 - INFO: stage:1 step:50197 time:0.33+0.99 lr:1.1820e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:-8.2779e-04 d_loss:1.0000e+00
+26-03-16 14:15:18.265 - INFO: stage:1 step:50198 time:0.33+1.00 lr:1.1880e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:3.5095e-03 d_loss:1.0000e+00
+26-03-16 14:15:19.586 - INFO: stage:1 step:50199 time:0.32+1.00 lr:1.1940e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:-4.9133e-03 d_loss:1.0000e+00
+26-03-16 14:15:20.907 - INFO: stage:1 step:50200 time:0.33+0.99 lr:1.2000e-04 loss_avg:9.6484e-01 elbo:9.6484e-01 bev:0.0000e+00 g_loss:-2.1820e-03 d_loss:1.0000e+00
+26-03-16 14:15:22.229 - INFO: stage:1 step:50201 time:0.33+1.00 lr:1.2060e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:-1.4572e-03 d_loss:1.0000e+00
+26-03-16 14:15:23.594 - INFO: stage:1 step:50202 time:0.37+1.00 lr:1.2120e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:-8.5354e-05 d_loss:1.0000e+00
+26-03-16 14:15:24.916 - INFO: stage:1 step:50203 time:0.33+1.00 lr:1.2180e-04 loss_avg:9.9219e-01 elbo:9.9219e-01 bev:0.0000e+00 g_loss:6.5613e-03 d_loss:1.0078e+00
+26-03-16 14:15:26.236 - INFO: stage:1 step:50204 time:0.33+0.99 lr:1.2240e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:2.3804e-03 d_loss:1.0000e+00
+26-03-16 14:15:27.556 - INFO: stage:1 step:50205 time:0.33+0.99 lr:1.2300e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:1.7090e-03 d_loss:1.0000e+00
+26-03-16 14:15:28.877 - INFO: stage:1 step:50206 time:0.33+0.99 lr:1.2360e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:5.2185e-03 d_loss:1.0000e+00
+26-03-16 14:15:30.196 - INFO: stage:1 step:50207 time:0.33+0.99 lr:1.2420e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:1.2131e-03 d_loss:1.0000e+00
+26-03-16 14:15:31.517 - INFO: stage:1 step:50208 time:0.33+0.99 lr:1.2480e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-1.1902e-03 d_loss:1.0078e+00
+26-03-16 14:15:32.837 - INFO: stage:1 step:50209 time:0.33+1.00 lr:1.2540e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:1.0452e-03 d_loss:1.0000e+00
+26-03-16 14:15:34.160 - INFO: stage:1 step:50210 time:0.32+1.00 lr:1.2600e-04 loss_avg:9.2578e-01 elbo:9.2578e-01 bev:0.0000e+00 g_loss:2.3346e-03 d_loss:1.0000e+00
+26-03-16 14:15:35.484 - INFO: stage:1 step:50211 time:0.33+1.00 lr:1.2660e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:8.3542e-04 d_loss:1.0000e+00
+26-03-16 14:15:36.805 - INFO: stage:1 step:50212 time:0.33+1.00 lr:1.2720e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:-6.3419e-05 d_loss:1.0000e+00
+26-03-16 14:15:38.125 - INFO: stage:1 step:50213 time:0.33+0.99 lr:1.2780e-04 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:-2.7924e-03 d_loss:1.0078e+00
+26-03-16 14:15:39.448 - INFO: stage:1 step:50214 time:0.33+1.00 lr:1.2840e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-3.7956e-04 d_loss:1.0000e+00
+26-03-16 14:15:40.768 - INFO: stage:1 step:50215 time:0.33+0.99 lr:1.2900e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:1.4343e-03 d_loss:1.0000e+00
+26-03-16 14:15:42.093 - INFO: stage:1 step:50216 time:0.33+1.00 lr:1.2960e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:3.8605e-03 d_loss:1.0000e+00
+26-03-16 14:15:43.416 - INFO: stage:1 step:50217 time:0.33+1.00 lr:1.3020e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:7.8735e-03 d_loss:1.0078e+00
+26-03-16 14:15:44.739 - INFO: stage:1 step:50218 time:0.33+1.00 lr:1.3080e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.0752e-03 d_loss:1.0000e+00
+26-03-16 14:15:46.061 - INFO: stage:1 step:50219 time:0.33+1.00 lr:1.3140e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:4.6387e-03 d_loss:1.0000e+00
+26-03-16 14:15:47.382 - INFO: stage:1 step:50220 time:0.33+1.00 lr:1.3200e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:7.1411e-03 d_loss:1.0078e+00
+26-03-16 14:15:48.702 - INFO: stage:1 step:50221 time:0.33+0.99 lr:1.3260e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:6.5327e-05 d_loss:1.0000e+00
+26-03-16 14:15:50.024 - INFO: stage:1 step:50222 time:0.33+1.00 lr:1.3320e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:5.8289e-03 d_loss:1.0078e+00
+26-03-16 14:15:51.345 - INFO: stage:1 step:50223 time:0.33+0.99 lr:1.3380e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:4.7112e-04 d_loss:1.0000e+00
+26-03-16 14:15:52.666 - INFO: stage:1 step:50224 time:0.33+0.99 lr:1.3440e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:5.4550e-04 d_loss:1.0000e+00
+26-03-16 14:15:53.986 - INFO: stage:1 step:50225 time:0.33+0.99 lr:1.3500e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:3.9978e-03 d_loss:1.0000e+00
+26-03-16 14:15:55.310 - INFO: stage:1 step:50226 time:0.33+1.00 lr:1.3560e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:-1.6403e-03 d_loss:1.0000e+00
+26-03-16 14:15:56.632 - INFO: stage:1 step:50227 time:0.33+1.00 lr:1.3620e-04 loss_avg:9.5703e-01 elbo:9.5703e-01 bev:0.0000e+00 g_loss:1.5717e-03 d_loss:1.0000e+00
+26-03-16 14:15:57.955 - INFO: stage:1 step:50228 time:0.33+1.00 lr:1.3680e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:1.5793e-03 d_loss:1.0000e+00
+26-03-16 14:15:59.280 - INFO: stage:1 step:50229 time:0.33+1.00 lr:1.3740e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.2207e-03 d_loss:1.0000e+00
+26-03-16 14:16:00.602 - INFO: stage:1 step:50230 time:0.33+1.00 lr:1.3800e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:-1.3809e-03 d_loss:1.0000e+00
+26-03-16 14:16:01.922 - INFO: stage:1 step:50231 time:0.33+0.99 lr:1.3860e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:1.7776e-03 d_loss:1.0000e+00
+26-03-16 14:16:03.243 - INFO: stage:1 step:50232 time:0.33+0.99 lr:1.3920e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:4.2114e-03 d_loss:1.0000e+00
+26-03-16 14:16:04.563 - INFO: stage:1 step:50233 time:0.33+0.99 lr:1.3980e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:8.1177e-03 d_loss:1.0078e+00
+26-03-16 14:16:05.887 - INFO: stage:1 step:50234 time:0.33+1.00 lr:1.4040e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:1.9684e-03 d_loss:1.0000e+00
+26-03-16 14:16:07.208 - INFO: stage:1 step:50235 time:0.33+1.00 lr:1.4100e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:5.6458e-03 d_loss:1.0000e+00
+26-03-16 14:16:08.530 - INFO: stage:1 step:50236 time:0.33+1.00 lr:1.4160e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:2.5940e-03 d_loss:1.0000e+00
+26-03-16 14:16:09.852 - INFO: stage:1 step:50237 time:0.33+1.00 lr:1.4220e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:6.2943e-04 d_loss:1.0000e+00
+26-03-16 14:16:11.175 - INFO: stage:1 step:50238 time:0.33+1.00 lr:1.4280e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:-1.2283e-03 d_loss:1.0000e+00
+26-03-16 14:16:12.496 - INFO: stage:1 step:50239 time:0.33+1.00 lr:1.4340e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:4.1199e-03 d_loss:1.0000e+00
+26-03-16 14:16:13.825 - INFO: stage:1 step:50240 time:0.33+1.00 lr:1.4400e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:3.5553e-03 d_loss:1.0000e+00
+26-03-16 14:16:15.147 - INFO: stage:1 step:50241 time:0.33+1.00 lr:1.4460e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:7.1106e-03 d_loss:1.0000e+00
+26-03-16 14:16:16.478 - INFO: stage:1 step:50242 time:0.33+1.00 lr:1.4520e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:9.1553e-03 d_loss:1.0078e+00
+26-03-16 14:16:17.798 - INFO: stage:1 step:50243 time:0.33+0.99 lr:1.4580e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:2.4567e-03 d_loss:1.0000e+00
+26-03-16 14:16:19.119 - INFO: stage:1 step:50244 time:0.33+1.00 lr:1.4640e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:4.9744e-03 d_loss:1.0000e+00
+26-03-16 14:16:20.448 - INFO: stage:1 step:50245 time:0.33+1.00 lr:1.4700e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:1.8234e-03 d_loss:1.0000e+00
+26-03-16 14:16:21.770 - INFO: stage:1 step:50246 time:0.33+1.00 lr:1.4760e-04 loss_avg:9.4922e-01 elbo:9.4922e-01 bev:0.0000e+00 g_loss:6.3477e-03 d_loss:1.0000e+00
+26-03-16 14:16:23.091 - INFO: stage:1 step:50247 time:0.33+0.99 lr:1.4820e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:8.0566e-03 d_loss:1.0000e+00
+26-03-16 14:16:24.412 - INFO: stage:1 step:50248 time:0.33+0.99 lr:1.4880e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:5.0354e-03 d_loss:1.0000e+00
+26-03-16 14:16:25.732 - INFO: stage:1 step:50249 time:0.33+1.00 lr:1.4940e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:9.3994e-03 d_loss:1.0000e+00
+26-03-16 14:16:27.057 - INFO: stage:1 step:50250 time:0.33+1.00 lr:1.5000e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:3.0670e-03 d_loss:1.0000e+00
+26-03-16 14:16:28.379 - INFO: stage:1 step:50251 time:0.33+1.00 lr:1.5060e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:6.8970e-03 d_loss:1.0078e+00
+26-03-16 14:16:29.700 - INFO: stage:1 step:50252 time:0.33+1.00 lr:1.5120e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:4.4556e-03 d_loss:1.0078e+00
+26-03-16 14:16:31.034 - INFO: stage:1 step:50253 time:0.34+1.00 lr:1.5180e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:9.0332e-03 d_loss:1.0078e+00
+26-03-16 14:16:32.356 - INFO: stage:1 step:50254 time:0.32+1.00 lr:1.5240e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:5.7373e-03 d_loss:1.0000e+00
+26-03-16 14:16:33.677 - INFO: stage:1 step:50255 time:0.33+1.00 lr:1.5300e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:7.5989e-03 d_loss:1.0078e+00
+26-03-16 14:16:34.999 - INFO: stage:1 step:50256 time:0.33+1.00 lr:1.5360e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:5.6458e-03 d_loss:1.0000e+00
+26-03-16 14:16:36.321 - INFO: stage:1 step:50257 time:0.33+1.00 lr:1.5420e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:3.0212e-03 d_loss:1.0000e+00
+26-03-16 14:16:37.645 - INFO: stage:1 step:50258 time:0.33+1.00 lr:1.5480e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:6.6833e-03 d_loss:1.0000e+00
+26-03-16 14:16:38.963 - INFO: stage:1 step:50259 time:0.33+0.99 lr:1.5540e-04 loss_avg:9.8828e-01 elbo:9.8828e-01 bev:0.0000e+00 g_loss:8.6670e-03 d_loss:1.0078e+00
+26-03-16 14:16:40.282 - INFO: stage:1 step:50260 time:0.33+0.99 lr:1.5600e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:5.5237e-03 d_loss:1.0000e+00
+26-03-16 14:16:41.601 - INFO: stage:1 step:50261 time:0.33+0.99 lr:1.5660e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:9.0332e-03 d_loss:1.0078e+00
+26-03-16 14:16:42.921 - INFO: stage:1 step:50262 time:0.33+0.99 lr:1.5720e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:1.1292e-02 d_loss:1.0000e+00
+26-03-16 14:16:44.240 - INFO: stage:1 step:50263 time:0.33+0.99 lr:1.5780e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:1.1169e-02 d_loss:1.0000e+00
+26-03-16 14:16:45.559 - INFO: stage:1 step:50264 time:0.33+0.99 lr:1.5840e-04 loss_avg:1.3203e+00 elbo:1.3203e+00 bev:0.0000e+00 g_loss:6.9275e-03 d_loss:1.0078e+00
+26-03-16 14:16:46.878 - INFO: stage:1 step:50265 time:0.33+0.99 lr:1.5900e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:4.6997e-03 d_loss:1.0000e+00
+26-03-16 14:16:48.198 - INFO: stage:1 step:50266 time:0.33+0.99 lr:1.5960e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:5.7983e-03 d_loss:1.0000e+00
+26-03-16 14:16:49.518 - INFO: stage:1 step:50267 time:0.33+0.99 lr:1.6020e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:7.3242e-03 d_loss:1.0000e+00
+26-03-16 14:16:50.838 - INFO: stage:1 step:50268 time:0.33+0.99 lr:1.6080e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:6.6528e-03 d_loss:1.0000e+00
+26-03-16 14:16:52.157 - INFO: stage:1 step:50269 time:0.33+0.99 lr:1.6140e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:6.9275e-03 d_loss:1.0000e+00
+26-03-16 14:16:53.478 - INFO: stage:1 step:50270 time:0.33+0.99 lr:1.6200e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:6.0730e-03 d_loss:1.0000e+00
+26-03-16 14:16:54.797 - INFO: stage:1 step:50271 time:0.33+0.99 lr:1.6260e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:1.5182e-03 d_loss:1.0000e+00
+26-03-16 14:16:56.115 - INFO: stage:1 step:50272 time:0.33+0.99 lr:1.6320e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:5.0964e-03 d_loss:1.0000e+00
+26-03-16 14:16:57.441 - INFO: stage:1 step:50273 time:0.33+0.99 lr:1.6380e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:5.4626e-03 d_loss:1.0000e+00
+26-03-16 14:16:58.761 - INFO: stage:1 step:50274 time:0.33+0.99 lr:1.6440e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:6.8970e-03 d_loss:1.0000e+00
+26-03-16 14:17:00.080 - INFO: stage:1 step:50275 time:0.33+0.99 lr:1.6500e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:9.8877e-03 d_loss:1.0078e+00
+26-03-16 14:17:01.398 - INFO: stage:1 step:50276 time:0.33+0.99 lr:1.6560e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:6.8359e-03 d_loss:1.0000e+00
+26-03-16 14:17:02.717 - INFO: stage:1 step:50277 time:0.33+0.99 lr:1.6620e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:7.2327e-03 d_loss:1.0000e+00
+26-03-16 14:17:04.037 - INFO: stage:1 step:50278 time:0.33+0.99 lr:1.6680e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:8.2397e-03 d_loss:1.0078e+00
+26-03-16 14:17:05.356 - INFO: stage:1 step:50279 time:0.33+0.99 lr:1.6740e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:7.9956e-03 d_loss:1.0078e+00
+26-03-16 14:17:06.674 - INFO: stage:1 step:50280 time:0.33+0.99 lr:1.6800e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:4.8523e-03 d_loss:1.0000e+00
+26-03-16 14:17:07.992 - INFO: stage:1 step:50281 time:0.33+0.99 lr:1.6860e-04 loss_avg:1.3047e+00 elbo:1.3047e+00 bev:0.0000e+00 g_loss:8.6670e-03 d_loss:1.0000e+00
+26-03-16 14:17:09.311 - INFO: stage:1 step:50282 time:0.33+0.99 lr:1.6920e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:4.5166e-03 d_loss:1.0000e+00
+26-03-16 14:17:10.628 - INFO: stage:1 step:50283 time:0.33+0.99 lr:1.6980e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:6.5918e-03 d_loss:1.0078e+00
+26-03-16 14:17:11.947 - INFO: stage:1 step:50284 time:0.33+0.99 lr:1.7040e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:5.5542e-03 d_loss:1.0000e+00
+26-03-16 14:17:13.265 - INFO: stage:1 step:50285 time:0.33+0.99 lr:1.7100e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:8.7891e-03 d_loss:1.0000e+00
+26-03-16 14:17:14.584 - INFO: stage:1 step:50286 time:0.33+0.99 lr:1.7160e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:7.7820e-03 d_loss:1.0000e+00
+26-03-16 14:17:15.902 - INFO: stage:1 step:50287 time:0.33+0.99 lr:1.7220e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:7.9346e-03 d_loss:1.0000e+00
+26-03-16 14:17:17.221 - INFO: stage:1 step:50288 time:0.33+0.99 lr:1.7280e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:6.1340e-03 d_loss:1.0000e+00
+26-03-16 14:17:18.541 - INFO: stage:1 step:50289 time:0.33+0.99 lr:1.7340e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:6.6223e-03 d_loss:1.0078e+00
+26-03-16 14:17:19.861 - INFO: stage:1 step:50290 time:0.33+0.99 lr:1.7400e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:7.3547e-03 d_loss:1.0078e+00
+26-03-16 14:17:21.178 - INFO: stage:1 step:50291 time:0.33+0.99 lr:1.7460e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:7.3853e-03 d_loss:1.0000e+00
+26-03-16 14:17:22.495 - INFO: stage:1 step:50292 time:0.33+0.99 lr:1.7520e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:1.8616e-03 d_loss:1.0000e+00
+26-03-16 14:17:23.816 - INFO: stage:1 step:50293 time:0.33+0.99 lr:1.7580e-04 loss_avg:9.8438e-01 elbo:9.8438e-01 bev:0.0000e+00 g_loss:8.6670e-03 d_loss:1.0000e+00
+26-03-16 14:17:25.135 - INFO: stage:1 step:50294 time:0.33+0.99 lr:1.7640e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:8.9722e-03 d_loss:1.0000e+00
+26-03-16 14:17:26.452 - INFO: stage:1 step:50295 time:0.33+0.99 lr:1.7700e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:7.6599e-03 d_loss:1.0078e+00
+26-03-16 14:17:27.774 - INFO: stage:1 step:50296 time:0.33+0.99 lr:1.7760e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:8.7280e-03 d_loss:1.0000e+00
+26-03-16 14:17:29.093 - INFO: stage:1 step:50297 time:0.33+0.99 lr:1.7820e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:6.7139e-03 d_loss:1.0000e+00
+26-03-16 14:17:30.412 - INFO: stage:1 step:50298 time:0.33+0.99 lr:1.7880e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:8.2397e-03 d_loss:1.0000e+00
+26-03-16 14:17:31.730 - INFO: stage:1 step:50299 time:0.33+0.99 lr:1.7940e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:5.0964e-03 d_loss:1.0000e+00
+26-03-16 14:17:33.047 - INFO: stage:1 step:50300 time:0.33+0.99 lr:1.8000e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:9.8877e-03 d_loss:1.0000e+00
+26-03-16 14:17:34.365 - INFO: stage:1 step:50301 time:0.33+0.99 lr:1.8060e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:7.6294e-03 d_loss:1.0000e+00
+26-03-16 14:17:35.709 - INFO: stage:1 step:50302 time:0.35+0.99 lr:1.8120e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:1.7319e-03 d_loss:1.0000e+00
+26-03-16 14:17:37.027 - INFO: stage:1 step:50303 time:0.33+0.99 lr:1.8180e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:7.2021e-03 d_loss:1.0078e+00
+26-03-16 14:17:38.349 - INFO: stage:1 step:50304 time:0.33+0.99 lr:1.8240e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:9.2773e-03 d_loss:1.0000e+00
+26-03-16 14:17:39.666 - INFO: stage:1 step:50305 time:0.33+0.99 lr:1.8300e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:9.3384e-03 d_loss:1.0000e+00
+26-03-16 14:17:40.985 - INFO: stage:1 step:50306 time:0.33+0.99 lr:1.8360e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:9.8267e-03 d_loss:1.0000e+00
+26-03-16 14:17:42.302 - INFO: stage:1 step:50307 time:0.33+0.99 lr:1.8420e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:8.9111e-03 d_loss:1.0000e+00
+26-03-16 14:17:43.619 - INFO: stage:1 step:50308 time:0.33+0.99 lr:1.8480e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:5.2795e-03 d_loss:1.0000e+00
+26-03-16 14:17:44.936 - INFO: stage:1 step:50309 time:0.33+0.99 lr:1.8540e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:8.2397e-03 d_loss:1.0000e+00
+26-03-16 14:17:46.256 - INFO: stage:1 step:50310 time:0.33+0.99 lr:1.8600e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:8.1177e-03 d_loss:1.0000e+00
+26-03-16 14:17:47.574 - INFO: stage:1 step:50311 time:0.33+0.99 lr:1.8660e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:1.3733e-02 d_loss:1.0000e+00
+26-03-16 14:17:48.905 - INFO: stage:1 step:50312 time:0.33+1.01 lr:1.8720e-04 loss_avg:1.2969e+00 elbo:1.2969e+00 bev:0.0000e+00 g_loss:1.0620e-02 d_loss:1.0000e+00
+26-03-16 14:17:50.226 - INFO: stage:1 step:50313 time:0.33+0.99 lr:1.8780e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:6.3171e-03 d_loss:1.0000e+00
+26-03-16 14:17:51.546 - INFO: stage:1 step:50314 time:0.33+0.99 lr:1.8840e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:9.2773e-03 d_loss:1.0000e+00
+26-03-16 14:17:52.863 - INFO: stage:1 step:50315 time:0.33+0.99 lr:1.8900e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:7.8125e-03 d_loss:1.0000e+00
+26-03-16 14:17:54.180 - INFO: stage:1 step:50316 time:0.33+0.99 lr:1.8960e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:1.0132e-02 d_loss:1.0000e+00
+26-03-16 14:17:55.497 - INFO: stage:1 step:50317 time:0.33+0.99 lr:1.9020e-04 loss_avg:1.0078e+00 elbo:1.0078e+00 bev:0.0000e+00 g_loss:6.5918e-03 d_loss:1.0000e+00
+26-03-16 14:17:56.817 - INFO: stage:1 step:50318 time:0.33+0.99 lr:1.9080e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:1.0071e-02 d_loss:1.0000e+00
+26-03-16 14:17:58.139 - INFO: stage:1 step:50319 time:0.33+0.99 lr:1.9140e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:6.6528e-03 d_loss:1.0000e+00
+26-03-16 14:17:59.460 - INFO: stage:1 step:50320 time:0.33+1.00 lr:1.9200e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.1475e-02 d_loss:1.0000e+00
+26-03-16 14:18:00.778 - INFO: stage:1 step:50321 time:0.33+0.99 lr:1.9260e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:6.9275e-03 d_loss:1.0000e+00
+26-03-16 14:18:02.098 - INFO: stage:1 step:50322 time:0.33+0.99 lr:1.9320e-04 loss_avg:9.5703e-01 elbo:9.5703e-01 bev:0.0000e+00 g_loss:7.5073e-03 d_loss:1.0000e+00
+26-03-16 14:18:03.415 - INFO: stage:1 step:50323 time:0.33+0.99 lr:1.9380e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.4099e-02 d_loss:1.0000e+00
+26-03-16 14:18:04.743 - INFO: stage:1 step:50324 time:0.33+1.00 lr:1.9440e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:8.7891e-03 d_loss:1.0000e+00
+26-03-16 14:18:06.061 - INFO: stage:1 step:50325 time:0.33+0.99 lr:1.9500e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:7.8735e-03 d_loss:1.0000e+00
+26-03-16 14:18:07.380 - INFO: stage:1 step:50326 time:0.33+0.99 lr:1.9560e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:7.0190e-03 d_loss:1.0000e+00
+26-03-16 14:18:08.702 - INFO: stage:1 step:50327 time:0.33+0.99 lr:1.9620e-04 loss_avg:1.2969e+00 elbo:1.2969e+00 bev:0.0000e+00 g_loss:1.1353e-02 d_loss:1.0000e+00
+26-03-16 14:18:10.021 - INFO: stage:1 step:50328 time:0.33+0.99 lr:1.9680e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:1.2634e-02 d_loss:1.0078e+00
+26-03-16 14:18:11.340 - INFO: stage:1 step:50329 time:0.33+0.99 lr:1.9740e-04 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:9.1553e-03 d_loss:1.0000e+00
+26-03-16 14:18:12.659 - INFO: stage:1 step:50330 time:0.33+0.99 lr:1.9800e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:5.6152e-03 d_loss:1.0000e+00
+26-03-16 14:18:13.977 - INFO: stage:1 step:50331 time:0.33+0.99 lr:1.9860e-04 loss_avg:9.6484e-01 elbo:9.6484e-01 bev:0.0000e+00 g_loss:4.8828e-03 d_loss:1.0000e+00
+26-03-16 14:18:15.297 - INFO: stage:1 step:50332 time:0.33+0.99 lr:1.9920e-04 loss_avg:1.0000e+00 elbo:1.0000e+00 bev:0.0000e+00 g_loss:7.3547e-03 d_loss:1.0000e+00
+26-03-16 14:18:16.614 - INFO: stage:1 step:50333 time:0.33+0.99 lr:1.9980e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:7.5378e-03 d_loss:1.0000e+00
+26-03-16 14:18:17.933 - INFO: stage:1 step:50334 time:0.33+0.99 lr:2.0040e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:6.3477e-03 d_loss:1.0000e+00
+26-03-16 14:18:19.254 - INFO: stage:1 step:50335 time:0.33+0.99 lr:2.0100e-04 loss_avg:1.2500e+00 elbo:1.2500e+00 bev:0.0000e+00 g_loss:1.4038e-02 d_loss:1.0000e+00
+26-03-16 14:18:20.572 - INFO: stage:1 step:50336 time:0.33+0.99 lr:2.0160e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:1.1353e-02 d_loss:1.0078e+00
+26-03-16 14:18:21.890 - INFO: stage:1 step:50337 time:0.33+0.99 lr:2.0220e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:8.4839e-03 d_loss:1.0078e+00
+26-03-16 14:18:23.209 - INFO: stage:1 step:50338 time:0.33+0.99 lr:2.0280e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:1.2573e-02 d_loss:1.0000e+00
+26-03-16 14:18:24.526 - INFO: stage:1 step:50339 time:0.33+0.99 lr:2.0340e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:1.6846e-02 d_loss:1.0000e+00
+26-03-16 14:18:25.843 - INFO: stage:1 step:50340 time:0.33+0.99 lr:2.0400e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:1.0925e-02 d_loss:1.0000e+00
+26-03-16 14:18:27.161 - INFO: stage:1 step:50341 time:0.33+0.99 lr:2.0460e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:1.1719e-02 d_loss:1.0000e+00
+26-03-16 14:18:28.480 - INFO: stage:1 step:50342 time:0.33+0.99 lr:2.0520e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:1.1353e-02 d_loss:1.0000e+00
+26-03-16 14:18:29.800 - INFO: stage:1 step:50343 time:0.33+0.99 lr:2.0580e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.5869e-02 d_loss:1.0000e+00
+26-03-16 14:18:31.117 - INFO: stage:1 step:50344 time:0.33+0.99 lr:2.0640e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:1.5198e-02 d_loss:1.0000e+00
+26-03-16 14:18:32.436 - INFO: stage:1 step:50345 time:0.33+0.99 lr:2.0700e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:1.3123e-02 d_loss:1.0000e+00
+26-03-16 14:18:33.765 - INFO: stage:1 step:50346 time:0.33+0.99 lr:2.0760e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:1.3245e-02 d_loss:1.0000e+00
+26-03-16 14:18:35.082 - INFO: stage:1 step:50347 time:0.33+0.99 lr:2.0820e-04 loss_avg:9.6484e-01 elbo:9.6484e-01 bev:0.0000e+00 g_loss:9.8267e-03 d_loss:1.0000e+00
+26-03-16 14:18:36.401 - INFO: stage:1 step:50348 time:0.33+0.99 lr:2.0880e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:7.5378e-03 d_loss:1.0000e+00
+26-03-16 14:18:37.721 - INFO: stage:1 step:50349 time:0.33+0.99 lr:2.0940e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:1.1963e-02 d_loss:1.0000e+00
+26-03-16 14:18:39.042 - INFO: stage:1 step:50350 time:0.33+1.00 lr:2.1000e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.6724e-02 d_loss:1.0000e+00
+26-03-16 14:18:40.362 - INFO: stage:1 step:50351 time:0.33+0.99 lr:2.1060e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:1.9653e-02 d_loss:1.0000e+00
+26-03-16 14:18:41.681 - INFO: stage:1 step:50352 time:0.33+0.99 lr:2.1120e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.1902e-02 d_loss:1.0000e+00
+26-03-16 14:18:43.001 - INFO: stage:1 step:50353 time:0.33+0.99 lr:2.1180e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:1.0986e-02 d_loss:1.0000e+00
+26-03-16 14:18:44.322 - INFO: stage:1 step:50354 time:0.33+0.99 lr:2.1240e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:1.3245e-02 d_loss:1.0000e+00
+26-03-16 14:18:45.642 - INFO: stage:1 step:50355 time:0.33+0.99 lr:2.1300e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:1.3855e-02 d_loss:1.0000e+00
+26-03-16 14:18:46.965 - INFO: stage:1 step:50356 time:0.33+1.00 lr:2.1360e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:1.1353e-02 d_loss:1.0000e+00
+26-03-16 14:18:48.284 - INFO: stage:1 step:50357 time:0.33+0.99 lr:2.1420e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:1.9043e-02 d_loss:1.0000e+00
+26-03-16 14:18:49.604 - INFO: stage:1 step:50358 time:0.33+0.99 lr:2.1480e-04 loss_avg:1.2812e+00 elbo:1.2812e+00 bev:0.0000e+00 g_loss:1.3184e-02 d_loss:1.0000e+00
+26-03-16 14:18:50.923 - INFO: stage:1 step:50359 time:0.33+0.99 lr:2.1540e-04 loss_avg:9.2969e-01 elbo:9.2969e-01 bev:0.0000e+00 g_loss:1.1292e-02 d_loss:1.0000e+00
+26-03-16 14:18:52.244 - INFO: stage:1 step:50360 time:0.33+1.00 lr:2.1600e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.4221e-02 d_loss:1.0000e+00
+26-03-16 14:18:53.563 - INFO: stage:1 step:50361 time:0.33+0.99 lr:2.1660e-04 loss_avg:1.3516e+00 elbo:1.3516e+00 bev:0.0000e+00 g_loss:1.6479e-02 d_loss:1.0000e+00
+26-03-16 14:18:54.884 - INFO: stage:1 step:50362 time:0.33+0.99 lr:2.1720e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.3550e-02 d_loss:1.0000e+00
+26-03-16 14:18:56.202 - INFO: stage:1 step:50363 time:0.33+0.99 lr:2.1780e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:1.3428e-02 d_loss:1.0000e+00
+26-03-16 14:18:57.521 - INFO: stage:1 step:50364 time:0.33+0.99 lr:2.1840e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:1.1169e-02 d_loss:1.0000e+00
+26-03-16 14:18:58.838 - INFO: stage:1 step:50365 time:0.33+0.99 lr:2.1900e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:1.2939e-02 d_loss:1.0000e+00
+26-03-16 14:19:00.159 - INFO: stage:1 step:50366 time:0.33+0.99 lr:2.1960e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:8.6060e-03 d_loss:1.0000e+00
+26-03-16 14:19:01.477 - INFO: stage:1 step:50367 time:0.33+0.99 lr:2.2020e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:9.4604e-03 d_loss:1.0000e+00
+26-03-16 14:19:02.796 - INFO: stage:1 step:50368 time:0.33+0.99 lr:2.2080e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:1.5198e-02 d_loss:1.0000e+00
+26-03-16 14:19:04.116 - INFO: stage:1 step:50369 time:0.33+0.99 lr:2.2140e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:1.2512e-02 d_loss:1.0000e+00
+26-03-16 14:19:05.435 - INFO: stage:1 step:50370 time:0.33+0.99 lr:2.2200e-04 loss_avg:9.6484e-01 elbo:9.6484e-01 bev:0.0000e+00 g_loss:9.8267e-03 d_loss:1.0000e+00
+26-03-16 14:19:06.753 - INFO: stage:1 step:50371 time:0.33+0.99 lr:2.2260e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:1.2146e-02 d_loss:1.0000e+00
+26-03-16 14:19:08.073 - INFO: stage:1 step:50372 time:0.33+0.99 lr:2.2320e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:1.0437e-02 d_loss:1.0000e+00
+26-03-16 14:19:09.392 - INFO: stage:1 step:50373 time:0.33+0.99 lr:2.2380e-04 loss_avg:1.2891e+00 elbo:1.2891e+00 bev:0.0000e+00 g_loss:2.0752e-02 d_loss:1.0000e+00
+26-03-16 14:19:10.712 - INFO: stage:1 step:50374 time:0.33+0.99 lr:2.2440e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:1.3794e-02 d_loss:1.0000e+00
+26-03-16 14:19:12.031 - INFO: stage:1 step:50375 time:0.33+0.99 lr:2.2500e-04 loss_avg:1.3750e+00 elbo:1.3750e+00 bev:0.0000e+00 g_loss:1.3794e-02 d_loss:1.0000e+00
+26-03-16 14:19:13.350 - INFO: stage:1 step:50376 time:0.33+0.99 lr:2.2560e-04 loss_avg:1.3359e+00 elbo:1.3359e+00 bev:0.0000e+00 g_loss:1.5869e-02 d_loss:1.0078e+00
+26-03-16 14:19:14.669 - INFO: stage:1 step:50377 time:0.33+0.99 lr:2.2620e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.7700e-02 d_loss:1.0000e+00
+26-03-16 14:19:15.989 - INFO: stage:1 step:50378 time:0.33+0.99 lr:2.2680e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:1.4709e-02 d_loss:1.0000e+00
+26-03-16 14:19:17.306 - INFO: stage:1 step:50379 time:0.33+0.99 lr:2.2740e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:1.1230e-02 d_loss:1.0000e+00
+26-03-16 14:19:18.624 - INFO: stage:1 step:50380 time:0.33+0.99 lr:2.2800e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:1.2634e-02 d_loss:1.0000e+00
+26-03-16 14:19:19.943 - INFO: stage:1 step:50381 time:0.33+0.99 lr:2.2860e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:1.4709e-02 d_loss:1.0078e+00
+26-03-16 14:19:21.262 - INFO: stage:1 step:50382 time:0.33+0.99 lr:2.2920e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:1.4771e-02 d_loss:1.0000e+00
+26-03-16 14:19:22.583 - INFO: stage:1 step:50383 time:0.33+0.99 lr:2.2980e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:1.9409e-02 d_loss:1.0000e+00
+26-03-16 14:19:23.902 - INFO: stage:1 step:50384 time:0.33+0.99 lr:2.3040e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.5869e-02 d_loss:1.0000e+00
+26-03-16 14:19:25.224 - INFO: stage:1 step:50385 time:0.33+0.99 lr:2.3100e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:1.6113e-02 d_loss:1.0000e+00
+26-03-16 14:19:26.544 - INFO: stage:1 step:50386 time:0.33+0.99 lr:2.3160e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.1362e-02 d_loss:1.0000e+00
+26-03-16 14:19:27.862 - INFO: stage:1 step:50387 time:0.33+0.99 lr:2.3220e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:1.6479e-02 d_loss:1.0000e+00
+26-03-16 14:19:29.180 - INFO: stage:1 step:50388 time:0.33+0.99 lr:2.3280e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:1.1841e-02 d_loss:1.0000e+00
+26-03-16 14:19:30.501 - INFO: stage:1 step:50389 time:0.33+0.99 lr:2.3340e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:1.9165e-02 d_loss:1.0000e+00
+26-03-16 14:19:31.822 - INFO: stage:1 step:50390 time:0.33+0.99 lr:2.3400e-04 loss_avg:1.3203e+00 elbo:1.3203e+00 bev:0.0000e+00 g_loss:1.8311e-02 d_loss:1.0000e+00
+26-03-16 14:19:33.142 - INFO: stage:1 step:50391 time:0.33+0.99 lr:2.3460e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:1.9043e-02 d_loss:1.0000e+00
+26-03-16 14:19:34.460 - INFO: stage:1 step:50392 time:0.33+0.99 lr:2.3520e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:1.8799e-02 d_loss:1.0000e+00
+26-03-16 14:19:35.779 - INFO: stage:1 step:50393 time:0.33+0.99 lr:2.3580e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.0681e-02 d_loss:1.0000e+00
+26-03-16 14:19:37.107 - INFO: stage:1 step:50394 time:0.33+1.00 lr:2.3640e-04 loss_avg:1.2500e+00 elbo:1.2500e+00 bev:0.0000e+00 g_loss:1.8066e-02 d_loss:1.0000e+00
+26-03-16 14:19:38.426 - INFO: stage:1 step:50395 time:0.33+0.99 lr:2.3700e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:1.8677e-02 d_loss:1.0000e+00
+26-03-16 14:19:39.746 - INFO: stage:1 step:50396 time:0.33+0.99 lr:2.3760e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:1.9287e-02 d_loss:1.0000e+00
+26-03-16 14:19:41.065 - INFO: stage:1 step:50397 time:0.33+0.99 lr:2.3820e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.6846e-02 d_loss:1.0000e+00
+26-03-16 14:19:42.385 - INFO: stage:1 step:50398 time:0.33+0.99 lr:2.3880e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:1.8555e-02 d_loss:1.0000e+00
+26-03-16 14:19:43.703 - INFO: stage:1 step:50399 time:0.33+0.99 lr:2.3940e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.0264e-02 d_loss:1.0000e+00
+26-03-16 14:19:45.023 - INFO: stage:1 step:50400 time:0.33+0.99 lr:2.4000e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:1.4221e-02 d_loss:1.0000e+00
+26-03-16 14:19:46.343 - INFO: stage:1 step:50401 time:0.33+0.99 lr:2.4060e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:1.6357e-02 d_loss:1.0000e+00
+26-03-16 14:19:47.677 - INFO: stage:1 step:50402 time:0.34+0.99 lr:2.4120e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:1.8188e-02 d_loss:1.0000e+00
+26-03-16 14:19:48.996 - INFO: stage:1 step:50403 time:0.33+0.99 lr:2.4180e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.5991e-02 d_loss:1.0000e+00
+26-03-16 14:19:50.315 - INFO: stage:1 step:50404 time:0.33+0.99 lr:2.4240e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.7578e-02 d_loss:1.0000e+00
+26-03-16 14:19:51.633 - INFO: stage:1 step:50405 time:0.33+0.99 lr:2.4300e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:1.9775e-02 d_loss:1.0000e+00
+26-03-16 14:19:52.952 - INFO: stage:1 step:50406 time:0.33+0.99 lr:2.4360e-04 loss_avg:1.3281e+00 elbo:1.3281e+00 bev:0.0000e+00 g_loss:1.5137e-02 d_loss:1.0078e+00
+26-03-16 14:19:54.271 - INFO: stage:1 step:50407 time:0.33+0.99 lr:2.4420e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:1.3428e-02 d_loss:1.0000e+00
+26-03-16 14:19:55.589 - INFO: stage:1 step:50408 time:0.33+0.99 lr:2.4480e-04 loss_avg:1.0234e+00 elbo:1.0234e+00 bev:0.0000e+00 g_loss:1.4221e-02 d_loss:1.0000e+00
+26-03-16 14:19:56.906 - INFO: stage:1 step:50409 time:0.33+0.99 lr:2.4540e-04 loss_avg:1.2891e+00 elbo:1.2891e+00 bev:0.0000e+00 g_loss:1.5076e-02 d_loss:1.0000e+00
+26-03-16 14:19:58.225 - INFO: stage:1 step:50410 time:0.33+0.99 lr:2.4600e-04 loss_avg:1.2812e+00 elbo:1.2812e+00 bev:0.0000e+00 g_loss:1.7334e-02 d_loss:1.0000e+00
+26-03-16 14:19:59.542 - INFO: stage:1 step:50411 time:0.33+0.99 lr:2.4660e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.8555e-02 d_loss:1.0000e+00
+26-03-16 14:20:00.859 - INFO: stage:1 step:50412 time:0.33+0.99 lr:2.4720e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:1.7090e-02 d_loss:1.0000e+00
+26-03-16 14:20:02.216 - INFO: stage:1 step:50413 time:0.33+1.03 lr:2.4780e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:1.4587e-02 d_loss:1.0000e+00
+26-03-16 14:20:03.536 - INFO: stage:1 step:50414 time:0.33+0.99 lr:2.4840e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:1.6113e-02 d_loss:1.0000e+00
+26-03-16 14:20:04.854 - INFO: stage:1 step:50415 time:0.33+0.99 lr:2.4900e-04 loss_avg:1.3047e+00 elbo:1.3047e+00 bev:0.0000e+00 g_loss:2.2827e-02 d_loss:1.0000e+00
+26-03-16 14:20:06.173 - INFO: stage:1 step:50416 time:0.33+0.99 lr:2.4960e-04 loss_avg:1.3750e+00 elbo:1.3750e+00 bev:0.0000e+00 g_loss:1.8311e-02 d_loss:1.0000e+00
+26-03-16 14:20:07.491 - INFO: stage:1 step:50417 time:0.33+0.99 lr:2.5020e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:1.5320e-02 d_loss:1.0000e+00
+26-03-16 14:20:08.812 - INFO: stage:1 step:50418 time:0.33+0.99 lr:2.5080e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:1.6602e-02 d_loss:1.0000e+00
+26-03-16 14:20:10.130 - INFO: stage:1 step:50419 time:0.33+0.99 lr:2.5140e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:1.2085e-02 d_loss:1.0000e+00
+26-03-16 14:20:11.449 - INFO: stage:1 step:50420 time:0.33+0.99 lr:2.5200e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.3672e-02 d_loss:1.0078e+00
+26-03-16 14:20:12.787 - INFO: stage:1 step:50421 time:0.33+1.01 lr:2.5260e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:1.7822e-02 d_loss:1.0000e+00
+26-03-16 14:20:14.107 - INFO: stage:1 step:50422 time:0.33+0.99 lr:2.5320e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.0264e-02 d_loss:9.9609e-01
+26-03-16 14:20:15.426 - INFO: stage:1 step:50423 time:0.33+0.99 lr:2.5380e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.3550e-02 d_loss:1.0000e+00
+26-03-16 14:20:16.745 - INFO: stage:1 step:50424 time:0.33+0.99 lr:2.5440e-04 loss_avg:9.7266e-01 elbo:9.7266e-01 bev:0.0000e+00 g_loss:1.2024e-02 d_loss:1.0000e+00
+26-03-16 14:20:18.063 - INFO: stage:1 step:50425 time:0.33+0.99 lr:2.5500e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:1.7212e-02 d_loss:1.0000e+00
+26-03-16 14:20:19.381 - INFO: stage:1 step:50426 time:0.33+0.99 lr:2.5560e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:1.5564e-02 d_loss:1.0000e+00
+26-03-16 14:20:20.699 - INFO: stage:1 step:50427 time:0.33+0.99 lr:2.5620e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:1.9775e-02 d_loss:9.9609e-01
+26-03-16 14:20:22.017 - INFO: stage:1 step:50428 time:0.33+0.99 lr:2.5680e-04 loss_avg:1.0391e+00 elbo:1.0391e+00 bev:0.0000e+00 g_loss:1.9165e-02 d_loss:1.0000e+00
+26-03-16 14:20:23.335 - INFO: stage:1 step:50429 time:0.33+0.99 lr:2.5740e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:1.4771e-02 d_loss:1.0000e+00
+26-03-16 14:20:24.654 - INFO: stage:1 step:50430 time:0.33+0.99 lr:2.5800e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.8311e-02 d_loss:1.0000e+00
+26-03-16 14:20:25.972 - INFO: stage:1 step:50431 time:0.33+0.99 lr:2.5860e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:1.8677e-02 d_loss:1.0000e+00
+26-03-16 14:20:27.290 - INFO: stage:1 step:50432 time:0.33+0.99 lr:2.5920e-04 loss_avg:1.3281e+00 elbo:1.3281e+00 bev:0.0000e+00 g_loss:2.1118e-02 d_loss:9.9609e-01
+26-03-16 14:20:28.609 - INFO: stage:1 step:50433 time:0.33+0.99 lr:2.5980e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:1.6479e-02 d_loss:1.0000e+00
+26-03-16 14:20:29.928 - INFO: stage:1 step:50434 time:0.33+0.99 lr:2.6040e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:1.5259e-02 d_loss:1.0000e+00
+26-03-16 14:20:31.246 - INFO: stage:1 step:50435 time:0.33+0.99 lr:2.6100e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:1.2390e-02 d_loss:1.0000e+00
+26-03-16 14:20:32.568 - INFO: stage:1 step:50436 time:0.33+0.99 lr:2.6160e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:1.7334e-02 d_loss:1.0000e+00
+26-03-16 14:20:33.886 - INFO: stage:1 step:50437 time:0.33+0.99 lr:2.6220e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:1.3611e-02 d_loss:1.0000e+00
+26-03-16 14:20:35.207 - INFO: stage:1 step:50438 time:0.33+0.99 lr:2.6280e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:2.1973e-02 d_loss:1.0000e+00
+26-03-16 14:20:36.528 - INFO: stage:1 step:50439 time:0.33+0.99 lr:2.6340e-04 loss_avg:1.0156e+00 elbo:1.0156e+00 bev:0.0000e+00 g_loss:1.6479e-02 d_loss:1.0000e+00
+26-03-16 14:20:37.846 - INFO: stage:1 step:50440 time:0.33+0.99 lr:2.6400e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:1.5991e-02 d_loss:1.0000e+00
+26-03-16 14:20:39.165 - INFO: stage:1 step:50441 time:0.33+0.99 lr:2.6460e-04 loss_avg:1.3906e+00 elbo:1.3906e+00 bev:0.0000e+00 g_loss:2.3193e-02 d_loss:1.0000e+00
+26-03-16 14:20:40.485 - INFO: stage:1 step:50442 time:0.33+0.99 lr:2.6520e-04 loss_avg:1.0703e+00 elbo:1.0703e+00 bev:0.0000e+00 g_loss:1.4099e-02 d_loss:1.0000e+00
+26-03-16 14:20:41.804 - INFO: stage:1 step:50443 time:0.33+0.99 lr:2.6580e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.0386e-02 d_loss:1.0000e+00
+26-03-16 14:20:43.127 - INFO: stage:1 step:50444 time:0.33+0.99 lr:2.6640e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:1.7822e-02 d_loss:1.0000e+00
+26-03-16 14:20:44.444 - INFO: stage:1 step:50445 time:0.33+0.99 lr:2.6700e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:2.3682e-02 d_loss:1.0000e+00
+26-03-16 14:20:45.763 - INFO: stage:1 step:50446 time:0.33+0.99 lr:2.6760e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.1118e-02 d_loss:1.0000e+00
+26-03-16 14:20:47.082 - INFO: stage:1 step:50447 time:0.33+0.99 lr:2.6820e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:2.1362e-02 d_loss:1.0000e+00
+26-03-16 14:20:48.401 - INFO: stage:1 step:50448 time:0.33+0.99 lr:2.6880e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:1.8921e-02 d_loss:1.0000e+00
+26-03-16 14:20:49.720 - INFO: stage:1 step:50449 time:0.33+0.99 lr:2.6940e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:2.1973e-02 d_loss:1.0000e+00
+26-03-16 14:20:51.040 - INFO: stage:1 step:50450 time:0.33+0.99 lr:2.7000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:2.1973e-02 d_loss:1.0000e+00
+26-03-16 14:20:52.359 - INFO: stage:1 step:50451 time:0.33+0.99 lr:2.7060e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:2.0752e-02 d_loss:1.0000e+00
+26-03-16 14:20:53.678 - INFO: stage:1 step:50452 time:0.33+0.99 lr:2.7120e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:2.0264e-02 d_loss:1.0000e+00
+26-03-16 14:20:54.996 - INFO: stage:1 step:50453 time:0.33+0.99 lr:2.7180e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:2.3926e-02 d_loss:1.0000e+00
+26-03-16 14:20:56.315 - INFO: stage:1 step:50454 time:0.33+0.99 lr:2.7240e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:2.3193e-02 d_loss:1.0000e+00
+26-03-16 14:20:57.633 - INFO: stage:1 step:50455 time:0.33+0.99 lr:2.7300e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:2.3682e-02 d_loss:1.0000e+00
+26-03-16 14:20:58.951 - INFO: stage:1 step:50456 time:0.33+0.99 lr:2.7360e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:2.1851e-02 d_loss:1.0078e+00
+26-03-16 14:21:00.269 - INFO: stage:1 step:50457 time:0.33+0.99 lr:2.7420e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:2.4780e-02 d_loss:1.0000e+00
+26-03-16 14:21:01.589 - INFO: stage:1 step:50458 time:0.33+0.99 lr:2.7480e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.6245e-02 d_loss:1.0000e+00
+26-03-16 14:21:02.911 - INFO: stage:1 step:50459 time:0.33+0.99 lr:2.7540e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.0020e-02 d_loss:1.0000e+00
+26-03-16 14:21:04.228 - INFO: stage:1 step:50460 time:0.33+0.99 lr:2.7600e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:1.7334e-02 d_loss:1.0000e+00
+26-03-16 14:21:05.545 - INFO: stage:1 step:50461 time:0.33+0.99 lr:2.7660e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:2.0264e-02 d_loss:1.0000e+00
+26-03-16 14:21:06.870 - INFO: stage:1 step:50462 time:0.33+0.99 lr:2.7720e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.6123e-02 d_loss:1.0000e+00
+26-03-16 14:21:08.190 - INFO: stage:1 step:50463 time:0.33+0.99 lr:2.7780e-04 loss_avg:1.0469e+00 elbo:1.0469e+00 bev:0.0000e+00 g_loss:2.3926e-02 d_loss:1.0000e+00
+26-03-16 14:21:09.508 - INFO: stage:1 step:50464 time:0.33+0.99 lr:2.7840e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:2.7466e-02 d_loss:1.0000e+00
+26-03-16 14:21:10.827 - INFO: stage:1 step:50465 time:0.33+0.99 lr:2.7900e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:2.1362e-02 d_loss:1.0000e+00
+26-03-16 14:21:12.148 - INFO: stage:1 step:50466 time:0.33+0.99 lr:2.7960e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:1.9897e-02 d_loss:1.0000e+00
+26-03-16 14:21:13.467 - INFO: stage:1 step:50467 time:0.33+0.99 lr:2.8020e-04 loss_avg:1.3359e+00 elbo:1.3359e+00 bev:0.0000e+00 g_loss:2.6001e-02 d_loss:1.0000e+00
+26-03-16 14:21:14.785 - INFO: stage:1 step:50468 time:0.33+0.99 lr:2.8080e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:2.9175e-02 d_loss:1.0000e+00
+26-03-16 14:21:16.103 - INFO: stage:1 step:50469 time:0.33+0.99 lr:2.8140e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:2.2705e-02 d_loss:1.0000e+00
+26-03-16 14:21:17.422 - INFO: stage:1 step:50470 time:0.33+0.99 lr:2.8200e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:2.0874e-02 d_loss:1.0000e+00
+26-03-16 14:21:18.744 - INFO: stage:1 step:50471 time:0.33+1.00 lr:2.8260e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:2.6123e-02 d_loss:1.0000e+00
+26-03-16 14:21:20.061 - INFO: stage:1 step:50472 time:0.33+0.99 lr:2.8320e-04 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:3.0396e-02 d_loss:1.0000e+00
+26-03-16 14:21:21.381 - INFO: stage:1 step:50473 time:0.33+0.99 lr:2.8380e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.7466e-02 d_loss:1.0000e+00
+26-03-16 14:21:22.701 - INFO: stage:1 step:50474 time:0.33+0.99 lr:2.8440e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:2.6123e-02 d_loss:1.0000e+00
+26-03-16 14:21:24.018 - INFO: stage:1 step:50475 time:0.33+0.99 lr:2.8500e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.0142e-02 d_loss:1.0000e+00
+26-03-16 14:21:25.335 - INFO: stage:1 step:50476 time:0.33+0.99 lr:2.8560e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:2.6123e-02 d_loss:1.0000e+00
+26-03-16 14:21:26.652 - INFO: stage:1 step:50477 time:0.33+0.99 lr:2.8620e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:2.3071e-02 d_loss:1.0000e+00
+26-03-16 14:21:27.970 - INFO: stage:1 step:50478 time:0.33+0.99 lr:2.8680e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.2705e-02 d_loss:1.0000e+00
+26-03-16 14:21:29.288 - INFO: stage:1 step:50479 time:0.33+0.99 lr:2.8740e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:2.2339e-02 d_loss:1.0000e+00
+26-03-16 14:21:30.607 - INFO: stage:1 step:50480 time:0.33+0.99 lr:2.8800e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:2.7466e-02 d_loss:1.0000e+00
+26-03-16 14:21:31.930 - INFO: stage:1 step:50481 time:0.33+1.00 lr:2.8860e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.3315e-02 d_loss:1.0000e+00
+26-03-16 14:21:33.253 - INFO: stage:1 step:50482 time:0.33+0.99 lr:2.8920e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:1.9409e-02 d_loss:1.0000e+00
+26-03-16 14:21:34.571 - INFO: stage:1 step:50483 time:0.33+0.99 lr:2.8980e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:2.1240e-02 d_loss:1.0000e+00
+26-03-16 14:21:35.890 - INFO: stage:1 step:50484 time:0.33+0.99 lr:2.9040e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:2.5024e-02 d_loss:1.0000e+00
+26-03-16 14:21:37.209 - INFO: stage:1 step:50485 time:0.33+0.99 lr:2.9100e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:2.8931e-02 d_loss:1.0000e+00
+26-03-16 14:21:38.544 - INFO: stage:1 step:50486 time:0.33+1.01 lr:2.9160e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:2.0996e-02 d_loss:1.0000e+00
+26-03-16 14:21:39.864 - INFO: stage:1 step:50487 time:0.33+0.99 lr:2.9220e-04 loss_avg:1.2969e+00 elbo:1.2969e+00 bev:0.0000e+00 g_loss:2.6367e-02 d_loss:1.0000e+00
+26-03-16 14:21:41.185 - INFO: stage:1 step:50488 time:0.33+0.99 lr:2.9280e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:2.0264e-02 d_loss:1.0000e+00
+26-03-16 14:21:42.517 - INFO: stage:1 step:50489 time:0.33+1.01 lr:2.9340e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:2.4048e-02 d_loss:1.0000e+00
+26-03-16 14:21:43.849 - INFO: stage:1 step:50490 time:0.33+1.00 lr:2.9400e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:2.0142e-02 d_loss:1.0000e+00
+26-03-16 14:21:45.168 - INFO: stage:1 step:50491 time:0.33+0.99 lr:2.9460e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:2.6489e-02 d_loss:1.0000e+00
+26-03-16 14:21:46.487 - INFO: stage:1 step:50492 time:0.33+0.99 lr:2.9520e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:2.1729e-02 d_loss:1.0000e+00
+26-03-16 14:21:47.807 - INFO: stage:1 step:50493 time:0.33+0.99 lr:2.9580e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:2.5146e-02 d_loss:1.0000e+00
+26-03-16 14:21:49.126 - INFO: stage:1 step:50494 time:0.33+0.99 lr:2.9640e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:2.5757e-02 d_loss:1.0000e+00
+26-03-16 14:21:50.456 - INFO: stage:1 step:50495 time:0.33+1.00 lr:2.9700e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:2.6733e-02 d_loss:1.0000e+00
+26-03-16 14:21:51.773 - INFO: stage:1 step:50496 time:0.33+0.99 lr:2.9760e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:2.6001e-02 d_loss:1.0000e+00
+26-03-16 14:21:53.094 - INFO: stage:1 step:50497 time:0.33+1.00 lr:2.9820e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:2.1484e-02 d_loss:1.0000e+00
+26-03-16 14:21:54.416 - INFO: stage:1 step:50498 time:0.33+1.00 lr:2.9880e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.7832e-02 d_loss:1.0000e+00
+26-03-16 14:21:55.737 - INFO: stage:1 step:50499 time:0.33+0.99 lr:2.9940e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:2.7588e-02 d_loss:1.0000e+00
+26-03-16 14:21:57.057 - INFO: stage:1 step:50500 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.2217e-02 d_loss:1.0000e+00
+26-03-16 14:22:00.698 - INFO: stage:1 step:50501 time:2.64+1.00 lr:3.0000e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:2.6489e-02 d_loss:1.0000e+00
+26-03-16 14:22:02.034 - INFO: stage:1 step:50502 time:0.34+1.00 lr:3.0000e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:2.4170e-02 d_loss:1.0000e+00
+26-03-16 14:22:03.353 - INFO: stage:1 step:50503 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.6245e-02 d_loss:1.0000e+00
+26-03-16 14:22:04.693 - INFO: stage:1 step:50504 time:0.33+1.01 lr:3.0000e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:2.1240e-02 d_loss:1.0000e+00
+26-03-16 14:22:06.012 - INFO: stage:1 step:50505 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:2.1484e-02 d_loss:1.0000e+00
+26-03-16 14:22:07.332 - INFO: stage:1 step:50506 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:2.2339e-02 d_loss:1.0000e+00
+26-03-16 14:22:08.657 - INFO: stage:1 step:50507 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:2.0752e-02 d_loss:1.0000e+00
+26-03-16 14:22:09.977 - INFO: stage:1 step:50508 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:2.2705e-02 d_loss:1.0000e+00
+26-03-16 14:22:11.299 - INFO: stage:1 step:50509 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:2.2583e-02 d_loss:1.0000e+00
+26-03-16 14:22:12.617 - INFO: stage:1 step:50510 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:2.4780e-02 d_loss:1.0000e+00
+26-03-16 14:22:13.937 - INFO: stage:1 step:50511 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:2.2461e-02 d_loss:1.0000e+00
+26-03-16 14:22:15.257 - INFO: stage:1 step:50512 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4062e+00 elbo:1.4062e+00 bev:0.0000e+00 g_loss:2.4048e-02 d_loss:1.0000e+00
+26-03-16 14:22:16.579 - INFO: stage:1 step:50513 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.4062e+00 elbo:1.4062e+00 bev:0.0000e+00 g_loss:2.5269e-02 d_loss:1.0000e+00
+26-03-16 14:22:17.905 - INFO: stage:1 step:50514 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:2.6489e-02 d_loss:1.0000e+00
+26-03-16 14:22:19.227 - INFO: stage:1 step:50515 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.2734e+00 elbo:1.2734e+00 bev:0.0000e+00 g_loss:2.6978e-02 d_loss:1.0000e+00
+26-03-16 14:22:20.547 - INFO: stage:1 step:50516 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:2.3682e-02 d_loss:1.0000e+00
+26-03-16 14:22:21.869 - INFO: stage:1 step:50517 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.3281e+00 elbo:1.3281e+00 bev:0.0000e+00 g_loss:3.3936e-02 d_loss:1.0000e+00
+26-03-16 14:22:23.193 - INFO: stage:1 step:50518 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.1328e+00 elbo:1.1328e+00 bev:0.0000e+00 g_loss:2.6611e-02 d_loss:1.0000e+00
+26-03-16 14:22:24.516 - INFO: stage:1 step:50519 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:2.6245e-02 d_loss:1.0000e+00
+26-03-16 14:22:25.835 - INFO: stage:1 step:50520 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:2.5513e-02 d_loss:1.0000e+00
+26-03-16 14:22:27.158 - INFO: stage:1 step:50521 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:2.1973e-02 d_loss:1.0000e+00
+26-03-16 14:22:28.497 - INFO: stage:1 step:50522 time:0.33+1.01 lr:3.0000e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:3.1250e-02 d_loss:1.0000e+00
+26-03-16 14:22:29.815 - INFO: stage:1 step:50523 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:2.4048e-02 d_loss:1.0000e+00
+26-03-16 14:22:31.135 - INFO: stage:1 step:50524 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3203e+00 elbo:1.3203e+00 bev:0.0000e+00 g_loss:2.8076e-02 d_loss:1.0000e+00
+26-03-16 14:22:32.454 - INFO: stage:1 step:50525 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.7832e-02 d_loss:1.0000e+00
+26-03-16 14:22:33.776 - INFO: stage:1 step:50526 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.3125e+00 elbo:1.3125e+00 bev:0.0000e+00 g_loss:3.2471e-02 d_loss:1.0000e+00
+26-03-16 14:22:35.097 - INFO: stage:1 step:50527 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:3.0151e-02 d_loss:1.0000e+00
+26-03-16 14:22:36.420 - INFO: stage:1 step:50528 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:2.6855e-02 d_loss:1.0000e+00
+26-03-16 14:22:37.740 - INFO: stage:1 step:50529 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:3.2959e-02 d_loss:1.0000e+00
+26-03-16 14:22:39.060 - INFO: stage:1 step:50530 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:2.8198e-02 d_loss:1.0000e+00
+26-03-16 14:22:40.379 - INFO: stage:1 step:50531 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:2.9541e-02 d_loss:1.0000e+00
+26-03-16 14:22:41.697 - INFO: stage:1 step:50532 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:3.0396e-02 d_loss:1.0000e+00
+26-03-16 14:22:43.015 - INFO: stage:1 step:50533 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:2.6978e-02 d_loss:1.0000e+00
+26-03-16 14:22:44.335 - INFO: stage:1 step:50534 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:3.0518e-02 d_loss:1.0000e+00
+26-03-16 14:22:45.658 - INFO: stage:1 step:50535 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:2.2705e-02 d_loss:1.0000e+00
+26-03-16 14:22:46.977 - INFO: stage:1 step:50536 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:2.7344e-02 d_loss:1.0000e+00
+26-03-16 14:22:48.296 - INFO: stage:1 step:50537 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:3.1738e-02 d_loss:1.0000e+00
+26-03-16 14:22:49.616 - INFO: stage:1 step:50538 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:2.7222e-02 d_loss:1.0000e+00
+26-03-16 14:22:50.935 - INFO: stage:1 step:50539 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:3.0396e-02 d_loss:1.0078e+00
+26-03-16 14:22:52.255 - INFO: stage:1 step:50540 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0312e+00 elbo:1.0312e+00 bev:0.0000e+00 g_loss:2.7466e-02 d_loss:1.0000e+00
+26-03-16 14:22:53.574 - INFO: stage:1 step:50541 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:3.2471e-02 d_loss:1.0000e+00
+26-03-16 14:22:54.893 - INFO: stage:1 step:50542 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:3.0029e-02 d_loss:1.0078e+00
+26-03-16 14:22:56.213 - INFO: stage:1 step:50543 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:22:57.534 - INFO: stage:1 step:50544 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:3.6377e-02 d_loss:1.0000e+00
+26-03-16 14:22:58.855 - INFO: stage:1 step:50545 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2266e+00 elbo:1.2266e+00 bev:0.0000e+00 g_loss:3.2227e-02 d_loss:1.0000e+00
+26-03-16 14:23:00.174 - INFO: stage:1 step:50546 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:2.9785e-02 d_loss:1.0000e+00
+26-03-16 14:23:01.493 - INFO: stage:1 step:50547 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:3.3691e-02 d_loss:1.0000e+00
+26-03-16 14:23:02.814 - INFO: stage:1 step:50548 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:2.6733e-02 d_loss:1.0000e+00
+26-03-16 14:23:04.134 - INFO: stage:1 step:50549 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:2.8198e-02 d_loss:1.0000e+00
+26-03-16 14:23:05.455 - INFO: stage:1 step:50550 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2344e+00 elbo:1.2344e+00 bev:0.0000e+00 g_loss:3.6621e-02 d_loss:1.0000e+00
+26-03-16 14:23:06.774 - INFO: stage:1 step:50551 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:3.6133e-02 d_loss:1.0000e+00
+26-03-16 14:23:08.094 - INFO: stage:1 step:50552 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0859e+00 elbo:1.0859e+00 bev:0.0000e+00 g_loss:2.3926e-02 d_loss:1.0000e+00
+26-03-16 14:23:09.412 - INFO: stage:1 step:50553 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:3.3447e-02 d_loss:1.0000e+00
+26-03-16 14:23:10.731 - INFO: stage:1 step:50554 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0547e+00 elbo:1.0547e+00 bev:0.0000e+00 g_loss:3.4180e-02 d_loss:1.0000e+00
+26-03-16 14:23:12.050 - INFO: stage:1 step:50555 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1172e+00 elbo:1.1172e+00 bev:0.0000e+00 g_loss:3.2715e-02 d_loss:1.0000e+00
+26-03-16 14:23:13.369 - INFO: stage:1 step:50556 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:3.6621e-02 d_loss:1.0000e+00
+26-03-16 14:23:14.688 - INFO: stage:1 step:50557 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0625e+00 elbo:1.0625e+00 bev:0.0000e+00 g_loss:3.2959e-02 d_loss:1.0000e+00
+26-03-16 14:23:16.007 - INFO: stage:1 step:50558 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1719e+00 elbo:1.1719e+00 bev:0.0000e+00 g_loss:3.1250e-02 d_loss:1.0000e+00
+26-03-16 14:23:17.326 - INFO: stage:1 step:50559 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0781e+00 elbo:1.0781e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:23:18.645 - INFO: stage:1 step:50560 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1406e+00 elbo:1.1406e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:23:19.965 - INFO: stage:1 step:50561 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1797e+00 elbo:1.1797e+00 bev:0.0000e+00 g_loss:2.8931e-02 d_loss:1.0000e+00
+26-03-16 14:23:21.285 - INFO: stage:1 step:50562 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2188e+00 elbo:1.2188e+00 bev:0.0000e+00 g_loss:4.0527e-02 d_loss:1.0000e+00
+26-03-16 14:23:22.604 - INFO: stage:1 step:50563 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1094e+00 elbo:1.1094e+00 bev:0.0000e+00 g_loss:3.4424e-02 d_loss:1.0000e+00
+26-03-16 14:23:23.923 - INFO: stage:1 step:50564 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3359e+00 elbo:1.3359e+00 bev:0.0000e+00 g_loss:3.2959e-02 d_loss:1.0000e+00
+26-03-16 14:23:25.241 - INFO: stage:1 step:50565 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4453e+00 elbo:1.4453e+00 bev:0.0000e+00 g_loss:3.8086e-02 d_loss:1.0000e+00
+26-03-16 14:23:26.561 - INFO: stage:1 step:50566 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:23:27.889 - INFO: stage:1 step:50567 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:2.8442e-02 d_loss:1.0000e+00
+26-03-16 14:23:29.208 - INFO: stage:1 step:50568 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:2.5269e-02 d_loss:1.0000e+00
+26-03-16 14:23:30.529 - INFO: stage:1 step:50569 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3750e+00 elbo:1.3750e+00 bev:0.0000e+00 g_loss:3.5645e-02 d_loss:9.9609e-01
+26-03-16 14:23:31.849 - INFO: stage:1 step:50570 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2734e+00 elbo:1.2734e+00 bev:0.0000e+00 g_loss:3.7354e-02 d_loss:1.0000e+00
+26-03-16 14:23:33.168 - INFO: stage:1 step:50571 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3047e+00 elbo:1.3047e+00 bev:0.0000e+00 g_loss:3.5400e-02 d_loss:9.9609e-01
+26-03-16 14:23:34.486 - INFO: stage:1 step:50572 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1484e+00 elbo:1.1484e+00 bev:0.0000e+00 g_loss:2.8442e-02 d_loss:1.0000e+00
+26-03-16 14:23:35.805 - INFO: stage:1 step:50573 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4062e+00 elbo:1.4062e+00 bev:0.0000e+00 g_loss:3.2227e-02 d_loss:1.0000e+00
+26-03-16 14:23:37.125 - INFO: stage:1 step:50574 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3906e+00 elbo:1.3906e+00 bev:0.0000e+00 g_loss:3.7354e-02 d_loss:1.0000e+00
+26-03-16 14:23:38.443 - INFO: stage:1 step:50575 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:2.9175e-02 d_loss:1.0000e+00
+26-03-16 14:23:39.762 - INFO: stage:1 step:50576 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4688e+00 elbo:1.4688e+00 bev:0.0000e+00 g_loss:3.9307e-02 d_loss:1.0000e+00
+26-03-16 14:23:41.083 - INFO: stage:1 step:50577 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3828e+00 elbo:1.3828e+00 bev:0.0000e+00 g_loss:4.2725e-02 d_loss:1.0000e+00
+26-03-16 14:23:42.404 - INFO: stage:1 step:50578 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3203e+00 elbo:1.3203e+00 bev:0.0000e+00 g_loss:3.3691e-02 d_loss:1.0000e+00
+26-03-16 14:23:43.725 - INFO: stage:1 step:50579 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3281e+00 elbo:1.3281e+00 bev:0.0000e+00 g_loss:3.8330e-02 d_loss:1.0000e+00
+26-03-16 14:23:45.044 - INFO: stage:1 step:50580 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:3.6377e-02 d_loss:1.0000e+00
+26-03-16 14:23:46.362 - INFO: stage:1 step:50581 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2422e+00 elbo:1.2422e+00 bev:0.0000e+00 g_loss:2.9053e-02 d_loss:1.0000e+00
+26-03-16 14:23:47.683 - INFO: stage:1 step:50582 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3281e+00 elbo:1.3281e+00 bev:0.0000e+00 g_loss:3.1006e-02 d_loss:1.0000e+00
+26-03-16 14:23:49.002 - INFO: stage:1 step:50583 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1953e+00 elbo:1.1953e+00 bev:0.0000e+00 g_loss:2.8687e-02 d_loss:1.0000e+00
+26-03-16 14:23:50.320 - INFO: stage:1 step:50584 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3203e+00 elbo:1.3203e+00 bev:0.0000e+00 g_loss:3.2715e-02 d_loss:1.0000e+00
+26-03-16 14:23:51.639 - INFO: stage:1 step:50585 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1016e+00 elbo:1.1016e+00 bev:0.0000e+00 g_loss:3.1494e-02 d_loss:1.0000e+00
+26-03-16 14:23:52.959 - INFO: stage:1 step:50586 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3125e+00 elbo:1.3125e+00 bev:0.0000e+00 g_loss:4.0039e-02 d_loss:1.0000e+00
+26-03-16 14:23:54.280 - INFO: stage:1 step:50587 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4297e+00 elbo:1.4297e+00 bev:0.0000e+00 g_loss:3.4424e-02 d_loss:1.0000e+00
+26-03-16 14:23:55.600 - INFO: stage:1 step:50588 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3438e+00 elbo:1.3438e+00 bev:0.0000e+00 g_loss:4.1016e-02 d_loss:1.0000e+00
+26-03-16 14:23:56.919 - INFO: stage:1 step:50589 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2578e+00 elbo:1.2578e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:23:58.238 - INFO: stage:1 step:50590 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.4531e+00 elbo:1.4531e+00 bev:0.0000e+00 g_loss:3.5156e-02 d_loss:1.0000e+00
+26-03-16 14:23:59.557 - INFO: stage:1 step:50591 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3594e+00 elbo:1.3594e+00 bev:0.0000e+00 g_loss:3.7354e-02 d_loss:1.0000e+00
+26-03-16 14:24:00.877 - INFO: stage:1 step:50592 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:3.0151e-02 d_loss:1.0000e+00
+26-03-16 14:24:02.196 - INFO: stage:1 step:50593 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:3.7354e-02 d_loss:1.0000e+00
+26-03-16 14:24:03.513 - INFO: stage:1 step:50594 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2500e+00 elbo:1.2500e+00 bev:0.0000e+00 g_loss:3.9551e-02 d_loss:1.0000e+00
+26-03-16 14:24:04.834 - INFO: stage:1 step:50595 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1562e+00 elbo:1.1562e+00 bev:0.0000e+00 g_loss:3.8574e-02 d_loss:1.0000e+00
+26-03-16 14:24:06.153 - INFO: stage:1 step:50596 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:3.2471e-02 d_loss:1.0000e+00
+26-03-16 14:24:07.472 - INFO: stage:1 step:50597 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1875e+00 elbo:1.1875e+00 bev:0.0000e+00 g_loss:3.8330e-02 d_loss:1.0000e+00
+26-03-16 14:24:08.789 - INFO: stage:1 step:50598 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2109e+00 elbo:1.2109e+00 bev:0.0000e+00 g_loss:3.5400e-02 d_loss:1.0000e+00
+26-03-16 14:24:10.108 - INFO: stage:1 step:50599 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3516e+00 elbo:1.3516e+00 bev:0.0000e+00 g_loss:4.4922e-02 d_loss:1.0000e+00
+26-03-16 14:24:11.428 - INFO: stage:1 step:50600 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3359e+00 elbo:1.3359e+00 bev:0.0000e+00 g_loss:3.8330e-02 d_loss:1.0000e+00
+26-03-16 14:24:12.749 - INFO: stage:1 step:50601 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.0938e+00 elbo:1.0938e+00 bev:0.0000e+00 g_loss:3.2715e-02 d_loss:1.0000e+00
+26-03-16 14:24:14.077 - INFO: stage:1 step:50602 time:0.34+0.99 lr:3.0000e-04 loss_avg:1.3047e+00 elbo:1.3047e+00 bev:0.0000e+00 g_loss:3.7109e-02 d_loss:1.0000e+00
+26-03-16 14:24:15.399 - INFO: stage:1 step:50603 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2969e+00 elbo:1.2969e+00 bev:0.0000e+00 g_loss:3.0273e-02 d_loss:1.0000e+00
+26-03-16 14:24:16.718 - INFO: stage:1 step:50604 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.3984e+00 elbo:1.3984e+00 bev:0.0000e+00 g_loss:4.4922e-02 d_loss:1.0000e+00
+26-03-16 14:24:18.038 - INFO: stage:1 step:50605 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2656e+00 elbo:1.2656e+00 bev:0.0000e+00 g_loss:3.4912e-02 d_loss:1.0000e+00
+26-03-16 14:24:19.358 - INFO: stage:1 step:50606 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1250e+00 elbo:1.1250e+00 bev:0.0000e+00 g_loss:3.3203e-02 d_loss:1.0000e+00
+26-03-16 14:24:20.677 - INFO: stage:1 step:50607 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.1641e+00 elbo:1.1641e+00 bev:0.0000e+00 g_loss:3.0884e-02 d_loss:1.0000e+00
+26-03-16 14:24:21.996 - INFO: stage:1 step:50608 time:0.33+0.99 lr:3.0000e-04 loss_avg:1.2031e+00 elbo:1.2031e+00 bev:0.0000e+00 g_loss:3.4668e-02 d_loss:1.0000e+00
+26-03-16 14:24:23.317 - INFO: stage:1 step:50609 time:0.33+1.00 lr:3.0000e-04 loss_avg:1.2734e+00 elbo:1.2734e+00 bev:0.0000e+00 g_loss:4.1504e-02 d_loss:1.0000e+00

@@ -778,8 +778,10 @@ def train(local_rank, args):
                     disc_optimizer.zero_grad()
                     x_recon_d = loss_final['x_recon'].detach()
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        logits_real = disc(features_gt.detach())
-                        logits_fake_d = disc(x_recon_d)
+                        # Combine real and fake into a single batch to avoid multiple 
+                        # forward passes which cause inplace modification errors with SpectralNorm.
+                        logits_all = disc(torch.cat([features_gt.detach(), x_recon_d], dim=0))
+                        logits_real, logits_fake_d = torch.chunk(logits_all, 2, dim=0)
                     disc_factor_val = disc_adopt_weight(
                         disc_factor_cfg, step, threshold=disc_start_step
                     )
