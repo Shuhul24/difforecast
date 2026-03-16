@@ -777,11 +777,23 @@ def train(local_rank, args):
                     disc.requires_grad_(True)
                     disc_optimizer.zero_grad()
                     x_recon_d = loss_final['x_recon'].detach()
+                    # Single forward pass over real+fake concatenated to avoid
+                    # DDP modifying gradient buffers in-place between two
+                    # consecutive forwards, which causes the autograd version
+                    # mismatch error and prevents d_loss.backward().
+                    x_combined = torch.cat([features_gt.detach(), x_recon_d], dim=0)
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+<<<<<<< HEAD
                         # Combine real and fake into a single batch to avoid multiple 
                         # forward passes which cause inplace modification errors with SpectralNorm.
                         logits_all = disc(torch.cat([features_gt.detach(), x_recon_d], dim=0))
                         logits_real, logits_fake_d = torch.chunk(logits_all, 2, dim=0)
+=======
+                        logits_combined = disc(x_combined)
+                    B_real = features_gt.shape[0]
+                    logits_real   = logits_combined[:B_real]
+                    logits_fake_d = logits_combined[B_real:]
+>>>>>>> 34d5829 (Disc final update)
                     disc_factor_val = disc_adopt_weight(
                         disc_factor_cfg, step, threshold=disc_start_step
                     )
