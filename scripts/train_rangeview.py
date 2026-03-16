@@ -752,7 +752,7 @@ def train(local_rank, args):
                     g_loss_val = float(g_loss.item())
 
                     # Adaptive weight: balance NLL and GAN gradients at last
-                    # decoder layer (falls back to fixed weight on RuntimeError).
+                    # decoder layer (falls back to fixed weight on RuntimeError/IndexError).
                     raw_model = model.module if hasattr(model, 'module') else model
                     last_layer = raw_model.vae_tokenizer.vae.decoder.conv_out.weight
                     d_weight = calculate_adaptive_weight(

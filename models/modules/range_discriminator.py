@@ -77,7 +77,7 @@ def calculate_adaptive_weight(
         g_grads   = torch.autograd.grad(g_loss,   last_layer, retain_graph=True)[0]
         d_weight  = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
         d_weight  = torch.clamp(d_weight, 0.0, 1e4).detach() * disc_weight
-    except RuntimeError:
+    except (RuntimeError, IndexError):
         d_weight  = torch.tensor(disc_weight, device=nll_loss.device,
                                  dtype=nll_loss.dtype)
     return d_weight
