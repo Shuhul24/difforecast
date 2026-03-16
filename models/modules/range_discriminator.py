@@ -124,7 +124,7 @@ class MetaKernel(nn.Module):
 
         self.mlp_coord = nn.Sequential(
             nn.Linear(3, in_channels),
-            nn.LeakyReLU(0.2, True),
+            nn.LeakyReLU(0.2, False),
             nn.Linear(in_channels, in_channels),
         )
         self.coov = nn.Conv2d(kernel_size * kernel_size * in_channels,
@@ -254,7 +254,7 @@ class NLayerDiscriminatorMetaKernel(nn.Module):
         sequence = [
             MetaKernel(input_nc, ndf, azi=azi, inc=inc,
                        kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2, True),
+            nn.LeakyReLU(0.2, False),
         ]
         azi *= 2; inc *= 2
 
@@ -267,7 +267,7 @@ class NLayerDiscriminatorMetaKernel(nn.Module):
                 MetaKernel(ndf * nf_mult_prev, ndf * nf_mult, azi=azi, inc=inc,
                            kernel_size=kw, stride=2, padding=padw),
                 norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2, True),
+                nn.LeakyReLU(0.2, False),
             ]
             azi *= 2; inc *= 2
 
@@ -278,7 +278,7 @@ class NLayerDiscriminatorMetaKernel(nn.Module):
             MetaKernel(ndf * nf_mult_prev, ndf * nf_mult, azi=azi, inc=inc,
                        kernel_size=kw, stride=1, padding=padw),
             norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2, True),
+            nn.LeakyReLU(0.2, False),
         ]
 
         # Final stride-1 layer → 1-channel patch map
