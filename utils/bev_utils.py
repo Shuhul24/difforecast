@@ -366,6 +366,104 @@ def render_rangeview_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Multi-step sequence visualizations
+# ---------------------------------------------------------------------------
+
+def render_rangeview_sequence(
+    gt_depths: list,
+    pred_depths: list,
+    output_path: str,
+    avg_l1: float,
+    max_depth: float = 80.0,
+) -> None:
+    """Render a 2×N grid of range-view depth maps: GT (top row) vs Predicted (bottom row).
+
+    Args:
+        gt_depths:   List of N ``(H, W)`` GT depth maps in metres.
+        pred_depths: List of N ``(H, W)`` predicted depth maps in metres.
+        output_path: Path for the saved PNG.
+        avg_l1:      Average range L1 loss over all N steps (shown in title).
+        max_depth:   Depth clipping value for the colour scale.
+    """
+    n = len(gt_depths)
+    fig, axes = plt.subplots(2, n, figsize=(6 * n, 5))
+    if n == 1:
+        axes = axes[:, np.newaxis]
+
+    for i in range(n):
+        gt_clip   = np.clip(gt_depths[i],   0.0, max_depth)
+        pred_clip = np.clip(pred_depths[i], 0.0, max_depth)
+
+        axes[0, i].imshow(gt_clip,   cmap='plasma', vmin=0.0, vmax=max_depth,
+                          aspect='auto', interpolation='nearest')
+        axes[0, i].set_title(f'GT — step {i + 1}', fontsize=10)
+        axes[0, i].axis('off')
+
+        axes[1, i].imshow(pred_clip, cmap='plasma', vmin=0.0, vmax=max_depth,
+                          aspect='auto', interpolation='nearest')
+        axes[1, i].set_title(f'Pred — step {i + 1}', fontsize=10)
+        axes[1, i].axis('off')
+
+    fig.suptitle(
+        f'Range-View Sequence  (GT top · Predicted bottom)  |  '
+        f'Avg Range L1: {avg_l1:.4f} m',
+        fontsize=13,
+    )
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+
+
+def render_bev_sequence(
+    pts_gt_list: list,
+    pts_pred_list: list,
+    output_path: str,
+    avg_chamfer: float,
+    bev_range: float = 50.0,
+    resolution: float = 0.2,
+) -> None:
+    """Render a 2×N grid of BEV images: GT (top row, red) vs Predicted (bottom row, blue).
+
+    Args:
+        pts_gt_list:   List of N ``(Ni, 3)`` GT point clouds in metres.
+        pts_pred_list: List of N ``(Mi, 3)`` predicted point clouds in metres.
+        output_path:   Path for the saved PNG.
+        avg_chamfer:   Average Chamfer distance over N steps (shown in title).
+        bev_range:     BEV half-extent in metres.
+        resolution:    Metres per pixel.
+    """
+    n = len(pts_gt_list)
+    size = int(2 * bev_range / resolution)
+
+    fig, axes = plt.subplots(2, n, figsize=(5 * n, 10))
+    if n == 1:
+        axes = axes[:, np.newaxis]
+
+    for i in range(n):
+        gt_canvas   = _make_bev_canvas(pts_gt_list[i],   (220, 50,  50),  bev_range, resolution, size)
+        pred_canvas = _make_bev_canvas(pts_pred_list[i], (50,  100, 220), bev_range, resolution, size)
+
+        axes[0, i].imshow(gt_canvas, origin='upper', aspect='equal')
+        axes[0, i].set_title(f'GT — step {i + 1}  ({pts_gt_list[i].shape[0]:,} pts)', fontsize=9)
+        axes[0, i].axis('off')
+
+        axes[1, i].imshow(pred_canvas, origin='upper', aspect='equal')
+        axes[1, i].set_title(f'Pred — step {i + 1}  ({pts_pred_list[i].shape[0]:,} pts)', fontsize=9)
+        axes[1, i].axis('off')
+
+    fig.suptitle(
+        f'BEV Sequence  (GT top · Predicted bottom)  |  '
+        f'Avg Chamfer Distance: {avg_chamfer:.4f}',
+        fontsize=13,
+    )
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Summary plot — aggregate metrics across frames
 # ---------------------------------------------------------------------------
 
