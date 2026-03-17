@@ -225,7 +225,7 @@ def load_parameters(model, load_ckpt_file, skip_key=None):
             ckpt_state_dict[key] = param
             print(f"Load: Shape of ckpt's {key} is {val.shape}, but model's shape is {model.state_dict()[key].shape}")
     ckpt_keys = list(ckpt.keys())
-    newparas_not_in_ckpt = set(list(model.state_dict().keys())).difference([key.split('.', 1)[1] for key in ckpt_keys])
+    newparas_not_in_ckpt = set(list(model.state_dict().keys())).difference([key.split('.', 1)[1] if key.startswith('module.') else key for key in ckpt_keys])
     # newparas_not_in_ckpt = set(list(model.state_dict().keys())).difference(list(ckpt.keys()))
     for key in newparas_not_in_ckpt:
         print(f"Unfound: {key}")
