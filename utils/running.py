@@ -186,7 +186,8 @@ def load_parameters(model, load_ckpt_file, skip_key=None):
         ckpt = load_ckpt_file
     ckpt_state_dict = {}
     for key, val in ckpt.items():
-        key = key.split(".", 1)[1]
+        if key.startswith("module."):
+            key = key.split(".", 1)[1]
         if skip_key is not None and skip_key in key:
             print(f"Skip: {key}")
             ckpt_state_dict[key] = model.state_dict()[key]
