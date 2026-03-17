@@ -740,6 +740,22 @@ def train(local_rank, args):
                 disc_start_step  = int(getattr(args, 'disc_start',  50000))
                 disc_factor_cfg  = float(getattr(args, 'disc_factor',  1.0))
                 disc_weight_cfg  = float(getattr(args, 'disc_weight',  0.5))
+
+                # Pinned VAE save: capture ELBO-only weights just before the
+                # first adversarial update.  Named vae_pre_disc_step{N}.pth so
+                # the rolling checkpoint cleanup never touches it.
+                if disc is not None and step == disc_start_step and rank == 0:
+                    try:
+                        raw_m = model.module if hasattr(model, 'module') else model
+                        vae_state = raw_m.vae_tokenizer.vae.state_dict()
+                        pinned_path = os.path.join(
+                            save_model_path, f"vae_pre_disc_step{step}.pth"
+                        )
+                        torch.save(vae_state, pinned_path)
+                        print(f"Saved pinned VAE checkpoint (pre-discriminator best ELBO): {pinned_path}")
+                    except Exception as e:
+                        print(f"Warning: failed to save pinned VAE checkpoint: {e}")
+
                 disc_is_active   = disc is not None and step >= disc_start_step
                 g_loss_val = 0.0
 

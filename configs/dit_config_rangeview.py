@@ -8,9 +8,9 @@ seed = 43
 
 # ===== Dataset Configuration =====
 # KITTI Odometry Dataset
-kitti_root = '/scratch/p24cs0005/kitti'  # Root path to KITTI dataset
-kitti_sequences_path = '/scratch/p24cs0005/kitti/dataset/sequences'  # Path to sequences
-kitti_poses_path = '/scratch/p24cs0005/kitti/poses'  # Path to ground truth poses
+kitti_root = '/DATA2/shuhul/kitti'  # Root path to KITTI dataset
+kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequences
+kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
 train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
@@ -232,12 +232,12 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 # Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
-range_view_loss_weight = 1   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+range_view_loss_weight = 0   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
 chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
 
 # ===== BEV Perceptual Loss =====
-# Converts depth maps → BEV occupancy grids → VGG16 multi-scale feature distance.
+# Converts depth maps → BEV occupancy grids → VGG16 multi-scale featudre distance.
 # Penalises structural/shape errors (missing walls, broken objects) that L1 misses.
 # Inspired by RangeLDM's bev_perceptual branch (losses/__init__.py L267-275).
 #
@@ -292,10 +292,10 @@ diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
 
 # ===== Output Directories =====
-outdir = "/scratch/p24cs0005/exp/ckpt"  # Checkpoint directory
-logdir = "/scratch/p24cs0005/exp/job_log"  # Log directory
-tdir = "/scratch/p24cs0005/exp/job_tboard"  # TensorBoard directory
-validation_dir = "/scratch/p24cs0005/exp/validation"  # Validation output directory
+outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory
+logdir = "/DATA2/shuhul/exp/job_log"  # Log directory
+tdir = "/DATA2/shuhul/exp/job_tboard"  # TensorBoard directory
+validation_dir = "/DATA2/shuhul/exp/validation"  # Validation output directory
 
 # ===== Data Loading =====
 num_workers = 8  # Number of data loading workers
