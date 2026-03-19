@@ -116,6 +116,10 @@ class Modulation(nn.Module):
         self.is_double = double
         self.multiplier = 6 if double else 3
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
+        # AdaLN-Zero init: start each DiT block as identity (gates=0) so early
+        # gradients flow cleanly through all layers before modulation kicks in.
+        nn.init.zeros_(self.lin.weight)
+        nn.init.zeros_(self.lin.bias)
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
@@ -245,6 +249,9 @@ class LastLayer(nn.Module):
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
+        # AdaLN-Zero: zero-init the final linear so last layer starts as identity
+        nn.init.zeros_(self.adaLN_modulation[1].weight)
+        nn.init.zeros_(self.adaLN_modulation[1].bias)
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
