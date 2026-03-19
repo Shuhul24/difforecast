@@ -260,15 +260,15 @@ class KITTIRangeViewTestDataset(KITTIRangeViewDataset):
 
 class KITTIRangeViewVAEDataset(KITTIRangeViewDataset):
     """
-    VAE Training Dataset (Stage 1).
+    VAE Dataset (Stage 1).
     Iterates over individual frames with stride=1 (dense sampling),
     returning single [C, H, W] images instead of sequences.
+    Pass is_train=True for training (enables augmentation), is_train=False for eval.
     """
     def __init__(self, *args, **kwargs):
-        # Force parameters for single-frame VAE training
+        # Force single-frame window; caller controls is_train / augmentation
         kwargs['condition_frames'] = 0
         kwargs['forward_iter'] = 1
-        kwargs['is_train'] = True
         kwargs['stride'] = 1  # Visit every frame
         super().__init__(*args, **kwargs)
 

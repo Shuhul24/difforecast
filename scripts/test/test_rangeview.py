@@ -200,7 +200,12 @@ def evaluate(cfg):
     n_total = len(test_dataset)
     if cfg.num_samples > 0:
         n_eval = min(cfg.num_samples, n_total)
-        test_dataset = Subset(test_dataset, list(range(n_eval)))
+        # Stride across the full dataset so consecutive samples don't share frames.
+        # Window size = condition_frames + forward_iter; stride by forward_iter so
+        # each selected window's GT targets are non-overlapping.
+        step = max(1, forward_iter)
+        indices = list(range(0, n_total, step))[:n_eval]
+        test_dataset = Subset(test_dataset, indices)
     else:
         n_eval = n_total
 

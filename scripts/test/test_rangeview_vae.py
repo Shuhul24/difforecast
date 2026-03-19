@@ -243,6 +243,7 @@ def evaluate(cfg):
         pc_extension=cfg.pc_extension,
         pc_dtype=getattr(np, cfg.pc_dtype),
         pc_reshape=tuple(cfg.pc_reshape),
+        is_train=False,  # no augmentation during evaluation
     )
 
     n_total = len(dataset)

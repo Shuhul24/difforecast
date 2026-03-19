@@ -398,6 +398,24 @@ class RangeViewDiT(nn.Module):
                     dit_state_dict[k] = state_dict['module.dit.' + k]
             self.dit.load_state_dict(dit_state_dict, strict=False)
 
+            # When vae_ckpt is None the VAE was trained jointly and its weights
+            # are saved inside the DiT checkpoint under 'module.vae_tokenizer.*'.
+            # Restore them here so eval uses the trained VAE, not random weights.
+            if self.vae_is_trainable:
+                vae_state_dict = self.vae_tokenizer.state_dict()
+                loaded_any = False
+                for k in vae_state_dict.keys():
+                    ckpt_key = 'module.vae_tokenizer.' + k
+                    if ckpt_key in state_dict:
+                        vae_state_dict[k] = state_dict[ckpt_key]
+                        loaded_any = True
+                self.vae_tokenizer.load_state_dict(vae_state_dict, strict=False)
+                if loaded_any:
+                    print(f"Successfully loaded VAE tokenizer weights from {load_path}")
+                else:
+                    print(f"Warning: no VAE tokenizer weights found in {load_path} "
+                          f"(keys expected under 'module.vae_tokenizer.*')")
+
             print(f"Successfully loaded STT + DiT from {load_path}")
 
     # ---------------------------------------------------------------------- #
