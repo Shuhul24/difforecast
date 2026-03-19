@@ -252,10 +252,15 @@ class RangeViewDiT(nn.Module):
         ))
         self.dit.cuda()
 
-        # Positional encoding IDs (precomputed for efficiency)
+        # Positional encoding IDs (precomputed for efficiency).
+        # prefix_size = number of non-image tokens prepended by the STT:
+        #   [yaw(1), pose_x(1), pose_y(1), img(h*w)] → prefix = 3
+        # Passing this ensures spatial RoPE is assigned to the image-token
+        # slots in cond_ids, not to the pose/yaw tokens.
         bs = args.batch_size * condition_frames
+        _cond_prefix = self.total_token_size - self.img_token_size  # = 3
         self.img_ids, self.cond_ids, _ = prepare_ids(
-            bs, self.h, self.w, self.total_token_size, 0
+            bs, self.h, self.w, self.total_token_size, 0, prefix_size=_cond_prefix
         )
 
         # ------------------------------------------------------------------ #
@@ -487,12 +492,17 @@ class RangeViewDiT(nn.Module):
         pose_emb     = logits['pose_emb']
 
         # Flow-matching loss (DiT)
+        # t_sample is kept as a named variable so auxiliary losses can be
+        # weighted by it: d(predict)/d(pred) = (1-t), so weighting auxiliary
+        # losses by t inverts that scaling — giving max gradient at t≈1
+        # (clean-data regime, reliable predictions) and ~zero at t≈0 (noise).
+        t_sample = torch.rand((latent_targets.shape[0], 1, 1), device=latent_targets.device)
         loss_terms = self.dit.training_losses(
             img=latent_targets,
             img_ids=self.img_ids,
             cond=stt_features,
             cond_ids=self.cond_ids,
-            t=torch.rand((latent_targets.shape[0], 1, 1), device=latent_targets.device),
+            t=t_sample,
             y=pose_emb,
             return_predict=self.args.return_predict,
         )
@@ -548,7 +558,10 @@ class RangeViewDiT(nn.Module):
                     gt_range   = gt_range_img[:, 0]          # [B*F, H, W]
                     l1_map     = torch.abs(pred_range - gt_range)            # [B*F, H, W]
                     mask_f     = gt_valid_spatial.float()
-                    range_l1_loss = (l1_map * mask_f).sum() / (mask_f.sum() + 1e-8)
+                    # t_sample [B*F, 1, 1] broadcasts over H, W — per-sample
+                    # t-weighting so high-noise steps (t≈0) contribute near-zero
+                    # gradient while clean-data steps (t≈1) contribute fully.
+                    range_l1_loss = (l1_map * mask_f * t_sample).sum() / (mask_f.sum() + 1e-8)
 
                 # ---- Depth maps shared by Chamfer + BEV perceptual --------- #
                 if self.chamfer_loss_weight > 0 or self.bev_perceptual_weight > 0:
@@ -569,13 +582,13 @@ class RangeViewDiT(nn.Module):
                         pred_valid, gt_valid,
                         projector=self.range_projector,
                         max_pts=self.chamfer_max_pts,
-                    )
+                    ) * t_sample.mean()
 
                 # ---- BEV perceptual loss (VGG16 on BEV occupancy grid) ---- #
                 if self.bev_perceptual_weight > 0:
                     bev_percep_loss = self.bev_perceptual_fn(
                         pred_depth, gt_depth, pred_valid, gt_valid
-                    )
+                    ) * t_sample.mean()
 
         # Uncertainty-weighted auxiliary losses: exp(-log_w)*L + log_w
         # log_w is clamped to >= 0 so the effective weight never exceeds exp(0)=1.0,
@@ -775,7 +788,8 @@ class RangeViewDiT(nn.Module):
         )
 
         bsz = stt_features.shape[0]
-        img_ids, cond_ids, _ = prepare_ids(bsz, self.h, self.w, self.total_token_size, 0)
+        _cond_prefix = self.total_token_size - self.img_token_size
+        img_ids, cond_ids, _ = prepare_ids(bsz, self.h, self.w, self.total_token_size, 0, prefix_size=_cond_prefix)
 
         # Diffusion sampling in latent space
         self.dit.eval()

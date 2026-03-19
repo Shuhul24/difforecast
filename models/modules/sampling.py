@@ -28,23 +28,27 @@ def get_noise(
         generator=torch.Generator(device=device).manual_seed(seed),
     )
     
-def prepare_ids(bs, h, w, seq_len, traj_len, device="cuda") -> dict[str, Tensor]:
+def prepare_ids(bs, h, w, seq_len, traj_len, prefix_size=0, device="cuda") -> dict[str, Tensor]:
     img_ids = torch.zeros(h, w, 3)
     img_ids[..., 1] = img_ids[..., 1] + torch.arange(h)[:, None]
     img_ids[..., 2] = img_ids[..., 2] + torch.arange(w)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs).to(device)
 
-    # Assign spatial (row, col) positions to the first h*w cond tokens so that
-    # cross-attention in each DoubleStreamBlock can align STT image-latent tokens
-    # with their corresponding spatial positions in the predicted frame.
-    # Remaining tokens (pose x/y, yaw) are global signals and stay at [0, 0, 0].
+    # Assign spatial (row, col) positions to the image-token slots in cond_ids.
+    # prefix_size is the number of non-image tokens that precede the image tokens
+    # (e.g. yaw + pose_x + pose_y = 3 for the range-view STT output ordering
+    # [yaw(1), pose_x(1), pose_y(1), img(h*w)]).  Those prefix tokens are global
+    # signals and stay at [0, 0, 0].  Without this offset the first prefix_size
+    # image patches receive pose-token positions and the last prefix_size image
+    # patches receive incorrect all-zero positions, corrupting the RoPE in
+    # cross-attention.
     cond_ids = torch.zeros(bs, seq_len, 3).to(device)
     spatial_ids = torch.zeros(h, w, 3)
     spatial_ids[..., 1] = torch.arange(h)[:, None]
     spatial_ids[..., 2] = torch.arange(w)[None, :]
     spatial_ids_flat = rearrange(spatial_ids, "h w c -> (h w) c").to(device)  # [h*w, 3]
-    img_spatial_len = min(h * w, seq_len)
-    cond_ids[:, :img_spatial_len, :] = spatial_ids_flat[:img_spatial_len].unsqueeze(0).expand(bs, -1, -1)
+    img_spatial_len = min(h * w, seq_len - prefix_size)
+    cond_ids[:, prefix_size:prefix_size + img_spatial_len, :] = spatial_ids_flat[:img_spatial_len].unsqueeze(0).expand(bs, -1, -1)
 
     traj_ids = torch.zeros(bs, traj_len, 3)
     traj_ids[..., -1] = traj_ids[..., -1] + torch.arange(traj_len)[None, :]
