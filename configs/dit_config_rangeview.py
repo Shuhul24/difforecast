@@ -54,7 +54,7 @@ downsample_fps = 10  # KITTI is at 10 Hz
 condition_frames = 5  # Number of past frames (N_PAST_STEPS from KITTI config)
 block_size = 1  # Temporal block size
 forward_iter = 5  # Number of future frames to predict (N_FUTURE_STEPS from KITTI config)
-multifw_perstep = 10  # Apply multi-forward every N steps
+multifw_perstep = 2   # Apply multi-forward every N steps (was 10; more frequent autoregressive training)
 
 # Augmentation
 mask_data = 0  # 1 means apply masking, 0 means no masking
@@ -94,19 +94,18 @@ augmentation_config = {
 
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
-# Scaled down from [12,6,6]/2048/16 to fit single-GPU training:
-# With patch_size_h=4, patch_size_w=16, vae_embed_dim=4:
-#   latent_C = 4*4*16 = 256  (DiT in_channels == n_embd_dit)
-#   L        = 4*32   = 128  (img_token_size; feeds STT block_size)
-#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 256 // 8 = 32
-n_layer = [6, 4, 4]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
+# With patch_size_h=2, patch_size_w=32, vae_embed_dim=4:
+#   latent_C = 4*2*32 = 256  (DiT in_channels; img_in projects 256 → n_embd_dit)
+#   L        = 8*16   = 128  (img_token_size; 8 elevation × 16 azimuth tokens)
+#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 512 // 8 = 64
+n_layer = [6, 6, 6]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
 n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
 n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 256   # Hidden size for DiT; must equal latent_C = vae_embed_dim * patch_size_h * patch_size_w = 4*4*16
-n_head_dit = 8  # Number of attention heads for DiT (head_dim = 256 // 8 = 32)
-axes_dim_dit = [4, 12, 16]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 32
+n_embd_dit = 512   # Hidden size for DiT; img_in projects latent_C(256) → 512
+n_head_dit = 8  # Number of attention heads for DiT (head_dim = 512 // 8 = 64)
+axes_dim_dit = [16, 16, 32]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 64
 
 # Pose/Trajectory encoding
 pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
@@ -155,9 +154,9 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
 patch_size   = 8         # legacy square fallback (used when patch_size_h/w absent)
-patch_size_h = 4         # elevation patch size  → h_tok = 16 // 4 = 4
-patch_size_w = 16        # azimuth  patch size   → w_tok = 512 // 16 = 32
-# Derived: L = 4×32 = 128,  latent_C = 4×4×16 = 256
+patch_size_h = 2         # elevation patch size  → h_tok = 16 // 2 = 8  (was 4, doubled elevation resolution)
+patch_size_w = 32        # azimuth  patch size   → w_tok = 512 // 32 = 16
+# Derived: L = 8×16 = 128,  latent_C = 4×2×32 = 256  (same token count, same in_channels, better elevation)
 add_decoder_temporal = False  # unused for RangeView path (DCAE-only)
 temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 
@@ -176,7 +175,7 @@ temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 # n_temporal_blocks: number of interleaved (causal-time, spatial) pairs.
 #   4 pairs ≈ 6.5 M extra parameters (dim=256, n_heads=8).
 #   Start with 2–4; increase if the model has capacity to spare.
-add_encoder_temporal = False   # set True to enable TemporalLatentEncoder
+add_encoder_temporal = True    # enable TemporalLatentEncoder (zero-init, won't disturb VAE checkpoint)
 n_temporal_blocks = 4          # interleaved time+space block pairs
 
 # Feature processing
@@ -232,7 +231,7 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 # Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
-range_view_loss_weight = 0   # init: log_w_l1 = ln(10) ≈ 2.303 → eff. weight 0.1 at step 0
+range_view_loss_weight = 1.0  # pixel-space depth L1 supervision through frozen decoder
 chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
 

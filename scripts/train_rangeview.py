@@ -94,7 +94,7 @@ def add_arguments():
                         help='Disable saving a log file (useful on HPC where stdout is captured in .out files)')
     parser.add_argument('--vis_steps', type=int, default=500,
                         help='Save training visualizations every N steps (0 = disabled)')
-    parser.add_argument('--warmup_steps', type=int, default=500, help='Warmup steps for LR scheduler')
+    parser.add_argument('--warmup_steps', type=int, default=2000, help='Warmup steps for LR scheduler')
 
     parser.add_argument('--vae_ckpt', type=str, default=None, help='Path to pretrained VAE checkpoint for stage 2')
     parser.add_argument('--disc_resume_path', type=str, default=None, help='Path to resume discriminator checkpoint (Stage 1 only)')

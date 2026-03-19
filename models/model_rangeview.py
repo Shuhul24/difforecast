@@ -19,6 +19,7 @@ Key differences from model.py:
 
 import os
 import time
+import contextlib
 import torch
 import torch.nn as nn
 import random
@@ -638,7 +639,12 @@ class RangeViewDiT(nn.Module):
 
         # Concatenate all frames and encode to latent space
         features_all = torch.cat([features, features_gt], dim=1)  # [B, CF+1, C, H, W]
-        latents_all  = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
+        # When the VAE is frozen (stage 2), wrap encoding in no_grad to avoid
+        # building an unnecessary autograd graph through the frozen encoder,
+        # which would waste GPU activation memory without contributing gradients.
+        _enc_ctx = torch.no_grad() if not self.vae_is_trainable else contextlib.nullcontext()
+        with _enc_ctx:
+            latents_all = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
 
         # ------------------------------------------------------------------ #
         # VAE ELBO loss (only when VAE has no pretrained checkpoint)

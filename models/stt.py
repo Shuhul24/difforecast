@@ -214,7 +214,8 @@ class CausalTimeSelfAttention(nn.Module):
         else:
             self.q_norm = self.k_norm = nn.Identity()
             
-        # self.freqs_cis_singlescale = precompute_1d_freqs_cis(dim=config.n_embd//self.n_head, end=config.condition_frames, theta=1000.0)
+        # 1D temporal RoPE: precomputed for max 50 frames (supports up to 50-frame sequences)
+        self.freqs_cis_temporal = precompute_1d_freqs_cis(dim=config.n_embd//self.n_head, end=50, theta=1000.0)
 
     def forward(self, x, attn_mask):
         B, T, C = x.size()
@@ -230,9 +231,10 @@ class CausalTimeSelfAttention(nn.Module):
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        
-        # add 1d temporal rope
-        # q, k = apply_rotary_emb(q, k, freqs_cis=self.freqs_cis_singlescale)
+
+        # 1D temporal RoPE: encodes relative frame distances in attention scores
+        freqs = self.freqs_cis_temporal[:T].to(x.device)
+        q, k = apply_rotary_emb(q, k, freqs_cis=freqs)
 
         # attn_bias = torch.where(attn_mask==0, float('-inf'), attn_mask)
         # attn_bias = torch.where(attn_mask==1, 0, attn_bias).to(q.dtype)
