@@ -556,7 +556,16 @@ class RangeViewDiT(nn.Module):
                 if self.range_view_loss_weight > 0:
                     pred_range = predict_decoded[:, 0]       # [B*F, H, W]
                     gt_range   = gt_range_img[:, 0]          # [B*F, H, W]
-                    l1_map     = torch.abs(pred_range - gt_range)            # [B*F, H, W]
+                    l1_range   = torch.abs(pred_range - gt_range)            # [B*F, H, W]
+                    # Also supervise the intensity channel (ch 1) — previously
+                    # unsupervised, giving the decoder no gradient signal on it.
+                    # Weight 0.25 keeps intensity contribution smaller than range
+                    # (intensity_weight / range_weight = 10/40 = 0.25 in ELBO).
+                    if predict_decoded.shape[1] > 1 and gt_range_img.shape[1] > 1:
+                        l1_intensity = torch.abs(predict_decoded[:, 1] - gt_range_img[:, 1])
+                        l1_map = l1_range + 0.25 * l1_intensity
+                    else:
+                        l1_map = l1_range
                     mask_f     = gt_valid_spatial.float()
                     # t_sample [B*F, 1, 1] broadcasts over H, W — per-sample
                     # t-weighting so high-noise steps (t≈0) contribute near-zero

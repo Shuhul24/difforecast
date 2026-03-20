@@ -205,7 +205,10 @@ num_sampling_steps = 100  # Number of sampling steps during inference
 #   vae_range_weight:     40.0  matches RangeLDM — depth channel heavily weighted
 #   vae_intensity_weight: 10.0  matches RangeLDM — intensity channel
 #   vae_logvar_init:      0.0  (start with log σ²=0, i.e. σ=1; adapts during training)
-elbo_weight          = 0.0    # Disabled for Stage 2 (No ELBO)
+elbo_weight          = 0.02   # Enabled: VAE trains from scratch (vae_ckpt=None), needs reconstruction objective.
+                              # Without ELBO the encoder has no direct signal → unstructured latent space →
+                              # DiT cannot learn a meaningful velocity field → loss stays at ~0.8–1.0.
+                              # 0.02 keeps ELBO contribution on par with diff_loss (~0.05); see tuning guide above.
 kl_weight            = 1e-6   # β-VAE KL weight — matches RangeLDM (small keeps latents near standard normal)
 vae_range_weight     = 40.0   # L1 weight for range/depth channel — matches RangeLDM (was 1.0)
 vae_intensity_weight = 10.0   # L1 weight for intensity channel   — matches RangeLDM (was 0.5)
@@ -246,7 +249,10 @@ chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Cham
 #
 # bev_h / bev_w: BEV grid resolution in pixels. 256×256 covers ±25.6 m at 0.2 m/cell.
 # bev_x_range / bev_y_range: half-extent of the BEV grid in metres.
-bev_perceptual_weight = 0.0   # Disabled for Stage 2 (No BEV perceptual loss)
+bev_perceptual_weight = 0.1   # Enabled: VGG16 structural supervision on BEV occupancy grids.
+                              # Penalises shape/structural errors (missing walls, broken objects) that
+                              # pixel-level L1 on the range channel misses. 0.1 keeps BEV contribution
+                              # on par with flow loss scale.
 bev_h         = 256           # BEV grid height (forward direction)
 bev_w         = 256           # BEV grid width  (lateral direction)
 bev_x_range   = 25.6          # ±25.6 m forward coverage
