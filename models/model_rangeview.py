@@ -627,9 +627,13 @@ class RangeViewDiT(nn.Module):
             "loss_range_l1":  range_l1_loss,
             "loss_chamfer":   chamfer_loss_val,
             "loss_bev_percep": bev_percep_loss,
-            # predict_decoded: [(B*F), C, H, W] or None
-            # Callers use this for autoregressive conditioning (next iteration).
+            # predict_decoded: [(B*F), C, H, W] or None — decoded pixel images (for vis / L1)
             "predict": predict_decoded,
+            # predict_latents: [(B*F), L, latent_C] or None — raw DiT x_0 estimates BEFORE
+            # decoding.  Used for autoregressive conditioning so subsequent steps can receive
+            # the latents directly, avoiding the lossy decode → re-encode round trip that
+            # train_deepspeed.py avoids by operating entirely in latent space.
+            "predict_latents": predict,
         }
 
     # ---------------------------------------------------------------------- #
@@ -645,6 +649,7 @@ class RangeViewDiT(nn.Module):
         rel_yaw_cond=None,
         features_aug=None,
         step=0,
+        latents_cond_precomputed=None,
     ):
         """Training step.
 
@@ -656,6 +661,13 @@ class RangeViewDiT(nn.Module):
             rel_yaw_cond:   Optional pre-computed relative yaw.
             features_aug:   Not used (reserved for future augmentation).
             step:         Training step counter.
+            latents_cond_precomputed: ``[B, CF, L, latent_C]`` optional pre-computed
+                conditioning latents from the previous autoregressive step.  When
+                provided the conditioning frames are NOT re-encoded from ``features``,
+                eliminating the lossy decode → re-encode round trip that degrades
+                autoregressive quality.  Only the GT frame is encoded.
+                Mirrors the approach in train_deepspeed.py which keeps ``latents_cond``
+                in latent space throughout the autoregressive chain.
         """
         self.model.train()
 
@@ -666,7 +678,25 @@ class RangeViewDiT(nn.Module):
         # which would waste GPU activation memory without contributing gradients.
         _enc_ctx = torch.no_grad() if not self.vae_is_trainable else contextlib.nullcontext()
         with _enc_ctx:
-            latents_all = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
+            if latents_cond_precomputed is not None:
+                # ---------------------------------------------------------- #
+                # Latent-chain autoregressive conditioning: skip re-encoding
+                # the conditioning frames and use the DiT's x_0 estimates from
+                # the previous step directly.
+                #
+                # train_deepspeed.py does this naturally because it operates
+                # entirely in latent space (latents_cond is [B, CF, L, C]).
+                # Here we replicate that by bypassing encode_to_z for the CF
+                # conditioning frames when predicted latents are available.
+                #
+                # Only the GT frame needs to be encoded (it is always real data).
+                # ---------------------------------------------------------- #
+                latents_gt_enc = self.vae_tokenizer.encode_to_z(features_gt)   # [B, 1, L, latent_C]
+                latents_all = torch.cat(
+                    [latents_cond_precomputed, latents_gt_enc], dim=1
+                )  # [B, CF+1, L, latent_C]
+            else:
+                latents_all = self.vae_tokenizer.encode_to_z(features_all)  # [B, CF+1, L, latent_C]
 
         # ------------------------------------------------------------------ #
         # VAE ELBO loss (only when VAE has no pretrained checkpoint)
@@ -681,8 +711,13 @@ class RangeViewDiT(nn.Module):
         # ------------------------------------------------------------------ #
         elbo_loss = torch.zeros(1, device=features.device, dtype=features.dtype)
         if self.vae_is_trainable:
-            B, T_all, C, H, W = features_all.shape
-            x_flat = features_all.reshape(B * T_all, C, H, W)
+            B_all, T_all, C, H, W = features_all.shape
+            if latents_cond_precomputed is not None:
+                # Conditioning frames are predictions — compute ELBO only on the
+                # real GT frame to avoid drifting from the true data distribution.
+                x_flat = features_gt.reshape(B_all * features_gt.shape[1], C, H, W)
+            else:
+                x_flat = features_all.reshape(B_all * T_all, C, H, W)
             elbo_loss = self.vae_tokenizer.compute_vae_elbo(
                 x_flat,
                 logvar=self.logvar,
@@ -748,6 +783,7 @@ class RangeViewDiT(nn.Module):
         features_aug=None,
         sample_last=True,
         step=0,
+        latents_cond_precomputed=None,
         **kwargs,
     ):
         """Delegate to training or evaluation step."""
@@ -755,6 +791,7 @@ class RangeViewDiT(nn.Module):
             return self.step_train(
                 features, rot_matrix, features_gt,
                 rel_pose_cond, rel_yaw_cond, features_aug, step,
+                latents_cond_precomputed=latents_cond_precomputed,
             )
         else:
             with torch.cuda.amp.autocast(enabled=False):

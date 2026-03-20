@@ -818,6 +818,11 @@ def train(local_rank, args):
                 
                 features_cond = range_views[:, :cf, ...]   # [B, CF, C, H, W]
                 rel_pose_cond, rel_yaw_cond = None, None
+                # Predicted latents from the previous AR step, used as direct
+                # conditioning for the next step (mirrors train_deepspeed.py which
+                # keeps latents_cond in latent space throughout the chain).
+                # None → model encodes features_cond normally (first step only).
+                latents_cond_next = None
 
                 # Forward iterations
                 fw_iter = 1
@@ -841,7 +846,10 @@ def train(local_rank, args):
                     ]
                     features_gt = range_views[:, j + cf:j + cf + 1, ...]  # [B, 1, C, H, W]
 
-                    # Forward pass with mixed precision
+                    # Forward pass with mixed precision.
+                    # latents_cond_next is None for j=0 (model encodes features_cond),
+                    # and [B, CF, L, latent_C] for j>0 (predicted latents passed
+                    # directly, skipping the decode → re-encode round trip).
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         loss_final = model(
                             features_cond,
@@ -850,6 +858,7 @@ def train(local_rank, args):
                             rel_pose_cond=rel_pose_cond,
                             rel_yaw_cond=rel_yaw_cond,
                             step=step,
+                            latents_cond_precomputed=latents_cond_next,
                         )
 
                     loss_value = loss_final["loss_all"]
@@ -875,12 +884,34 @@ def train(local_rank, args):
 
                     # Prepare for next autoregressive iteration.
                     if j < fw_iter - 1:
-                        if args.return_predict and loss_final["predict"] is not None:
-                            # Use the flow-matching x_0 estimate — already computed,
-                            # no extra forward pass needed.
-                            predict_features = loss_final["predict"].detach()
+                        if args.return_predict and loss_final.get("predict_latents") is not None:
+                            # -------------------------------------------------- #
+                            # Latent-chain approach (mirrors train_deepspeed.py):
+                            # use the DiT's x_0 latent estimates DIRECTLY as the
+                            # conditioning for the next step — no decode → re-encode.
+                            #
+                            # train_deepspeed.py:
+                            #   latents_cond = rearrange(predict_latents, ...)
+                            #   # next iter: model receives latents directly
+                            #
+                            # Previous buggy approach in train_rangeview.py:
+                            #   features_cond = decode(predict_latents)   # lossy
+                            #   # next iter: model re-encodes decoded images → more loss
+                            # -------------------------------------------------- #
+                            _pred_lats = loss_final["predict_latents"].detach()
+                            latents_cond_next = rearrange(
+                                _pred_lats, '(b t) l c -> b t l c', b=B, t=cf,
+                            )
+                            # Keep features_cond updated with decoded predictions for
+                            # visualization and any pixel-space fallback paths.
+                            if loss_final["predict"] is not None:
+                                features_cond = rearrange(
+                                    loss_final["predict"].detach(),
+                                    '(b t) c h w -> b t c h w', b=B, t=cf,
+                                )
                         else:
-                            # Full diffusion sampling fallback (slower).
+                            # Full diffusion sampling fallback (slower, no predict_latents).
+                            latents_cond_next = None
                             model.eval()
                             with torch.no_grad():
                                 predict_features = model(
@@ -890,13 +921,10 @@ def train(local_rank, args):
                                     sample_last=False,
                                 )
                             model.train()
-
-                        # Slide the conditioning window forward by 1 frame:
-                        # [(B*CF), C, H, W] → [B, CF, C, H, W]
-                        features_cond = rearrange(
-                            predict_features, '(b t) c h w -> b t c h w',
-                            b=B, t=cf,
-                        )
+                            features_cond = rearrange(
+                                predict_features, '(b t) c h w -> b t c h w',
+                                b=B, t=cf,
+                            )
 
                 # Multi-step visualization after the chain (rank 0, vis steps, chain steps only).
                 if collect_chain_vis and chain_pred_frames:
