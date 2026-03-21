@@ -8,6 +8,31 @@ from torch import Tensor, nn
 from models.modules.dit_modules.math import attention, rope
 
 
+class DropPath(nn.Module):
+    """Stochastic depth regularization (Huang et al., 2016).
+
+    Randomly drops entire residual branches during training, acting as a
+    structured dropout.  A linearly increasing schedule (0 → drop_path_rate)
+    across DiT blocks gives shallow blocks full gradient flow while deeper
+    blocks receive stronger regularization — particularly useful when scaling
+    depth beyond 6 blocks per stream.
+    """
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        # Broadcast over all spatial/sequence dimensions.
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = torch.floor(random_tensor + keep_prob)
+        return x / keep_prob * random_tensor
+
+
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list[int]):
         super().__init__()
@@ -131,12 +156,13 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, drop_path: float = 0.0):
         super().__init__()
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
         self.hidden_size = hidden_size
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.img_mod = Modulation(hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias)
@@ -186,12 +212,12 @@ class DoubleStreamBlock(nn.Module):
         cond_attn, img_attn = attn[:, : cond.shape[1]], attn[:, cond.shape[1] :]
 
         # calculate the img bloks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+        img = img + self.drop_path(img_mod1.gate * self.img_attn.proj(img_attn))
+        img = img + self.drop_path(img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift))
 
         # calculate the cond bloks
-        cond = cond + cond_mod1.gate * self.cond_attn.proj(cond_attn)
-        cond = cond + cond_mod2.gate * self.cond_mlp((1 + cond_mod2.scale) * self.cond_norm2(cond) + cond_mod2.shift)
+        cond = cond + self.drop_path(cond_mod1.gate * self.cond_attn.proj(cond_attn))
+        cond = cond + self.drop_path(cond_mod2.gate * self.cond_mlp((1 + cond_mod2.scale) * self.cond_norm2(cond) + cond_mod2.shift))
         return img, cond
 
 
@@ -207,12 +233,14 @@ class SingleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         qk_scale: float | None = None,
+        drop_path: float = 0.0,
     ):
         super().__init__()
         self.hidden_dim = hidden_size
         self.num_heads = num_heads
         head_dim = hidden_size // num_heads
         self.scale = qk_scale or head_dim**-0.5
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         # qkv and mlp_in
@@ -240,7 +268,7 @@ class SingleStreamBlock(nn.Module):
         attn = attention(q, k, v, pe=pe)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod.gate * output
+        return x + self.drop_path(mod.gate * output)
 
 
 class LastLayer(nn.Module):

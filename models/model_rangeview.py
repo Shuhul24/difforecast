@@ -241,7 +241,7 @@ class RangeViewDiT(nn.Module):
             vec_in_dim=args.n_embd * (self.total_token_size - self.img_token_size),
             context_in_dim=args.n_embd,
             hidden_size=args.n_embd_dit,
-            mlp_ratio=4.0,
+            mlp_ratio=float(getattr(args, 'mlp_ratio_dit', 4.0)),
             num_heads=args.n_head_dit,
             depth=args.n_layer[1],
             depth_single_blocks=args.n_layer[2],
@@ -249,6 +249,7 @@ class RangeViewDiT(nn.Module):
             theta=10_000,
             qkv_bias=True,
             guidance_embed=False,
+            drop_path_rate=float(getattr(args, 'drop_path_rate', 0.0)),
         ))
         self.dit.cuda()
 
