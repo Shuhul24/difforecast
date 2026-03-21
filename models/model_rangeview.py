@@ -276,6 +276,11 @@ class RangeViewDiT(nn.Module):
         self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
+        # Step at which Chamfer loss is activated. 0 = from the start.
+        # Chamfer requires structurally coherent predictions; activating it
+        # after range L1 has taught basic depth structure avoids chaotic
+        # gradients in early training (mirrors disc_start in the VAE stage).
+        self.chamfer_start          = int(getattr(args,   'chamfer_start',          0))
 
         # ------------------------------------------------------------------ #
         # Learned uncertainty weights for auxiliary losses (Kendall et al.)
@@ -528,7 +533,11 @@ class RangeViewDiT(nn.Module):
             # Decode predicted latents → range view image [(B*F), C, H, W]
             predict_decoded = self.vae_tokenizer.decode_from_z(predict, self.h, self.w)
 
-            if self.range_view_loss_weight > 0 or self.chamfer_loss_weight > 0 or self.bev_perceptual_weight > 0:
+            # Chamfer is gated by chamfer_start — only compute once the model
+            # has learned basic depth structure via range L1 supervision.
+            chamfer_active = self.chamfer_loss_weight > 0 and step >= self.chamfer_start
+
+            if self.range_view_loss_weight > 0 or chamfer_active or self.bev_perceptual_weight > 0:
                 range_mean = self.proj_img_mean[0]
                 range_std  = self.proj_img_stds[0]
 
@@ -574,7 +583,7 @@ class RangeViewDiT(nn.Module):
                     range_l1_loss = (l1_map * mask_f * t_sample).sum() / (mask_f.sum() + 1e-8)
 
                 # ---- Depth maps shared by Chamfer + BEV perceptual --------- #
-                if self.chamfer_loss_weight > 0 or self.bev_perceptual_weight > 0:
+                if chamfer_active or self.bev_perceptual_weight > 0:
                     pred_range_unnorm = (
                         predict_decoded[:, 0] * range_std + range_mean
                     )  # [B*F, H, W]
@@ -586,7 +595,7 @@ class RangeViewDiT(nn.Module):
                     gt_valid   = gt_valid_spatial.reshape(gt_valid_spatial.shape[0], -1)
 
                 # ---- Chamfer loss (pred decoded depth vs original GT) ----- #
-                if self.chamfer_loss_weight > 0:
+                if chamfer_active:
                     chamfer_loss_val = batch_chamfer_distance(
                         pred_depth, gt_depth,
                         pred_valid, gt_valid,

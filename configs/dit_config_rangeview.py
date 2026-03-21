@@ -263,10 +263,19 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
 range_view_loss_weight = 1.0  # pixel-space depth L1 supervision through frozen decoder
-chamfer_loss_weight    = 0.5   # 3D point-cloud geometry loss: penalises structural errors L1 misses
-                                # was 0.0 (disabled). 0.5 balanced against flow loss (~0.05) via
-                                # learned uncertainty weighting (Kendall et al.) — actual effective
-                                # weight adapts automatically during training.
+                                # Enabled from step 0: the t_sample weighting (range_l1 ∝ t)
+                                # already provides a natural curriculum — noisy timesteps (t≈0)
+                                # contribute ~zero gradient while clean-data steps (t≈1) contribute
+                                # fully.  Starting from step 0 gives the DiT essential pixel-level
+                                # "what a correct range view looks like" signal to anchor early training.
+chamfer_loss_weight    = 0.5   # 3D point-cloud geometry loss — enabled but gated by chamfer_start.
+                                # Effective weight adapts via learned uncertainty weighting (Kendall et al.)
+chamfer_start          = 100_000  # Step at which Chamfer loss is first activated.
+                                  # Rationale: Chamfer requires structurally coherent predictions.
+                                  # Before this, range L1 teaches basic depth structure; Chamfer
+                                  # gradients on incoherent early predictions are noisy and can
+                                  # destabilise training (mirrors disc_start=50_000 in the VAE).
+                                  # Set to 0 to enable from step 0.
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== BEV Perceptual Loss =====
