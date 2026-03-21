@@ -98,14 +98,41 @@ augmentation_config = {
 #   latent_C = 4*2*32 = 256  (DiT in_channels; img_in projects 256 → n_embd_dit)
 #   L        = 8*16   = 128  (img_token_size; 8 elevation × 16 azimuth tokens)
 #   axes_dim_dit must sum to n_embd_dit // n_head_dit = 512 // 8 = 64
-n_layer = [6, 6, 6]  # Number of layers [STT causal, DiT double blocks, DiT single blocks]
+# n_layer = [STT causal blocks, DiT double-stream blocks, DiT single-stream blocks]
+#
+# Scaling guide (48 GB GPU, batch_size=6):
+#   [6, 6, 6]  → baseline    (~57 M DiT params)
+#   [6, 8, 8]  → +2 per DiT stream, moderate depth gain  (~100 M DiT params) ← current
+#
+# Increasing n_layer[0] deepens the STT temporal encoder.
+# Increasing n_layer[1] / n_layer[2] deepens the DiT diffusion backbone.
+n_layer = [6, 8, 8]  # [STT causal=6, DiT double=8, DiT single=8]
 n_head = 8  # Number of attention heads for STT (head_dim = n_embd // n_head = 128)
 n_embd = 1024  # Embedding dimension for STT
 
 # Diffusion Transformer (DiT)
-n_embd_dit = 512   # Hidden size for DiT; img_in projects latent_C(256) → 512
-n_head_dit = 8  # Number of attention heads for DiT (head_dim = 512 // 8 = 64)
-axes_dim_dit = [16, 16, 32]  # Axes dimensions for rotary position encoding; must sum to n_embd_dit // n_head_dit = 64
+#
+# Scaling rationale (48 GB GPU, batch_size=6):
+#   512-hidden / 8-head  → 6+6 blocks  ≈  57 M params  (baseline)
+#   768-hidden / 12-head → 8+8 blocks  ≈ 170 M params  (3× capacity, fits 48 GB)
+#
+# head_dim = n_embd_dit // n_head_dit must equal sum(axes_dim_dit).
+#   768 // 12 = 64  →  axes_dim_dit sums to 64  ✓  (unchanged from baseline)
+n_embd_dit = 768   # was 512; +50% hidden capacity for richer feature learning
+n_head_dit = 12    # was 8; 12 heads × 64 head_dim = 768 ✓
+axes_dim_dit = [16, 16, 32]  # Axes for rotary PE; must sum to n_embd_dit // n_head_dit = 64
+
+# DiT MLP expansion ratio (mlp_hidden = hidden_size × mlp_ratio_dit).
+# 4.0 is standard; raise to 4.5 for more feed-forward capacity with modest
+# memory overhead (≈+12.5% MLP params).
+mlp_ratio_dit = 4.0  # default; safe to raise to 4.5 if memory permits
+
+# Stochastic depth (drop path) for DiT double- and single-stream blocks.
+# Rates are distributed linearly from 0 → drop_path_rate across all blocks,
+# so early blocks retain full gradient flow while later blocks are regularised.
+# 0.1 is a good starting value for ~16-block DiTs (DeiT-III, DiT literature).
+# Set to 0.0 to disable (equivalent to the original architecture).
+drop_path_rate = 0.1  # peak stochastic-depth rate across DiT blocks
 
 # Pose/Trajectory encoding
 pose_x_vocab_size = 128  # Vocabulary size for x-axis pose
@@ -176,7 +203,8 @@ temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 #   4 pairs ≈ 6.5 M extra parameters (dim=256, n_heads=8).
 #   Start with 2–4; increase if the model has capacity to spare.
 add_encoder_temporal = True    # enable TemporalLatentEncoder (zero-init, won't disturb VAE checkpoint)
-n_temporal_blocks = 4          # interleaved time+space block pairs
+n_temporal_blocks = 6          # was 4; +2 block pairs → richer inter-frame motion encoding
+                                # Each pair ≈ 1.6 M extra params (dim=256, n_heads=8). Safe at batch_size=6.
 
 # Feature processing
 downsample_size = 4   # RangeLDM VAE spatial compression factor (4×)
@@ -235,8 +263,20 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
 range_view_loss_weight = 1.0  # pixel-space depth L1 supervision through frozen decoder
-chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
-chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
+                                # Enabled from step 0: the t_sample weighting (range_l1 ∝ t)
+                                # already provides a natural curriculum — noisy timesteps (t≈0)
+                                # contribute ~zero gradient while clean-data steps (t≈1) contribute
+                                # fully.  Starting from step 0 gives the DiT essential pixel-level
+                                # "what a correct range view looks like" signal to anchor early training.
+chamfer_loss_weight    = 0.5   # 3D point-cloud geometry loss — enabled but gated by chamfer_start.
+                                # Effective weight adapts via learned uncertainty weighting (Kendall et al.)
+chamfer_start          = 100_000  # Step at which Chamfer loss is first activated.
+                                  # Rationale: Chamfer requires structurally coherent predictions.
+                                  # Before this, range L1 teaches basic depth structure; Chamfer
+                                  # gradients on incoherent early predictions are noisy and can
+                                  # destabilise training (mirrors disc_start=50_000 in the VAE).
+                                  # Set to 0 to enable from step 0.
+chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 
 # ===== BEV Perceptual Loss =====
 # Converts depth maps → BEV occupancy grids → VGG16 multi-scale featudre distance.

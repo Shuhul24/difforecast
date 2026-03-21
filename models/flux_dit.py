@@ -33,6 +33,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    drop_path_rate: float = 0.0  # peak stochastic-depth rate (linearly scaled per block)
 
 
 class FluxDiT(nn.Module):
@@ -60,6 +61,15 @@ class FluxDiT(nn.Module):
         )
         self.cond_in = nn.Linear(params.context_in_dim, self.hidden_size)
 
+        # Linearly increasing drop-path rates: 0 → drop_path_rate across all
+        # double + single blocks so shallow blocks get full gradient flow while
+        # deeper blocks receive stronger stochastic-depth regularization.
+        total_blocks = params.depth + params.depth_single_blocks
+        dpr = [
+            x.item()
+            for x in torch.linspace(0, params.drop_path_rate, total_blocks)
+        ]
+
         self.double_blocks = nn.ModuleList(
             [
                 DoubleStreamBlock(
@@ -67,15 +77,21 @@ class FluxDiT(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    drop_path=dpr[i],
                 )
-                for _ in range(params.depth)
+                for i in range(params.depth)
             ]
         )
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
-                for _ in range(params.depth_single_blocks)
+                SingleStreamBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    drop_path=dpr[params.depth + i],
+                )
+                for i in range(params.depth_single_blocks)
             ]
         )
 
