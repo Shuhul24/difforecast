@@ -75,11 +75,24 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
 
 
 class MLPEmbedder(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int | None = None):
+        """Two-layer MLP embedder.
+
+        Args:
+            in_dim:     Input dimension.
+            hidden_dim: Intermediate (hidden) dimension.
+            out_dim:    Output dimension.  Defaults to ``hidden_dim`` when
+                        omitted (original behaviour, e.g. for ``time_in``
+                        where in=256, hidden=out=hidden_size).
+                        Set explicitly when ``in_dim`` is much larger than
+                        ``hidden_size`` to avoid a single crushing bottleneck
+                        (e.g. ``vector_in``: 3072 → 1024 → 512).
+        """
         super().__init__()
+        _out = out_dim if out_dim is not None else hidden_dim
         self.in_layer = nn.Linear(in_dim, hidden_dim, bias=True)
         self.silu = nn.SiLU()
-        self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
+        self.out_layer = nn.Linear(hidden_dim, _out, bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))

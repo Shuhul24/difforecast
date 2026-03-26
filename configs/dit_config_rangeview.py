@@ -13,7 +13,7 @@ kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'  # Path to sequen
 kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 
 # KITTI sequence splits (following KITTI Odometry format)
-train_sequences = [0, 1, 2, 3, 4, 5]  # Training sequences
+train_sequences = [0] #[0, 1, 2, 3, 4, 5]  # Training sequences
 val_sequences = [6, 7]  # Validation sequences
 test_sequences = [8, 9, 10]  # Test sequences
 
@@ -54,7 +54,9 @@ downsample_fps = 10  # KITTI is at 10 Hz
 condition_frames = 5  # Number of past frames (N_PAST_STEPS from KITTI config)
 block_size = 1  # Temporal block size
 forward_iter = 5  # Number of future frames to predict (N_FUTURE_STEPS from KITTI config)
-multifw_perstep = 2   # Apply multi-forward every N steps (was 10; more frequent autoregressive training)
+multifw_perstep = 1   # Run all fw_iter AR passes every step — recovers gradient signal
+                      # lost from single-frame DiT prediction (chain-of-forwarding).
+                      # Previously 2 (alternating 1/5 passes); now always 5 passes/step.
 
 # Augmentation
 mask_data = 0  # 1 means apply masking, 0 means no masking
@@ -178,6 +180,22 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 #     latent_C  = vae_embed_dim × patch_size_h × patch_size_w
 #     L         = h_tok × w_tok  (img_token_size)
 #   The DiT in_channels must equal latent_C, so update n_embd_dit accordingly.
+# ===== Latent Scale Normalisation =====
+# VAE latents trained with kl_weight=1e-6 can have std >> 1, causing the DiT
+# to see near-zero SNR for most timesteps (clean data dominates noise).
+# Dividing latents by latent_scale before the DiT balances the noise schedule.
+#
+# How to calibrate (one-time, after ~100 training batches):
+#   import torch; stds = []
+#   for batch in loader:
+#       z = vae.encode(batch)         # [B, T, L, C]
+#       stds.append(z.std().item())
+#   latent_scale = sum(stds) / len(stds)   # ← set this value below
+#
+# Start with 1.0 (no normalisation).  Once the VAE has trained for a few
+# thousand steps, measure std(latents) and update this value.
+latent_scale = 1.0
+
 vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
 patch_size   = 8         # legacy square fallback (used when patch_size_h/w absent)
@@ -203,8 +221,7 @@ temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 #   4 pairs ≈ 6.5 M extra parameters (dim=256, n_heads=8).
 #   Start with 2–4; increase if the model has capacity to spare.
 add_encoder_temporal = True    # enable TemporalLatentEncoder (zero-init, won't disturb VAE checkpoint)
-n_temporal_blocks = 6          # was 4; +2 block pairs → richer inter-frame motion encoding
-                                # Each pair ≈ 1.6 M extra params (dim=256, n_heads=8). Safe at batch_size=6.
+n_temporal_blocks = 4          # interleaved time+space block pairs
 
 # Feature processing
 downsample_size = 4   # RangeLDM VAE spatial compression factor (4×)
@@ -263,20 +280,8 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
 range_view_loss_weight = 1.0  # pixel-space depth L1 supervision through frozen decoder
-                                # Enabled from step 0: the t_sample weighting (range_l1 ∝ t)
-                                # already provides a natural curriculum — noisy timesteps (t≈0)
-                                # contribute ~zero gradient while clean-data steps (t≈1) contribute
-                                # fully.  Starting from step 0 gives the DiT essential pixel-level
-                                # "what a correct range view looks like" signal to anchor early training.
-chamfer_loss_weight    = 0.5   # 3D point-cloud geometry loss — enabled but gated by chamfer_start.
-                                # Effective weight adapts via learned uncertainty weighting (Kendall et al.)
-chamfer_start          = 100_000  # Step at which Chamfer loss is first activated.
-                                  # Rationale: Chamfer requires structurally coherent predictions.
-                                  # Before this, range L1 teaches basic depth structure; Chamfer
-                                  # gradients on incoherent early predictions are noisy and can
-                                  # destabilise training (mirrors disc_start=50_000 in the VAE).
-                                  # Set to 0 to enable from step 0.
-chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
+chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
+chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
 
 # ===== BEV Perceptual Loss =====
 # Converts depth maps → BEV occupancy grids → VGG16 multi-scale featudre distance.
@@ -292,7 +297,7 @@ chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 bev_perceptual_weight = 0.1   # Enabled: VGG16 structural supervision on BEV occupancy grids.
                               # Penalises shape/structural errors (missing walls, broken objects) that
                               # pixel-level L1 on the range channel misses. 0.1 keeps BEV contribution
-                              # on par with flow loss scale.
+                              # on par with flow loss scale.[]
 bev_h         = 256           # BEV grid height (forward direction)
 bev_w         = 256           # BEV grid width  (lateral direction)
 bev_x_range   = 25.6          # ±25.6 m forward coverage

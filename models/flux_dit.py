@@ -33,7 +33,17 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+<<<<<<< Updated upstream
     drop_path_rate: float = 0.0  # peak stochastic-depth rate (linearly scaled per block)
+=======
+    # Hidden dimension for the pose/vec MLP (vector_in).
+    # When vec_in_dim >> hidden_size a single linear crushing e.g. 3072→512
+    # discards most of the pose information.  Setting vec_hidden_dim between
+    # vec_in_dim and hidden_size (e.g. vec_in_dim // 3 ≈ 1024 for 3072→1024→512)
+    # gives a more gradual compression with negligible extra parameters.
+    # 0 means use hidden_size (original single-bottleneck behaviour).
+    vec_hidden_dim: int = 0
+>>>>>>> Stashed changes
 
 
 class FluxDiT(nn.Module):
@@ -55,7 +65,11 @@ class FluxDiT(nn.Module):
         self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
+        # Pose/vec projection: use a wide hidden layer when vec_hidden_dim > 0
+        # to avoid a single crushing bottleneck (e.g. 3072 → 512 in one step).
+        # With vec_hidden_dim = n_embd = 1024: 3072 → 1024 → 512.
+        vec_hid = params.vec_hidden_dim if params.vec_hidden_dim > 0 else self.hidden_size
+        self.vector_in = MLPEmbedder(params.vec_in_dim, vec_hid, self.hidden_size)
         self.guidance_in = (
             MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
         )

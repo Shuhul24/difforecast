@@ -834,8 +834,9 @@ def train(local_rank, args):
                 collect_chain_vis = (
                     vis_steps > 0 and step % vis_steps == 0 and rank == 0 and fw_iter > 1
                 )
-                chain_pred_frames = []   # [B, C, H, W] per chain step
-                chain_gt_frames   = []   # [B, C, H, W] per chain step
+                chain_pred_frames  = []   # [B, C, H, W] per chain step
+                chain_gt_frames    = []   # [B, C, H, W] per chain step
+                chain_pred_latents = []   # [B, L, C]    per chain step (normalised)
 
                 # Number of rotation matrices needed per forward pass:
                 # (condition_frames + 1) * block_size
@@ -873,42 +874,42 @@ def train(local_rank, args):
                     model.step()
 
                     # Collect this step's prediction for multi-step visualization.
-                    # The last CF positions in predict contain the x_0 for features_gt.
+                    # predict is [B, C, H, W] — one frame per AR step.
                     if collect_chain_vis and loss_final["predict"] is not None:
-                        pred_cf = rearrange(
-                            loss_final["predict"].detach(),
-                            '(b t) c h w -> b t c h w', b=B, t=cf,
-                        )
-                        chain_pred_frames.append(pred_cf[:, -1, ...])  # [B, C, H, W]
+                        chain_pred_frames.append(loss_final["predict"].detach())  # [B, C, H, W]
                         chain_gt_frames.append(features_gt[:, 0, ...].detach())
+                    if collect_chain_vis and loss_final.get("predict_latents") is not None:
+                        chain_pred_latents.append(loss_final["predict_latents"].detach())  # [B, L, C]
 
-                    # Prepare for next autoregressive iteration.
+                    # Prepare for next autoregressive iteration (sliding window).
                     if j < fw_iter - 1:
                         if args.return_predict and loss_final.get("predict_latents") is not None:
                             # -------------------------------------------------- #
-                            # Latent-chain approach (mirrors train_deepspeed.py):
-                            # use the DiT's x_0 latent estimates DIRECTLY as the
-                            # conditioning for the next step — no decode → re-encode.
+                            # Chain-of-forwarding sliding-window update.
+                            # predict_latents is [B, L, C] — single frame.
+                            # Drop oldest cond frame, append new prediction.
                             #
-                            # train_deepspeed.py:
-                            #   latents_cond = rearrange(predict_latents, ...)
-                            #   # next iter: model receives latents directly
-                            #
-                            # Previous buggy approach in train_rangeview.py:
-                            #   features_cond = decode(predict_latents)   # lossy
-                            #   # next iter: model re-encodes decoded images → more loss
+                            # j=0: slide_from = freshly encoded cond latents
+                            # j>0: slide_from = latents_cond_next from prev step
                             # -------------------------------------------------- #
-                            _pred_lats = loss_final["predict_latents"].detach()
-                            latents_cond_next = rearrange(
-                                _pred_lats, '(b t) l c -> b t l c', b=B, t=cf,
-                            )
-                            # Keep features_cond updated with decoded predictions for
-                            # visualization and any pixel-space fallback paths.
+                            pred_lat_single = loss_final["predict_latents"].detach()  # [B, L, C]
+                            if latents_cond_next is None:
+                                slide_from = loss_final.get("latents_cond_enc")  # [B, CF, L, C]
+                            else:
+                                slide_from = latents_cond_next                   # [B, CF, L, C]
+                            if slide_from is not None:
+                                latents_cond_next = torch.cat([
+                                    slide_from[:, 1:, :, :],           # [B, CF-1, L, C]
+                                    pred_lat_single.unsqueeze(1),      # [B, 1,    L, C]
+                                ], dim=1)                               # [B, CF,   L, C]
+                            else:
+                                latents_cond_next = None
+                            # Update pixel-space cond for visualization / fallback.
                             if loss_final["predict"] is not None:
-                                features_cond = rearrange(
-                                    loss_final["predict"].detach(),
-                                    '(b t) c h w -> b t c h w', b=B, t=cf,
-                                )
+                                features_cond = torch.cat([
+                                    features_cond[:, 1:, ...],                    # [B, CF-1, C, H, W]
+                                    loss_final["predict"].detach().unsqueeze(1),  # [B, 1,    C, H, W]
+                                ], dim=1)                                          # [B, CF,   C, H, W]
                         else:
                             # Full diffusion sampling fallback (slower, no predict_latents).
                             latents_cond_next = None
@@ -921,18 +922,39 @@ def train(local_rank, args):
                                     sample_last=False,
                                 )
                             model.train()
-                            features_cond = rearrange(
-                                predict_features, '(b t) c h w -> b t c h w',
-                                b=B, t=cf,
-                            )
+                            # predict_features: [B, C, H, W] from step_eval — slide by 1
+                            features_cond = torch.cat([
+                                features_cond[:, 1:, ...],
+                                predict_features.unsqueeze(1),
+                            ], dim=1)
 
                 # Multi-step visualization after the chain (rank 0, vis steps, chain steps only).
                 if collect_chain_vis and chain_pred_frames:
+                    vis_pred_frames = chain_pred_frames  # default: per-frame decoded
+
+                    # If the temporal decoder is enabled and we collected chain latents,
+                    # re-decode the full AR chain jointly with temporal attention so that
+                    # each visualised frame benefits from global AR-chain context.
+                    if chain_pred_latents and len(chain_pred_latents) == len(chain_pred_frames):
+                        raw_m = model.module if hasattr(model, 'module') else model
+                        tokenizer = raw_m.vae_tokenizer
+                        if getattr(tokenizer, 'decoder_temporal', None) is not None:
+                            with torch.no_grad():
+                                lat_seq = torch.stack(chain_pred_latents, dim=1)  # [B, T, L, C]
+                                scale   = raw_m.latent_scale.to(lat_seq.dtype)
+                                decoded_seq = tokenizer.decode_from_z_temporal(
+                                    lat_seq * scale,   # denormalise before VAE decode
+                                    raw_m.h, raw_m.w,
+                                )  # [B, T, 2, H, W]
+                            vis_pred_frames = [
+                                decoded_seq[:, j] for j in range(decoded_seq.shape[1])
+                            ]
+
                     with torch.no_grad():
                         save_multistep_visualization(
                             step=step,
                             args=args,
-                            pred_frames=chain_pred_frames,
+                            pred_frames=vis_pred_frames,
                             gt_frames=chain_gt_frames,
                             projector=vis_projector,
                             vis_dir=vis_dir,

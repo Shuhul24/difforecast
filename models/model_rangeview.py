@@ -239,6 +239,11 @@ class RangeViewDiT(nn.Module):
             in_channels=self.vae_emb_dim,
             out_channels=self.vae_emb_dim,
             vec_in_dim=args.n_embd * (self.total_token_size - self.img_token_size),
+            # vec_hidden_dim: intermediate size for the pose MLP (vector_in).
+            # Pose embedding is 3 × n_embd = 3072 dims from the STT.  Using
+            # n_embd (1024) as the hidden dim gives 3072 → 1024 → 512, a
+            # gradual compression vs the previous 3072 → 512 → 512 bottleneck.
+            vec_hidden_dim=args.n_embd,
             context_in_dim=args.n_embd,
             hidden_size=args.n_embd_dit,
             mlp_ratio=float(getattr(args, 'mlp_ratio_dit', 4.0)),
@@ -252,6 +257,29 @@ class RangeViewDiT(nn.Module):
             drop_path_rate=float(getattr(args, 'drop_path_rate', 0.0)),
         ))
         self.dit.cuda()
+
+        # ------------------------------------------------------------------ #
+        # Latent scale normalisation
+        # ------------------------------------------------------------------ #
+        # VAE latents can have variance >> 1 (especially with kl_weight=1e-6
+        # which gives a near-deterministic encoder).  The DiT starts sampling
+        # from N(0,1) noise, so if the clean latents have std = σ the model
+        # sees near-zero noise levels for most timesteps t, and almost never
+        # trains the coarse-structure / high-noise regime.
+        #
+        # Dividing latents by latent_scale before the DiT (and multiplying
+        # back before the VAE decoder) maps them to approximately unit
+        # variance, giving a balanced SNR across all noise levels.
+        #
+        # How to calibrate:
+        #   1. Run a forward pass over ~100 training batches.
+        #   2. Compute std of the encoded latents across all tokens.
+        #   3. Set latent_scale = that std in the config (latent_scale = X).
+        # Default 1.0 = no normalisation (safe starting point).
+        _latent_scale = float(getattr(args, 'latent_scale', 1.0))
+        self.register_buffer(
+            'latent_scale', torch.tensor(_latent_scale, dtype=torch.float32)
+        )
 
         # Positional encoding IDs (precomputed for efficiency).
         # prefix_size = number of non-image tokens prepended by the STT:
@@ -450,16 +478,15 @@ class RangeViewDiT(nn.Module):
             latents_total:   ``[B, F, L, latent_C]`` — condition + target latents
                              (may have augmentation noise applied).
             rot_matrix:      ``[B, T, 4, 4]`` absolute rotation matrices.
-            latent_targets:  ``[(B*F), L, latent_C]`` — clean target latents
-                             used for flow-matching supervision.
+            latent_targets:  ``[B, L, latent_C]`` — clean target latents for the
+                             single GT next frame (last position in window).
+                             The DiT predicts one frame per call, always conditioned
+                             on the full CF frames of STT context.
             rel_pose_cond:   Optional pre-computed relative pose  (B, T, 2).
             rel_yaw_cond:    Optional pre-computed relative yaw   (B, T, 1).
             step:            Training step counter.
-            gt_images:       ``[(B*F), C, H, W]`` original (unnormalised-then-
-                             normalised) GT range view images.  When provided,
-                             range L1 is computed against these raw pixels rather
-                             than re-decoded latents, so the target is never
-                             corrupted by a still-learning VAE decoder.
+            gt_images:       ``[B, C, H, W]`` original (unnormalised-then-normalised)
+                             GT range view image for the single target frame.
 
         Returns:
             dict with keys: loss_all, loss_diff, loss_range_l1, loss_chamfer,
@@ -494,26 +521,37 @@ class RangeViewDiT(nn.Module):
             latents_total, pose_indices_total, yaw_indices_total,
             drop_feature=self.args.drop_feature,
         )
-        stt_features = logits['logits']
-        pose_emb     = logits['pose_emb']
+        stt_features = logits['logits']  # [(B*CF), S, E]
+        pose_emb     = logits['pose_emb']  # [(B*CF), D]
 
-        # Flow-matching loss (DiT)
+        # Chain-of-forwarding: use only the last STT position.
+        # The STT produces CF output positions via the causal shifted window;
+        # position -1 has seen all CF conditioning frames and is the only
+        # position that matches the inference-time conditioning regime.
+        # Using earlier positions would train the DiT on partial context
+        # (1..CF-1 frames) that it never encounters at inference.
+        B_pred = latent_targets.shape[0]   # B
+        CF     = self.condition_frames
+        stt_last = rearrange(stt_features, '(b cf) s e -> b cf s e', b=B_pred)[:, -1]  # [B, S, E]
+        pose_last = rearrange(pose_emb,    '(b cf) d   -> b cf d',   b=B_pred)[:, -1]  # [B, D]
+
+        # Flow-matching loss (DiT) — single frame, full context.
         # t_sample is kept as a named variable so auxiliary losses can be
         # weighted by it: d(predict)/d(pred) = (1-t), so weighting auxiliary
         # losses by t inverts that scaling — giving max gradient at t≈1
         # (clean-data regime, reliable predictions) and ~zero at t≈0 (noise).
-        t_sample = torch.rand((latent_targets.shape[0], 1, 1), device=latent_targets.device)
+        t_sample = torch.rand((B_pred, 1, 1), device=latent_targets.device)
         loss_terms = self.dit.training_losses(
             img=latent_targets,
-            img_ids=self.img_ids,
-            cond=stt_features,
-            cond_ids=self.cond_ids,
+            img_ids=self.img_ids[:B_pred],
+            cond=stt_last,
+            cond_ids=self.cond_ids[:B_pred],
             t=t_sample,
-            y=pose_emb,
+            y=pose_last,
             return_predict=self.args.return_predict,
         )
         diff_loss = loss_terms['loss']
-        predict   = loss_terms['predict']   # [(B*F), L, latent_C] or None
+        predict   = loss_terms['predict']   # [B, L, latent_C] or None
 
         # ------------------------------------------------------------------ #
         # Auxiliary losses — computed on DCAE-decoded predictions
@@ -530,8 +568,11 @@ class RangeViewDiT(nn.Module):
         predict_decoded  = None
 
         if predict is not None:
-            # Decode predicted latents → range view image [(B*F), C, H, W]
-            predict_decoded = self.vae_tokenizer.decode_from_z(predict, self.h, self.w)
+            # Denormalise before decoding: the DiT operates in normalised latent
+            # space (divided by latent_scale); the VAE decoder expects the original
+            # scale.  Multiply back before passing to decode_from_z.
+            predict_for_decode = predict * self.latent_scale.to(predict.dtype)
+            predict_decoded = self.vae_tokenizer.decode_from_z(predict_for_decode, self.h, self.w)
 
             # Chamfer is gated by chamfer_start — only compute once the model
             # has learned basic depth structure via range L1 supervision.
@@ -637,12 +678,13 @@ class RangeViewDiT(nn.Module):
             "loss_range_l1":  range_l1_loss,
             "loss_chamfer":   chamfer_loss_val,
             "loss_bev_percep": bev_percep_loss,
-            # predict_decoded: [(B*F), C, H, W] or None — decoded pixel images (for vis / L1)
+            # predict_decoded: [B, C, H, W] or None — decoded pixel image (for vis / L1)
             "predict": predict_decoded,
-            # predict_latents: [(B*F), L, latent_C] or None — raw DiT x_0 estimates BEFORE
-            # decoding.  Used for autoregressive conditioning so subsequent steps can receive
-            # the latents directly, avoiding the lossy decode → re-encode round trip that
-            # train_deepspeed.py avoids by operating entirely in latent space.
+            # predict_latents: [B, L, latent_C] or None — DiT x_0 estimate in
+            # NORMALISED latent space (divided by latent_scale).  Used for the
+            # AR sliding-window: the next step receives this as
+            # latents_cond_precomputed and skips the divide (it's already scaled).
+            # To decode manually: vae.decode(predict_latents * latent_scale).
             "predict_latents": predict,
         }
 
@@ -736,6 +778,27 @@ class RangeViewDiT(nn.Module):
                 kl_weight=self.kl_weight,
             )
 
+        # ------------------------------------------------------------------ #
+        # Latent scale normalisation
+        # ------------------------------------------------------------------ #
+        # Normalise latents to approximate unit variance so the DiT trains
+        # across a balanced range of noise levels.  latent_scale ≈ std(latents)
+        # is set in the config after a one-time calibration pass.
+        # latents_cond_precomputed arrives pre-normalised (it came from a
+        # previous step that already divided by latent_scale), so no double-
+        # normalisation occurs on that path.
+        if self.latent_scale != 1.0:
+            scale = self.latent_scale.clamp(min=1e-6).to(latents_all.dtype)
+            if latents_cond_precomputed is not None:
+                # Only the freshly-encoded GT frame needs dividing; cond latents
+                # were already normalised when they were produced last step.
+                latents_all = torch.cat([
+                    latents_cond_precomputed,
+                    latents_all[:, -1:] / scale,
+                ], dim=1)
+            else:
+                latents_all = latents_all / scale
+
         latents_total = latents_all  # may be replaced by augmented version below
 
         # Optional: frequency-domain / masking augmentation on latent tokens
@@ -753,22 +816,26 @@ class RangeViewDiT(nn.Module):
             else:
                 latents_total = mask * latents_total + (1 - mask) * noise
 
-        # Targets: latents of all frames shifted by 1 (each frame predicts the next)
-        latent_targets = latents_all[:, 1:]                          # [B, CF, L, latent_C]
-        latent_targets = rearrange(latent_targets, 'B F L C -> (B F) L C')
+        # Chain-of-forwarding: single target — the GT next frame only.
+        # The DiT is always trained with full CF frames of context (last STT
+        # position) and predicts exactly one future frame per call.
+        # Gradient signal per step is recovered by running all fw_iter AR
+        # passes every step (multifw_perstep=1 in config).
+        latent_targets = latents_all[:, -1]                          # [B, L, latent_C]
 
-        # Original GT range view images for each target frame — used in range L1
-        # loss so the target is the raw pixel image, not a re-decoded latent.
-        # Shape: [(B*CF), C, H, W]
-        gt_images = rearrange(
-            features_all[:, 1:].detach(), 'B F C H W -> (B F) C H W'
-        )
+        # GT range view image for the single target frame — used in range L1 loss.
+        gt_images = features_all[:, -1].detach()                     # [B, C, H, W]
 
         result = self.model_forward(
             latents_total, rot_matrix, latent_targets,
             rel_pose_cond=rel_pose_cond, rel_yaw_cond=rel_yaw_cond, step=step,
             gt_images=gt_images,
         )
+
+        # Expose the CF conditioning latents for the AR sliding-window update.
+        # Latents here are already normalised (divided by latent_scale), so
+        # subsequent AR steps remain consistently in normalised space.
+        result["latents_cond_enc"] = latents_all[:, :-1].detach()   # [B, CF, L, latent_C]
 
         # Fold ELBO into total loss (zero when VAE is frozen / ckpt is set).
         if self.vae_is_trainable:

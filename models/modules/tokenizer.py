@@ -205,6 +205,93 @@ class TemporalLatentEncoder(nn.Module):
         return rearrange(xx, '(b t) l c -> b t l c', b=B, t=T)
 
 
+class TemporalLatentDecoder(nn.Module):
+    """Full (non-causal) temporal + spatial attention for decoding predicted latents.
+
+    Sits between the DiT's AR-predicted latents and the VAE decoder.  Given
+    a sequence ``[B, T, L, C]`` of predicted latents (one per AR step), it
+    applies **full temporal attention** (no causal mask) so every predicted
+    frame can attend to the entire AR chain, then spatial attention within
+    each frame.
+
+    At decode time all T predicted frames are available, so the non-causal
+    mask is strictly better than causal: early frames can self-correct using
+    information from later predictions, reducing temporal flicker.
+
+    Zero-initialised → exact identity residual at training start, so enabling
+    this module has zero impact before any gradient updates.  Trained via
+    pixel-space auxiliary losses (range L1, Chamfer) when fw_iter > 1 and
+    range_view_loss_weight > 0.
+
+    Args:
+        dim:        Channel dimension (= vae_embed_dim × patch_h × patch_w).
+        n_heads:    Number of attention heads.
+        n_blocks:   Number of interleaved (full-time, spatial) block pairs.
+        max_frames: Maximum T to precompute RoPE for (forward_iter).
+        token_size: Spatial tokens per frame (L = h_lat × w_lat).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        n_blocks: int,
+        max_frames: int,
+        token_size: int,
+    ):
+        super().__init__()
+        self.n_blocks = n_blocks
+        head_dim = dim // n_heads
+
+        self.time_blocks = nn.ModuleList(
+            [TransformerBlock(n_heads=n_heads, dim=dim) for _ in range(n_blocks)]
+        )
+        self.space_blocks = nn.ModuleList(
+            [TransformerBlock(n_heads=n_heads, dim=dim) for _ in range(n_blocks)]
+        )
+
+        for blk in self.time_blocks:
+            zero_initialize(blk)
+        for blk in self.space_blocks:
+            zero_initialize(blk)
+
+        self.register_buffer(
+            'freqs_cis_time',
+            precompute_freqs_cis(head_dim, max_frames, theta=1000.0),
+        )
+        self.register_buffer(
+            'freqs_cis_space',
+            precompute_freqs_cis(head_dim, token_size, theta=1000.0),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply full (non-causal) temporal then spatial attention.
+
+        Args:
+            x: ``[B, T, L, C]`` predicted latent sequence.
+
+        Returns:
+            ``[B, T, L, C]`` temporally-refined latents (same shape).
+        """
+        B, T, L, C = x.shape
+
+        freqs_t = self.freqs_cis_time[:T]
+        freqs_s = self.freqs_cis_space[:L]
+
+        xx = rearrange(x, 'b t l c -> (b t) l c')
+
+        for i in range(self.n_blocks):
+            # Full (non-causal) temporal attention: each frame attends to all T.
+            xx = rearrange(xx, '(b t) l c -> (b l) t c', b=B, t=T)
+            xx = self.time_blocks[i](xx, freqs_t, mask=None)
+            xx = rearrange(xx, '(b l) t c -> (b t) l c', b=B, l=L)
+
+            # Spatial attention within each frame.
+            xx = self.space_blocks[i](xx, freqs_s)
+
+        return rearrange(xx, '(b t) l c -> b t l c', b=B, t=T)
+
+
 class VAETokenizer(nn.Module):
     def __init__(self, args, local_rank):
         super().__init__()
@@ -339,10 +426,54 @@ class RangeViewVAETokenizer(nn.Module):
                 f"max_frames={max_frames}, token_size={token_size}"
             )
 
+        # ------------------------------------------------------------------ #
+        # Optional: non-causal temporal + spatial attention on the decoder side.
+        #
+        # Given a sequence [B, T, L, C] of AR-predicted latents, applies full
+        # temporal attention (each predicted frame attends to all others) before
+        # per-frame VAE decoding.  This reduces temporal flicker because early
+        # predictions can self-correct using context from later frames.
+        #
+        # Zero-initialised → identity residual; has no effect at training start.
+        # Trained via pixel-space auxiliary losses when fw_iter > 1 and
+        # range_view_loss_weight > 0.
+        # ------------------------------------------------------------------ #
+        self.add_decoder_temporal = getattr(args, 'add_decoder_temporal', False)
+        self.decoder_temporal = None
+
+        if self.add_decoder_temporal:
+            latent_dim = args.vae_embed_dim * self.patch_size_h * self.patch_size_w
+            n_heads    = 8
+            n_blocks   = getattr(args, 'n_decoder_temporal_blocks',
+                                  getattr(args, 'n_temporal_blocks', 2))
+
+            h_lat = args.range_h // (args.downsample_size * self.patch_size_h)
+            w_lat = args.range_w // (args.downsample_size * self.patch_size_w)
+            token_size = h_lat * w_lat
+
+            # Max frames = forward_iter (the decoder sees the full AR chain).
+            max_frames = int(getattr(args, 'forward_iter', 5))
+
+            self.decoder_temporal = TemporalLatentDecoder(
+                dim=latent_dim,
+                n_heads=n_heads,
+                n_blocks=n_blocks,
+                max_frames=max_frames,
+                token_size=token_size,
+            ).cuda(local_rank)
+
+            print(
+                f"RangeViewVAETokenizer: TemporalLatentDecoder enabled — "
+                f"dim={latent_dim}, n_heads={n_heads}, n_blocks={n_blocks}, "
+                f"max_frames={max_frames}, token_size={token_size}"
+            )
+
         print(f"RangeViewVAETokenizer (RangeLDM): in_channels=2, "
               f"z_channels={self.vae_embed_dim}, "
               f"patch_size=({self.patch_size_h},{self.patch_size_w}), "
-              f"vae_ckpt={vae_ckpt}, add_encoder_temporal={self.add_encoder_temporal}")
+              f"vae_ckpt={vae_ckpt}, "
+              f"add_encoder_temporal={self.add_encoder_temporal}, "
+              f"add_decoder_temporal={self.add_decoder_temporal}")
 
     def encode_to_z(self, x: torch.Tensor) -> torch.Tensor:
         """Encode 2-channel range view images to latent tokens.
@@ -401,6 +532,38 @@ class RangeViewVAETokenizer(nn.Module):
         z = unpatchify(z, self.patch_size_h, self.patch_size_w, self.vae_embed_dim)
         vae_dtype = next(self.vae.parameters()).dtype
         return self.vae.decode(z.to(vae_dtype))  # [(B*T), 2, H, W]
+
+    def decode_from_z_temporal(
+        self,
+        z_seq: torch.Tensor,
+        h_lat: int,
+        w_lat: int,
+    ) -> torch.Tensor:
+        """Decode a sequence of predicted latents with temporal attention.
+
+        If ``decoder_temporal`` is enabled, applies full (non-causal) temporal
+        attention across the T predicted frames before per-frame VAE decoding.
+        Each predicted frame can thereby attend to the entire AR chain, reducing
+        temporal flicker in the decoded sequence.
+
+        Falls back to independent per-frame decoding when the decoder is disabled.
+
+        Args:
+            z_seq:  ``[B, T, L, latent_C]`` AR-predicted latent sequence
+                    (already in the original VAE scale, not normalised).
+            h_lat:  Latent spatial height (``H // (downsample * patch_h)``).
+            w_lat:  Latent spatial width  (``W // (downsample * patch_w)``).
+
+        Returns:
+            ``[B, T, 2, H, W]`` decoded [range, intensity] image sequence.
+        """
+        if self.decoder_temporal is not None:
+            z_seq = self.decoder_temporal(z_seq)   # [B, T, L, C]
+
+        B, T, L, C = z_seq.shape
+        z_flat = rearrange(z_seq, 'b t l c -> (b t) l c')
+        decoded = self.decode_from_z(z_flat, h_lat, w_lat)  # [(B*T), 2, H, W]
+        return rearrange(decoded, '(b t) c h w -> b t c h w', b=B, t=T)
 
     def compute_vae_elbo(
         self,
