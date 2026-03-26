@@ -92,6 +92,12 @@ class KITTIRangeViewDataset(Dataset):
     _DEFAULT_MEAN = [10.839, 0.0]
     _DEFAULT_STD  = [ 9.314, 1.0]
 
+    # Default normalisation stats for 5-channel mode [range, x, y, z, intensity]
+    # x/y are roughly symmetric around 0 with ~10 m std; z has ~2 m std.
+    # Calibrate from data after first use.
+    _DEFAULT_MEAN_5CH = [10.839, 0.0,  0.0, 0.0, 0.0]
+    _DEFAULT_STD_5CH  = [ 9.314, 10.0, 10.0, 2.0, 1.0]
+
     # Sliding-window stride when is_train=True
     TRAIN_STRIDE = 5
 
@@ -113,6 +119,7 @@ class KITTIRangeViewDataset(Dataset):
         pc_reshape=(-1, 4),
         is_train=True,
         stride=None,
+        five_channel=False,
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
@@ -123,6 +130,7 @@ class KITTIRangeViewDataset(Dataset):
         self.pc_reshape      = pc_reshape
         self.is_train        = is_train
         self.stride          = stride
+        self.five_channel    = five_channel   # return [range,x,y,z,intensity] if True
 
         # Range projection
         self.projection = RangeProjection(
@@ -131,9 +139,15 @@ class KITTIRangeViewDataset(Dataset):
             proj_h=h, proj_w=w,
         )
 
-        # Feature normalisation tensors [6]
-        mean = proj_img_mean or self._DEFAULT_MEAN
-        std  = proj_img_stds or self._DEFAULT_STD
+        # Feature normalisation tensors
+        if proj_img_mean is None:
+            mean = self._DEFAULT_MEAN_5CH if five_channel else self._DEFAULT_MEAN
+        else:
+            mean = proj_img_mean
+        if proj_img_stds is None:
+            std = self._DEFAULT_STD_5CH if five_channel else self._DEFAULT_STD
+        else:
+            std = proj_img_stds
         self.mean = torch.tensor(mean, dtype=torch.float)
         self.std  = torch.tensor(std,  dtype=torch.float)
 
@@ -189,31 +203,28 @@ class KITTIRangeViewDataset(Dataset):
             return None
 
     def _project(self, pc):
-        """Project a point cloud to a normalised [2, H, W] tensor.
+        """Project a point cloud to a normalised range-view tensor.
 
-        Channels: [range, intensity].
-        - range:     primary LiDAR depth measurement.
-        - intensity: surface reflectivity; independent of range, providing
-                     complementary texture information for the RangeLDM VAE.
-        These two channels match the input/output dimensionality of the
-        RangeLDM VAE (trained with in_channels=2 on range images).
-        Unoccupied pixels are zeroed via the projection mask.
+        Returns [2, H, W] (range, intensity) by default, or [5, H, W]
+        (range, x, y, z, intensity) when ``five_channel=True``.
+
+        Empty pixels carry a -1 sentinel from doProjection; after z-norm they
+        land well below any valid reading so make_valid_mask can recover them.
         """
-        proj_pc, proj_range, _, proj_mask = self.projection.doProjection(pc)
+        proj_pc, proj_range, _, _ = self.projection.doProjection(pc)
 
-        depth  = torch.from_numpy(proj_range)                    # [H, W]
+        depth  = torch.from_numpy(proj_range)               # [H, W]
         intens = (torch.from_numpy(proj_pc[..., 3])
-                  if pc.shape[1] >= 4 else torch.zeros_like(depth))  # [H, W]
-        mask   = torch.from_numpy(proj_mask.astype(np.float32))  # [H, W]
+                  if pc.shape[1] >= 4 else torch.zeros_like(depth))
 
-        # Empty pixels have proj_range = -1 (from doProjection).  After
-        # normalisation they land at ≈ (-1 - mean) / std ≈ -1.27 for range and
-        # (-1 - 0) / 1 = -1 for intensity — both safely below any valid reading.
-        # We do NOT apply the mask here so that make_valid_mask can recover
-        # validity from the naturally-negative sentinel values.
-        feat = torch.stack([depth, intens], dim=0)              # [2, H, W]
-        feat = (feat - self.mean[:, None, None]) / self.std[:, None, None]
-        return feat
+        if self.five_channel:
+            # proj_pc[..., :3] = (x, y, z) projected to range-view grid
+            xyz   = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)  # [3,H,W]
+            feat  = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0)], 0)  # [5,H,W]
+        else:
+            feat  = torch.stack([depth, intens], dim=0)     # [2, H, W]
+
+        return (feat - self.mean[:, None, None]) / self.std[:, None, None]
 
     # ── Dataset interface ──────────────────────────────────────────────────────
 

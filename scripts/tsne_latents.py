@@ -2,38 +2,37 @@
 """
 tsne_latents.py
 
-Visualise the latent space of DINOv2 patch tokens extracted from KITTI
-range-view images, and optionally compare them against the RangeLDM VAE
-latents used in the current training pipeline.
+Visualise DINOv2 features extracted from KITTI range-view images across all
+sequences (00-09) using the DiffLoc feature-learning architecture.
 
-DINOv2 adaptation follows the DiffLoc approach (liw95/DiffLoc):
-  - ViT-S/14 pretrained weights loaded from torch hub
-  - Patch embedding first-conv adapted from 3-channel RGB → 2-channel
-    [range, intensity] by averaging and rescaling pretrained weights
-  - Range images resized from 64×2048 → 56×448 before the ViT, giving a
-    4×32 = 128 patch grid — identical to the current VAE token count (L=128)
+Architecture (from liw95/DiffLoc — models/stems.py, models/image_feature_extractor.py):
+  ConvStem (SalsaNext-inspired ResBlocks)
+    in_channels=2 (range, intensity)  →  256 patch tokens × 384-d
+    Input 64×2048, patch_stride=(8,64)  →  grid (8,32) = 256 patches
+  +
+  Pretrained DINOv2 ViT-S/14 transformer blocks (12 layers)
+  →  CLS token extracted as a 384-d global descriptor per frame
 
-Outputs (saved to --output_dir):
-  dino_tsne_by_frame.png       t-SNE coloured by temporal frame index
-  dino_tsne_by_elevation.png   t-SNE coloured by patch elevation row
-  dino_tsne_by_azimuth.png     t-SNE coloured by patch azimuth column
-  dino_spatial_pca.png         PCA-RGB spatial token map over N example frames
-  vae_tsne_by_frame.png        (if --vae_ckpt) VAE latent t-SNE by frame
-  vae_tsne_by_elevation.png    (if --vae_ckpt) VAE latent t-SNE by elevation
-  vae_spatial_pca.png          (if --vae_ckpt) VAE PCA-RGB spatial token map
-  comparison_tsne.png          (if --vae_ckpt) side-by-side DINOv2 vs VAE
+A single t-SNE image is saved, coloured by sequence ID, giving a bird's-eye
+view of how DINOv2 features vary across scenes.
+
+DINOv2 pretrained weights:
+  Download dinov2_vits14_pretrain.pth from:
+    https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth
+  and pass via --pretrained_path.
+  Without it the weights are fetched automatically via torch.hub (needs internet).
 
 Usage:
     python scripts/tsne_latents.py \\
         --config configs/dit_config_rangeview.py \\
-        --sequence 0 \\
-        --n_frames 64 \\
+        --n_frames_per_seq 50 \\
         --output_dir outputs/tsne_latents \\
-        [--vae_ckpt /path/to/vae.pkl]
+        [--pretrained_path /path/to/dinov2_vits14_pretrain.pth]
 """
 
 import os
 import sys
+import math
 import argparse
 import numpy as np
 import torch
@@ -52,264 +51,278 @@ from utils.config_utils import Config
 from dataset.dataset_kitti_rangeview import KITTIRangeViewDataset
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Target resolution for DINOv2 forward pass.
-#
-# KITTI range images are 64×2048.  DINOv2 ViT-S/14 has patch_size=14, so we
-# need H and W to be multiples of 14.
-#
-#   DINO_H = 4 × 14 = 56   (4 elevation patches)
-#   DINO_W = 32 × 14 = 448 (32 azimuth patches)
-#   DINO_N_TOKENS = 4 × 32 = 128  ← matches the VAE token count L=128
-#
-# The positional embeddings are interpolated inside DINOv2's forward_features.
-# ─────────────────────────────────────────────────────────────────────────────
-DINO_H        = 56     # 4 × patch_size(14)
-DINO_W        = 448    # 32 × patch_size(14)
-DINO_PATCH_H  = 4      # elevation patch rows
-DINO_PATCH_W  = 32     # azimuth  patch columns
-DINO_N_TOKENS = DINO_PATCH_H * DINO_PATCH_W   # 128
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DINOv2 loading and adaptation
+# ConvStem components — ported verbatim from liw95/DiffLoc (models/stems.py)
+# Stem design originally from SalsaNext (github.com/TiagoCortinhal/SalsaNext)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _adapt_patch_embed(model: nn.Module, in_channels: int) -> nn.Module:
-    """Replace the 3-channel patch-embed Conv2d with an ``in_channels``-channel
-    one, initialised by averaging the pretrained RGB weights and rescaling to
-    preserve the expected activation magnitude.
+class ResContextBlock(nn.Module):
+    """Residual context block used in DiffLoc's ConvStem (from SalsaNext)."""
+    def __init__(self, in_filters, out_filters):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_filters, out_filters, kernel_size=(1, 1), stride=1)
+        self.act1  = nn.LeakyReLU()
+        self.conv2 = nn.Conv2d(out_filters, out_filters, (3, 3), padding=1)
+        self.act2  = nn.LeakyReLU()
+        self.bn1   = nn.BatchNorm2d(out_filters)
+        self.conv3 = nn.Conv2d(out_filters, out_filters, (3, 3), dilation=2, padding=2)
+        self.act3  = nn.LeakyReLU()
+        self.bn2   = nn.BatchNorm2d(out_filters)
 
-    The scaling factor ``3 / in_channels`` compensates for fewer input channels
-    so that the variance of the output feature maps stays consistent with what
-    the pretrained transformer layers expect.
+    def forward(self, x):
+        shortcut = self.act1(self.conv1(x))
+        resA = self.bn1(self.act2(self.conv2(shortcut)))
+        resA = self.bn2(self.act3(self.conv3(resA)))
+        return shortcut + resA
+
+
+class ResBlock(nn.Module):
+    """Residual block used in DiffLoc's ConvStem (from SalsaNext)."""
+    def __init__(self, in_filters, out_filters, dropout_rate,
+                 kernel_size=(3, 3), stride=1, pooling=True, drop_out=True):
+        super().__init__()
+        self.pooling = pooling
+        self.drop_out = drop_out
+        self.conv1 = nn.Conv2d(in_filters, out_filters, kernel_size=(1, 1), stride=stride)
+        self.act1  = nn.LeakyReLU()
+        self.conv2 = nn.Conv2d(in_filters, out_filters, kernel_size=(3, 3), padding=1)
+        self.act2  = nn.LeakyReLU()
+        self.bn1   = nn.BatchNorm2d(out_filters)
+        self.conv3 = nn.Conv2d(out_filters, out_filters, kernel_size=(3, 3), dilation=2, padding=2)
+        self.act3  = nn.LeakyReLU()
+        self.bn2   = nn.BatchNorm2d(out_filters)
+        self.conv4 = nn.Conv2d(out_filters, out_filters, kernel_size=(2, 2), dilation=2, padding=1)
+        self.act4  = nn.LeakyReLU()
+        self.bn3   = nn.BatchNorm2d(out_filters)
+        self.conv5 = nn.Conv2d(out_filters * 3, out_filters, kernel_size=(1, 1))
+        self.act5  = nn.LeakyReLU()
+        self.bn4   = nn.BatchNorm2d(out_filters)
+        self.dropout = nn.Dropout2d(p=dropout_rate)
+        if pooling:
+            self.pool = nn.AvgPool2d(kernel_size=kernel_size, stride=2, padding=1)
+
+    def forward(self, x):
+        shortcut = self.act1(self.conv1(x))
+        resA1 = self.bn1(self.act2(self.conv2(x)))
+        resA2 = self.bn2(self.act3(self.conv3(resA1)))
+        resA3 = self.bn3(self.act4(self.conv4(resA2)))
+        concat = torch.cat((resA1, resA2, resA3), dim=1)
+        resA = self.bn4(self.act5(self.conv5(concat)))
+        resA = shortcut + resA
+        resB = self.dropout(resA) if self.drop_out else resA
+        if self.pooling:
+            return self.pool(resB), resA
+        return resB
+
+
+class ConvStem(nn.Module):
+    """DiffLoc convolutional stem (liw95/DiffLoc, models/stems.py).
+
+    Maps [B, in_channels, H, W] → [B, N_patches, embed_dim] where
+    N_patches = (H // patch_stride[0]) × (W // patch_stride[1]).
     """
-    old_proj  = model.patch_embed.proj                  # Conv2d(3, 384, 14, 14)
-    old_w     = old_proj.weight.data                    # [384, 3, 14, 14]
+    def __init__(self, in_channels=2, base_channels=32, img_size=(64, 2048),
+                 patch_stride=(8, 64), embed_dim=384, flatten=True, hidden_dim=None):
+        super().__init__()
+        assert patch_stride[0] % 2 == 0 and patch_stride[1] % 2 == 0
+        if hidden_dim is None:
+            hidden_dim = 2 * base_channels
 
-    new_proj  = nn.Conv2d(
-        in_channels, old_proj.out_channels,
-        kernel_size  = old_proj.kernel_size,
-        stride       = old_proj.stride,
-        padding      = old_proj.padding,
-        bias         = old_proj.bias is not None,
-    )
-
-    # Average over the 3 RGB channels → [384, 1, 14, 14], then tile to
-    # in_channels and rescale.
-    avg_w = old_w.mean(dim=1, keepdim=True)             # [384, 1, 14, 14]
-    new_w = avg_w.repeat(1, in_channels, 1, 1) * (3.0 / in_channels)
-    new_proj.weight = nn.Parameter(new_w)
-    if old_proj.bias is not None:
-        new_proj.bias = nn.Parameter(old_proj.bias.data.clone())
-
-    model.patch_embed.proj = new_proj
-    return model
-
-
-def build_dinov2_rangeview(device: torch.device, in_channels: int = 2) -> nn.Module:
-    """Load DINOv2 ViT-S/14 and adapt the patch embedding for range-view images.
-
-    Args:
-        device:      Compute device.
-        in_channels: Number of input channels (2 for [range, intensity]).
-
-    Returns:
-        Frozen DINOv2 model on ``device``, ready for ``forward_features()``.
-    """
-    print("Loading DINOv2 ViT-S/14 from torch hub …")
-    model = torch.hub.load(
-        'facebookresearch/dinov2', 'dinov2_vits14',
-        pretrained=True,
-        verbose=False,
-    )
-
-    model = _adapt_patch_embed(model, in_channels)
-
-    # Freeze — used as a fixed feature extractor
-    for p in model.parameters():
-        p.requires_grad_(False)
-
-    model.eval().to(device)
-    print(
-        f"  patch_embed adapted: 3-ch → {in_channels}-ch  |  "
-        f"resize target: {DINO_H}×{DINO_W}  |  "
-        f"tokens per image: {DINO_N_TOKENS}"
-    )
-    return model
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Token extraction
-# ─────────────────────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def extract_dinov2_tokens(
-    model   : nn.Module,
-    images  : torch.Tensor,   # [B, 2, H, W]  normalised
-    device  : torch.device,
-) -> torch.Tensor:
-    """Resize range images to DINO_H×DINO_W and extract DINOv2 patch tokens.
-
-    DINOv2's ``forward_features`` internally calls ``interpolate_pos_encoding``
-    to stretch the pretrained positional embeddings to the new grid size, so no
-    manual pos-embed surgery is required.
-
-    Returns:
-        tokens: [B, DINO_N_TOKENS, 384]
-    """
-    x = F.interpolate(
-        images.to(device, dtype=torch.float32),
-        size=(DINO_H, DINO_W),
-        mode='bilinear',
-        align_corners=False,
-    )   # [B, 2, 56, 448]
-
-    out    = model.forward_features(x)
-    tokens = out['x_norm_patchtokens']   # [B, 128, 384] — CLS excluded
-    return tokens.cpu()
-
-
-@torch.no_grad()
-def extract_vae_tokens(
-    tokenizer,
-    images : torch.Tensor,   # [B, 1, 2, H, W]  — T=1 temporal dim
-    device : torch.device,
-) -> torch.Tensor:
-    """Extract RangeLDM VAE latent tokens for comparison.
-
-    Returns:
-        tokens: [B, L, latent_C]  e.g. [B, 128, 256]
-    """
-    b = images.shape[0]
-    toks = tokenizer.encode_to_z(images.to(device))    # [B, 1, L, C]
-    return toks[:, 0].cpu()                             # [B, L, C]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Dimensionality reduction
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_tsne(
-    features     : np.ndarray,   # [N, D]
-    perplexity   : int = 30,
-    n_iter       : int = 1000,
-    random_state : int = 42,
-) -> np.ndarray:
-    """PCA pre-reduction to 50 dims (standard speed-up), then t-SNE to 2D."""
-    n_components_pca = min(50, features.shape[0] - 1, features.shape[1])
-    if features.shape[1] > n_components_pca:
-        pca      = PCA(n_components=n_components_pca, random_state=random_state)
-        features = pca.fit_transform(features)
-
-    tsne = TSNE(
-        n_components  = 2,
-        perplexity    = perplexity,
-        n_iter        = n_iter,
-        random_state  = random_state,
-        verbose       = 1,
-    )
-    return tsne.fit_transform(features)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Plotting helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_tsne(
-    embedding  : np.ndarray,   # [N, 2]
-    labels     : np.ndarray,   # [N]
-    title      : str,
-    label_name : str,
-    save_path  : str,
-    cmap       : str   = 'viridis',
-    s          : float = 6.0,
-) -> None:
-    fig, ax = plt.subplots(figsize=(9, 7))
-    sc = ax.scatter(
-        embedding[:, 0], embedding[:, 1],
-        c=labels, cmap=cmap, s=s, alpha=0.7, linewidths=0,
-    )
-    fig.colorbar(sc, ax=ax, label=label_name)
-    ax.set_title(title, fontsize=12)
-    ax.set_xlabel('t-SNE dim 1')
-    ax.set_ylabel('t-SNE dim 2')
-    ax.set_xticks([]); ax.set_yticks([])
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved → {save_path}")
-
-
-def plot_spatial_pca(
-    tokens        : np.ndarray,   # [N, patch_h, patch_w, D]
-    title         : str,
-    save_path     : str,
-    n_frames_show : int = 6,
-) -> None:
-    """Reduce token embeddings to 3 PCA components → display as RGB spatial map.
-
-    Each patch in the H×W grid becomes a pixel whose RGB colour encodes the
-    dominant feature directions captured by PCA.  Showing several frames as
-    columns lets you see how the scene structure changes over time.
-
-    This is the same visualisation strategy used in DINOv2's official demos
-    to show that the model captures semantic structure without supervision.
-    """
-    N, ph, pw, D = tokens.shape
-    n_frames_show = min(n_frames_show, N)
-
-    flat    = tokens.reshape(-1, D)                   # [N*ph*pw, D]
-    pca     = PCA(n_components=3)
-    rgb_f   = pca.fit_transform(flat)                 # [N*ph*pw, 3]
-
-    # Normalise each PC channel independently to [0, 1]
-    for i in range(3):
-        v = rgb_f[:, i]
-        rgb_f[:, i] = (v - v.min()) / (v.max() - v.min() + 1e-8)
-
-    rgb = rgb_f.reshape(N, ph, pw, 3)                 # [N, ph, pw, 3]
-
-    frame_indices = np.linspace(0, N - 1, n_frames_show, dtype=int)
-    fig, axes = plt.subplots(1, n_frames_show, figsize=(3.5 * n_frames_show, 3))
-    if n_frames_show == 1:
-        axes = [axes]
-
-    for col, idx in enumerate(frame_indices):
-        axes[col].imshow(rgb[idx], aspect='auto', interpolation='nearest')
-        axes[col].set_title(f'frame {idx}', fontsize=9)
-        axes[col].axis('off')
-
-    fig.suptitle(title, fontsize=12)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved → {save_path}")
-
-
-def plot_comparison_tsne(
-    emb_dino  : np.ndarray,   # [N, 2]
-    emb_vae   : np.ndarray,   # [N, 2]
-    labels    : np.ndarray,   # [N]
-    seq_id    : int,
-    save_path : str,
-) -> None:
-    """Side-by-side t-SNE scatter for DINOv2 vs VAE latents."""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    names = ['DINOv2 patch tokens (384-d)', 'VAE latent tokens (256-d)']
-    for ax, emb, name in zip(axes, [emb_dino, emb_vae], names):
-        sc = ax.scatter(
-            emb[:, 0], emb[:, 1],
-            c=labels, cmap='plasma', s=5, alpha=0.65, linewidths=0,
+        self.dropout_ratio = 0.2
+        self.conv_block = nn.Sequential(
+            ResContextBlock(in_channels,   base_channels),
+            ResContextBlock(base_channels, base_channels),
+            ResContextBlock(base_channels, base_channels),
+            ResBlock(base_channels, hidden_dim, self.dropout_ratio,
+                     pooling=False, drop_out=False),
         )
-        fig.colorbar(sc, ax=ax, label='frame index')
-        ax.set_title(name, fontsize=12)
-        ax.set_xticks([]); ax.set_yticks([])
-        ax.axis('off')
-    fig.suptitle(f't-SNE latent comparison — KITTI seq {seq_id}', fontsize=13)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved → {save_path}")
+
+        kernel_size = (patch_stride[0] + 1, patch_stride[1] + 1)
+        padding     = (patch_stride[0] // 2, patch_stride[1] // 2)
+        self.proj_block = nn.Sequential(
+            nn.AvgPool2d(kernel_size=kernel_size, stride=patch_stride, padding=padding),
+            nn.Conv2d(hidden_dim, embed_dim, kernel_size=1),
+        )
+
+        self.patch_stride = tuple(patch_stride)
+        self.patch_size   = self.patch_stride
+        self.grid_size    = (img_size[0] // patch_stride[0], img_size[1] // patch_stride[1])
+        self.num_patches  = self.grid_size[0] * self.grid_size[1]
+        self.flatten      = flatten
+
+    def forward(self, x):
+        x_base = self.conv_block(x)            # [B, hidden_dim, H, W]
+        x      = self.proj_block(x_base)       # [B, embed_dim, grid_h, grid_w]
+        if self.flatten:
+            x = x.flatten(2).transpose(1, 2)  # [B, N, embed_dim]
+        return x, x_base
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DiffLoc-DINOv2 feature extractor
+# Inspired by liw95/DiffLoc models/image_feature_extractor.py:
+#   ConvStem replaces the ViT patch_embed; pretrained DINOv2 ViT-S/14 blocks
+#   are reused for the transformer layers and the CLS token/pos_embed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Grid produced by ConvStem from KITTI 64×2048 images with patch_stride=(8,64)
+STEM_PATCH_STRIDE  = (8, 64)
+STEM_BASE_CHANNELS = 32
+STEM_HIDDEN_DIM    = 256        # D_h in DiffLoc
+DINO_EMBED_DIM     = 384        # ViT-S/14 hidden dim
+DINO_GRID_H        = 8          # 64  // 8
+DINO_GRID_W        = 32         # 2048 // 64
+DINO_N_PATCHES     = DINO_GRID_H * DINO_GRID_W   # 256
+
+
+class DiffLocDINOv2(nn.Module):
+    """ConvStem (DiffLoc) + pretrained DINOv2 ViT-S/14 blocks.
+
+    Workflow (mirrors DiffLoc's ImageFeatureExtractor):
+      1. ConvStem encodes the multi-channel range image to patch tokens.
+      2. CLS token prepended; positional embedding added (bilinear-interpolated
+         from the DINOv2 pretrained 16×16 grid to our 8×32 grid).
+      3. 12 pretrained DINOv2 transformer blocks applied.
+      4. CLS token returned as a 384-d global descriptor.
+    """
+
+    def __init__(self, in_channels: int = 2, pretrained_path: str = None):
+        super().__init__()
+
+        # ── ConvStem (randomly initialised, adapts input channels) ────────────
+        self.conv_stem = ConvStem(
+            in_channels   = in_channels,
+            base_channels = STEM_BASE_CHANNELS,
+            img_size      = (64, 2048),
+            patch_stride  = STEM_PATCH_STRIDE,
+            embed_dim     = DINO_EMBED_DIM,
+            flatten       = True,
+            hidden_dim    = STEM_HIDDEN_DIM,
+        )
+
+        # ── Load DINOv2 ViT-S/14 ─────────────────────────────────────────────
+        if pretrained_path is not None:
+            print(f"Building DINOv2 ViT-S/14 architecture via torch.hub …")
+            dino = torch.hub.load(
+                'facebookresearch/dinov2', 'dinov2_vits14',
+                pretrained=False, verbose=False,
+            )
+            print(f"Loading pretrained weights from {pretrained_path}")
+            sd = torch.load(pretrained_path, map_location='cpu')
+            if 'model' in sd:
+                sd = sd['model']
+            # Skip patch_embed — we use ConvStem instead (reuse_patch_emb=False
+            # is the DiffLoc default for ConvStem mode)
+            sd = {k: v for k, v in sd.items() if 'patch_embed' not in k}
+            msg = dino.load_state_dict(sd, strict=False)
+            print(f"  DINOv2 weight loading: {msg}")
+        else:
+            print("Loading DINOv2 ViT-S/14 from torch.hub (pretrained=True) …")
+            dino = torch.hub.load(
+                'facebookresearch/dinov2', 'dinov2_vits14',
+                pretrained=True, verbose=False,
+            )
+
+        # Borrow cls_token, pos_embed, transformer blocks, and final norm
+        self.cls_token = nn.Parameter(dino.cls_token.data.clone())
+        self.pos_embed = nn.Parameter(dino.pos_embed.data.clone())  # [1, 257, 384]
+        self.blocks    = dino.blocks   # 12 × NestedTensorBlock
+        self.norm      = dino.norm
+
+        # Freeze pretrained components (visualisation — not fine-tuning)
+        for p in self.cls_token, self.pos_embed:
+            p.requires_grad_(False)
+        for p in list(self.blocks.parameters()) + list(self.norm.parameters()):
+            p.requires_grad_(False)
+
+    def _interp_pos_embed(self, grid_h: int, grid_w: int) -> torch.Tensor:
+        """Bilinear-resize pretrained pos_embed from (16,16) → (grid_h, grid_w).
+
+        Mirrors DiffLoc's resize_pos_embed (models/model_utils.py) which in turn
+        follows the standard ViT pos-embed interpolation recipe.
+        """
+        pos  = self.pos_embed               # [1, 1+gs_old², 384]
+        cls  = pos[:, :1]                   # [1, 1, 384]
+        grid = pos[:, 1:]                   # [1, gs_old², 384]
+        gs   = int(math.sqrt(grid.shape[1]))  # 16 for ViT-S/14
+        grid = grid.reshape(1, gs, gs, -1).permute(0, 3, 1, 2)   # [1, 384, 16, 16]
+        grid = F.interpolate(grid, size=(grid_h, grid_w),
+                             mode='bilinear', align_corners=False)
+        grid = grid.permute(0, 2, 3, 1).reshape(1, grid_h * grid_w, -1)
+        return torch.cat([cls, grid], dim=1)  # [1, 1+grid_h*grid_w, 384]
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x : [B, in_channels, 64, 2048]  →  [B, 384]  (CLS token)."""
+        patches, _ = self.conv_stem(x)          # [B, 256, 384]
+        B = patches.shape[0]
+
+        cls = self.cls_token.expand(B, -1, -1)  # [B, 1, 384]
+        tok = torch.cat([cls, patches], dim=1)  # [B, 257, 384]
+
+        pos = self._interp_pos_embed(DINO_GRID_H, DINO_GRID_W)
+        tok = tok + pos
+
+        for blk in self.blocks:
+            tok = blk(tok)
+        tok = self.norm(tok)
+
+        return tok[:, 0]   # CLS token: [B, 384]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature extraction across sequences
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def extract_sequence_features(
+    model    : DiffLocDINOv2,
+    cfg,
+    seq_id   : int,
+    n_frames : int,
+    batch_sz : int,
+    device   : torch.device,
+) -> torch.Tensor | None:
+    """Load one KITTI sequence, sample n_frames evenly, return [N, 384] CLS tokens."""
+    try:
+        ds = KITTIRangeViewDataset(
+            sequences_path  = cfg.kitti_sequences_path,
+            poses_path      = cfg.kitti_poses_path,
+            sequences       = [seq_id],
+            condition_frames= 0,
+            forward_iter    = 1,
+            h               = cfg.range_h,
+            w               = cfg.range_w,
+            fov_up          = cfg.fov_up,
+            fov_down        = cfg.fov_down,
+            fov_left        = cfg.fov_left,
+            fov_right       = cfg.fov_right,
+            proj_img_mean   = cfg.proj_img_mean,
+            proj_img_stds   = cfg.proj_img_stds,
+            pc_extension    = cfg.pc_extension,
+            pc_dtype        = getattr(np, cfg.pc_dtype),
+            pc_reshape      = tuple(cfg.pc_reshape),
+            is_train        = False,
+        )
+    except Exception as e:
+        print(f"  Seq {seq_id:02d}: skipped ({e})")
+        return None
+
+    n = min(n_frames, len(ds))
+    if n == 0:
+        return None
+    indices = np.linspace(0, len(ds) - 1, n, dtype=int)
+
+    imgs = []
+    for idx in indices:
+        data, _ = ds[int(idx)]   # [T=1, 2, H, W]
+        imgs.append(data[0])     # [2, H, W]
+    imgs = torch.stack(imgs)     # [N, 2, H, W]
+
+    feats = []
+    for s in range(0, n, batch_sz):
+        batch = imgs[s : s + batch_sz].to(device, dtype=torch.float32)
+        feats.append(model(batch).cpu())
+    return torch.cat(feats, dim=0)   # [N, 384]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,226 +331,111 @@ def plot_comparison_tsne(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="t-SNE of DINOv2 patch tokens from KITTI range-view images"
+        description="DINOv2 (DiffLoc-style) t-SNE on KITTI sequences 00-09"
     )
-    p.add_argument('--config', type=str,
-                   default='configs/dit_config_rangeview.py',
-                   help='Path to range-view config file')
-    p.add_argument('--sequence', type=int, default=0,
-                   help='KITTI sequence index')
-    p.add_argument('--n_frames', type=int, default=64,
-                   help='Number of frames to embed (more → richer t-SNE)')
-    p.add_argument('--batch_size', type=int, default=8,
-                   help='Batch size for DINOv2 forward passes')
-    p.add_argument('--output_dir', type=str,
-                   default='outputs/tsne_latents',
-                   help='Directory to write output PNG files')
-    p.add_argument('--vae_ckpt', type=str, default=None,
-                   help='Optional RangeLDM VAE checkpoint (.pkl) for comparison')
-    p.add_argument('--perplexity', type=int, default=30,
-                   help='t-SNE perplexity (try 5–50; smaller for few frames)')
-    p.add_argument('--n_iter', type=int, default=1000,
-                   help='Number of t-SNE optimisation iterations')
-    p.add_argument('--n_spatial_frames', type=int, default=6,
-                   help='Number of example frames shown in spatial PCA plots')
-    p.add_argument('--device', type=str, default='cuda',
-                   help='Compute device (cuda / cpu)')
+    p.add_argument('--config', default='configs/dit_config_rangeview.py')
+    p.add_argument('--n_frames_per_seq', type=int, default=50,
+                   help='Frames sampled from each sequence (default 50)')
+    p.add_argument('--batch_size', type=int, default=8)
+    p.add_argument('--output_dir', default='outputs/tsne_latents')
+    p.add_argument('--pretrained_path', default=None,
+                   help='Path to dinov2_vits14_pretrain.pth; falls back to torch.hub')
+    p.add_argument('--perplexity', type=int, default=40,
+                   help='t-SNE perplexity (default 40 for ~500 points)')
+    p.add_argument('--n_iter', type=int, default=1000)
+    p.add_argument('--device', default='cuda')
     return p.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+    args   = parse_args()
     device = torch.device(
-        args.device if (args.device == 'cpu' or not torch.cuda.is_available())
-        else args.device
+        args.device if (args.device == 'cpu' or torch.cuda.is_available()) else 'cpu'
     )
+    os.makedirs(args.output_dir, exist_ok=True)
     print(f"Device: {device}")
 
-    # ── Config ────────────────────────────────────────────────────────────────
     cfg = Config.fromfile(args.config)
 
-    # ── Dataset ───────────────────────────────────────────────────────────────
-    print(f"\nLoading KITTI sequence {args.sequence} …")
-    dataset = KITTIRangeViewDataset(
-        sequences_path = cfg.kitti_sequences_path,
-        poses_path     = cfg.kitti_poses_path,
-        sequences      = [args.sequence],
-        condition_frames = 0,
-        forward_iter     = 1,
-        h              = cfg.range_h,
-        w              = cfg.range_w,
-        fov_up         = cfg.fov_up,
-        fov_down       = cfg.fov_down,
-        fov_left       = cfg.fov_left,
-        fov_right      = cfg.fov_right,
-        proj_img_mean  = cfg.proj_img_mean,
-        proj_img_stds  = cfg.proj_img_stds,
-        pc_extension   = cfg.pc_extension,
-        pc_dtype       = getattr(np, cfg.pc_dtype),
-        pc_reshape     = tuple(cfg.pc_reshape),
-        is_train       = False,
-    )
+    # ── Build DiffLoc-DINOv2 model ────────────────────────────────────────────
+    print("\nBuilding DiffLoc-DINOv2 feature extractor …")
+    model = DiffLocDINOv2(in_channels=2, pretrained_path=args.pretrained_path)
+    model.eval().to(device)
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"  Total params: {n_params:.1f} M  |  "
+          f"ConvStem grid: {DINO_GRID_H}×{DINO_GRID_W} = {DINO_N_PATCHES} patches")
 
-    n_frames = min(args.n_frames, len(dataset))
-    print(f"  Dataset size: {len(dataset)}  |  using {n_frames} frames")
-    if n_frames < 10:
-        print("  WARNING: very few frames — t-SNE may not be informative")
+    # ── Extract features for sequences 00-09 ─────────────────────────────────
+    all_feats   = []
+    all_seq_ids = []
 
-    # Evenly-spaced frame indices across the sequence
-    indices    = np.linspace(0, len(dataset) - 1, n_frames, dtype=int)
-    frame_imgs = []
-    for idx in indices:
-        data, _ = dataset[int(idx)]   # [T=1, 2, H, W]
-        frame_imgs.append(data[0])    # [2, H, W]
-    frame_imgs = torch.stack(frame_imgs)   # [N, 2, H, W]
-
-    # ── DINOv2 token extraction ────────────────────────────────────────────────
-    dino_model = build_dinov2_rangeview(device, in_channels=2)
-
-    print(f"\nExtracting DINOv2 patch tokens for {n_frames} frames …")
-    dino_list = []
-    for start in range(0, n_frames, args.batch_size):
-        batch = frame_imgs[start : start + args.batch_size]
-        toks  = extract_dinov2_tokens(dino_model, batch, device)   # [B, 128, 384]
-        dino_list.append(toks)
-        print(f"  {min(start + args.batch_size, n_frames)}/{n_frames}", end='\r')
-    print()
-
-    dino_tokens = torch.cat(dino_list, dim=0).numpy()   # [N, 128, 384]
-    print(f"  DINOv2 tokens shape: {dino_tokens.shape}")
-
-    # ── (Optional) VAE token extraction ───────────────────────────────────────
-    vae_tokens = None
-    if args.vae_ckpt is not None:
-        from models.modules.tokenizer import RangeViewVAETokenizer
-
-        class _Cfg:
-            pass
-
-        vcfg = _Cfg()
-        vcfg.patch_size_h         = cfg.patch_size_h
-        vcfg.patch_size_w         = cfg.patch_size_w
-        vcfg.vae_embed_dim        = cfg.vae_embed_dim
-        vcfg.vae_ckpt             = args.vae_ckpt
-        vcfg.add_encoder_temporal = False
-
-        tokenizer = RangeViewVAETokenizer(vcfg, local_rank=device.index or 0)
-        tokenizer.eval()
-
-        print(f"\nExtracting VAE latent tokens for {n_frames} frames …")
-        vae_list = []
-        for start in range(0, n_frames, args.batch_size):
-            batch = frame_imgs[start : start + args.batch_size].unsqueeze(1)  # [B,1,2,H,W]
-            toks  = extract_vae_tokens(tokenizer, batch, device)              # [B, L, C]
-            vae_list.append(toks)
-            print(f"  {min(start + args.batch_size, n_frames)}/{n_frames}", end='\r')
-        print()
-
-        vae_tokens = torch.cat(vae_list, dim=0).numpy()   # [N, L, C]
-        print(f"  VAE tokens shape: {vae_tokens.shape}")
-
-    # ── Label arrays ──────────────────────────────────────────────────────────
-    # Attach three scalar labels to every token:
-    #   frame_ids  — temporal position (0 … n_frames-1)
-    #   elev_ids   — which elevation patch row (0 … DINO_PATCH_H-1)
-    #   azim_ids   — which azimuth patch column (0 … DINO_PATCH_W-1)
-    frame_ids = np.repeat(np.arange(n_frames), DINO_N_TOKENS)               # [N*L]
-    elev_ids  = np.tile(
-        np.repeat(np.arange(DINO_PATCH_H), DINO_PATCH_W), n_frames          # [N*L]
-    )
-    azim_ids  = np.tile(
-        np.tile(np.arange(DINO_PATCH_W), DINO_PATCH_H), n_frames            # [N*L]
-    )
-
-    # ── DINOv2 t-SNE ──────────────────────────────────────────────────────────
-    dino_flat = dino_tokens.reshape(-1, dino_tokens.shape[-1])   # [N*128, 384]
-    print(f"\nRunning t-SNE on DINOv2 tokens {dino_flat.shape} …")
-    dino_tsne = run_tsne(dino_flat, perplexity=args.perplexity, n_iter=args.n_iter)
-
-    plot_tsne(
-        dino_tsne, frame_ids,
-        title      = f'DINOv2 patch tokens — by frame (seq {args.sequence})',
-        label_name = 'frame index',
-        save_path  = os.path.join(args.output_dir, 'dino_tsne_by_frame.png'),
-        cmap='plasma',
-    )
-    plot_tsne(
-        dino_tsne, elev_ids,
-        title      = f'DINOv2 patch tokens — by elevation patch row (seq {args.sequence})',
-        label_name = 'elevation row (0=top)',
-        save_path  = os.path.join(args.output_dir, 'dino_tsne_by_elevation.png'),
-        cmap='coolwarm', s=4,
-    )
-    plot_tsne(
-        dino_tsne, azim_ids,
-        title      = f'DINOv2 patch tokens — by azimuth patch column (seq {args.sequence})',
-        label_name = 'azimuth column (0=left)',
-        save_path  = os.path.join(args.output_dir, 'dino_tsne_by_azimuth.png'),
-        cmap='twilight', s=4,
-    )
-
-    # ── DINOv2 spatial PCA map ─────────────────────────────────────────────────
-    dino_spatial = dino_tokens.reshape(n_frames, DINO_PATCH_H, DINO_PATCH_W, -1)
-    plot_spatial_pca(
-        dino_spatial,
-        title      = f'DINOv2 PCA-RGB token map — KITTI seq {args.sequence}',
-        save_path  = os.path.join(args.output_dir, 'dino_spatial_pca.png'),
-        n_frames_show = args.n_spatial_frames,
-    )
-
-    # ── VAE comparison ────────────────────────────────────────────────────────
-    if vae_tokens is not None:
-        L, C      = vae_tokens.shape[1], vae_tokens.shape[2]
-        vae_flat  = vae_tokens.reshape(-1, C)            # [N*L, C]
-
-        # If VAE token count differs from DINOv2 (should both be 128, but be safe)
-        if L != DINO_N_TOKENS:
-            print(
-                f"  NOTE: VAE token count ({L}) differs from DINOv2 ({DINO_N_TOKENS}); "
-                "frame/elev/azim labels will use DINOv2 grid."
-            )
-            vae_frame_ids = np.repeat(np.arange(n_frames), L)
-            vae_elev_ids  = np.tile(np.repeat(np.arange(4), L // 4), n_frames)
-            vae_azim_ids  = np.tile(np.tile(np.arange(L // 4), 4), n_frames)
-        else:
-            vae_frame_ids, vae_elev_ids, vae_azim_ids = frame_ids, elev_ids, azim_ids
-
-        print(f"\nRunning t-SNE on VAE tokens {vae_flat.shape} …")
-        vae_tsne  = run_tsne(vae_flat, perplexity=args.perplexity, n_iter=args.n_iter)
-
-        plot_tsne(
-            vae_tsne, vae_frame_ids,
-            title      = f'VAE latent tokens — by frame (seq {args.sequence})',
-            label_name = 'frame index',
-            save_path  = os.path.join(args.output_dir, 'vae_tsne_by_frame.png'),
-            cmap='plasma',
+    for seq in range(10):   # 00 – 09
+        print(f"\nSeq {seq:02d} …", end=' ', flush=True)
+        feats = extract_sequence_features(
+            model, cfg, seq, args.n_frames_per_seq, args.batch_size, device
         )
-        plot_tsne(
-            vae_tsne, vae_elev_ids,
-            title      = f'VAE latent tokens — by elevation patch row (seq {args.sequence})',
-            label_name = 'elevation row',
-            save_path  = os.path.join(args.output_dir, 'vae_tsne_by_elevation.png'),
-            cmap='coolwarm', s=4,
+        if feats is None:
+            continue
+        all_feats.append(feats)
+        all_seq_ids.extend([seq] * feats.shape[0])
+        print(f"{feats.shape[0]} frames  →  feats {tuple(feats.shape)}")
+
+    if not all_feats:
+        print("No sequences loaded — check kitti_sequences_path in config.")
+        return
+
+    X    = torch.cat(all_feats, dim=0).numpy()   # [N_total, 384]
+    seqs = np.array(all_seq_ids)
+    print(f"\nTotal: {X.shape[0]} frames from {len(set(all_seq_ids))} sequences")
+
+    # ── t-SNE ─────────────────────────────────────────────────────────────────
+    n_pca = min(50, X.shape[0] - 1, X.shape[1])
+    print(f"PCA {X.shape[1]} → {n_pca} dims …")
+    X_pca = PCA(n_components=n_pca, random_state=42).fit_transform(X)
+
+    print(f"t-SNE {X_pca.shape} (perplexity={args.perplexity}) …")
+    emb = TSNE(
+        n_components=2,
+        perplexity=args.perplexity,
+        n_iter=args.n_iter,
+        random_state=42,
+        verbose=1,
+    ).fit_transform(X_pca)
+
+    # ── Plot single image ─────────────────────────────────────────────────────
+    seq_ids_present = sorted(set(all_seq_ids))
+    cmap   = plt.cm.get_cmap('tab10', 10)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    for sid in seq_ids_present:
+        mask = seqs == sid
+        ax.scatter(
+            emb[mask, 0], emb[mask, 1],
+            c   = [cmap(sid)],
+            s   = 12,
+            alpha = 0.75,
+            linewidths = 0,
+            label = f'seq {sid:02d}',
         )
 
-        vae_spatial = vae_tokens.reshape(n_frames, DINO_PATCH_H, DINO_PATCH_W, -1)
-        plot_spatial_pca(
-            vae_spatial,
-            title      = f'VAE PCA-RGB token map — KITTI seq {args.sequence}',
-            save_path  = os.path.join(args.output_dir, 'vae_spatial_pca.png'),
-            n_frames_show = args.n_spatial_frames,
-        )
+    ax.legend(
+        loc='best', fontsize=8, ncol=2,
+        markerscale=1.5, framealpha=0.7,
+        title='KITTI sequence',
+    )
+    ax.set_title(
+        'DINOv2 CLS-token t-SNE — KITTI sequences 00-09\n'
+        '(DiffLoc ConvStem + pretrained ViT-S/14 blocks, 2-channel range+intensity)',
+        fontsize=11,
+    )
+    ax.set_xlabel('t-SNE dim 1'); ax.set_ylabel('t-SNE dim 2')
+    ax.set_xticks([]); ax.set_yticks([])
 
-        # Side-by-side comparison requires matching token counts
-        if L == DINO_N_TOKENS:
-            plot_comparison_tsne(
-                dino_tsne, vae_tsne, frame_ids,
-                seq_id    = args.sequence,
-                save_path = os.path.join(args.output_dir, 'comparison_tsne.png'),
-            )
-
-    print(f"\nAll outputs written to: {args.output_dir}")
+    plt.tight_layout()
+    save_path = os.path.join(args.output_dir, 'dino_tsne_all_sequences.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"\nSaved → {save_path}")
 
 
 if __name__ == '__main__':

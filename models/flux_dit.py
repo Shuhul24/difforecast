@@ -33,9 +33,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
-<<<<<<< Updated upstream
     drop_path_rate: float = 0.0  # peak stochastic-depth rate (linearly scaled per block)
-=======
     # Hidden dimension for the pose/vec MLP (vector_in).
     # When vec_in_dim >> hidden_size a single linear crushing e.g. 3072→512
     # discards most of the pose information.  Setting vec_hidden_dim between
@@ -43,7 +41,6 @@ class FluxParams:
     # gives a more gradual compression with negligible extra parameters.
     # 0 means use hidden_size (original single-bottleneck behaviour).
     vec_hidden_dim: int = 0
->>>>>>> Stashed changes
 
 
 class FluxDiT(nn.Module):

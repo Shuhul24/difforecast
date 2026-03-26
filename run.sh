@@ -32,3 +32,17 @@ torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 13 --lr 3e-4
 
 #Stage 2 training:
 # torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 1 --lr 3e-4 --exp_name "kitti_rangeview_stage_2" --config configs/dit_config_rangeview.py --eval_steps 1000 --stage 2 --vae_ckpt '/scratch/p24cs0005/weights/vae_stage1_step7000.pth'
+
+# ── RAE pipeline (DINOv2 encoder + ViT-XL decoder) ───────────────────────────
+
+# RAE Stage 1 training (ViT-XL decoder; frozen DINOv2 encoder):
+# torchrun --nproc_per_node=1 scripts/train_rae_rangeview.py --stage 1 --batch_size 4 --exp_name "rae_stage_1" --config configs/rae_config_rangeview.py --eval_steps 2000 --no_log_file
+
+# RAE Stage 1 training from checkpoint:
+# torchrun --nproc_per_node=1 scripts/train_rae_rangeview.py --stage 1 --batch_size 4 --exp_name "rae_stage_1" --config configs/rae_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/rae_stage_1/<step>" --resume_step <step> --no_log_file
+
+# RAE Stage 2 training (STT + FluxDiT in DINOv2 latent space; set rae_ckpt in config first):
+# torchrun --nproc_per_node=1 scripts/train_rae_rangeview.py --stage 2 --batch_size 2 --exp_name "rae_stage_2" --config configs/rae_config_rangeview.py --eval_steps 2000 --no_log_file
+
+# RAE Stage 2 training from checkpoint:
+# torchrun --nproc_per_node=1 scripts/train_rae_rangeview.py --stage 2 --batch_size 2 --exp_name "rae_stage_2" --config configs/rae_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/rae_stage_2/<step>" --resume_step <step> --no_log_file

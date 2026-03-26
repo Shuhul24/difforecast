@@ -190,6 +190,46 @@ Setting `vae_ckpt = None` (the current default) initialises the entire DCAE rand
 
 ---
 
+## DINOv2 Pretrained Weights (`tsne_latents.py`)
+
+`scripts/tsne_latents.py` uses a **DiffLoc-style** feature extractor
+([liw95/DiffLoc](https://github.com/liw95/DiffLoc)) to visualise how
+pretrained DINOv2 features cluster across KITTI sequences.  The extractor
+consists of a ConvStem (SalsaNext-inspired ResBlocks) that adapts the
+2-channel range image to patch tokens, followed by the pretrained
+**DINOv2 ViT-S/14** transformer blocks.
+
+DiffLoc initialises its feature learner from the
+[DINOv2](https://github.com/facebookresearch/dinov2) foundation model
+released by Meta AI Research.
+
+### Downloading the weights
+
+```bash
+# ViT-Small, patch-size 14 (~85 MB)
+wget https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth \
+     -O /path/to/weights/dinov2_vits14_pretrain.pth
+```
+
+Alternatively, weights are fetched automatically via `torch.hub` on first run
+(requires internet access).
+
+### Running the visualisation
+
+```bash
+python scripts/tsne_latents.py \
+    --config configs/dit_config_rangeview.py \
+    --n_frames_per_seq 50 \
+    --output_dir outputs/tsne_latents \
+    --pretrained_path /path/to/weights/dinov2_vits14_pretrain.pth
+```
+
+Output: `outputs/tsne_latents/dino_tsne_all_sequences.png` — a single t-SNE
+scatter plot of DINOv2 CLS-token features across all KITTI sequences 00-09,
+coloured by sequence ID.
+
+---
+
 ## Acknowledgement
 
-Built on [Epona](https://github.com/Kevin-thu/Epona), [DrivingWorld](https://github.com/YvanYin/DrivingWorld), [Flux](https://github.com/black-forest-labs/flux), and [DCAE](https://github.com/mit-han-lab/efficientvit/tree/master/applications/dc_ae).
+Built on [Epona](https://github.com/Kevin-thu/Epona), [DrivingWorld](https://github.com/YvanYin/DrivingWorld), [Flux](https://github.com/black-forest-labs/flux), [DCAE](https://github.com/mit-han-lab/efficientvit/tree/master/applications/dc_ae), and [DiffLoc](https://github.com/liw95/DiffLoc) (DINOv2 range-view feature extractor).

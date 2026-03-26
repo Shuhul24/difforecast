@@ -3,6 +3,26 @@ import logging
 import numpy as np
 from datetime import datetime
 import locale
+import torch
+
+
+def uncertainty_weighted_loss(log_w: "torch.Tensor", loss: "torch.Tensor") -> "torch.Tensor":
+    """Kendall et al. (NeurIPS 2018) multi-task uncertainty weighting.
+
+    Instead of a fixed weight multiplier, each auxiliary loss L is combined as:
+        exp(-log_w) * L + log_w
+    where log_w is a learnable nn.Parameter.  The +log_w term prevents the
+    weight from collapsing to 0 (i.e. the loss being ignored entirely).
+    log_w is clamped >= 0 so the effective weight never exceeds exp(0)=1.
+
+    Args:
+        log_w: learnable scalar parameter (nn.Parameter)
+        loss:  scalar loss value
+    Returns:
+        weighted loss scalar
+    """
+    lw = log_w.clamp(min=0.0)
+    return torch.exp(-lw) * loss + lw
 
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
