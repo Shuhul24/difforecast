@@ -183,11 +183,35 @@ class _ViTLayer(nn.Module):
         return x + self.ff(self.n2(x))
 
 
+class _ConvRefineHead(nn.Module):
+    """Lightweight convolutional sharpening head applied after ViT unpatchify.
+
+    Recovers sub-patch detail (thin scan lines, object edges) that the 8×64-pixel
+    token grid cannot represent. Zero-init on the last conv means the head starts
+    as an identity, so existing checkpoints load cleanly without a loss spike.
+    """
+    def __init__(self, out_ch: int, hidden: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(out_ch, hidden, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, out_ch, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
 class ViTXLDecoder(nn.Module):
     """ViT-XL decoder: [B,256,384] → [B,out_ch,64,2048].
 
     Config (RAE ViTXL): 28 layers, hidden=1152, heads=16, FFN=4096.
-    Each patch token reconstructs an 8×64 pixel region.
+    Each patch token reconstructs an 8×64 pixel region. A lightweight
+    _ConvRefineHead sharpens sub-patch detail after unpatchify.
     out_ch matches the encoder input channels (2 or 5).
     """
     HIDDEN   = 1152
@@ -206,8 +230,9 @@ class ViTXLDecoder(nn.Module):
         self.blocks  = nn.ModuleList([
             _ViTLayer(self.HIDDEN, self.N_HEADS, self.FFN_DIM) for _ in range(self.N_LAYERS)
         ])
-        self.norm = nn.LayerNorm(self.HIDDEN)
-        self.pred = nn.Linear(self.HIDDEN, patch_px)
+        self.norm   = nn.LayerNorm(self.HIDDEN)
+        self.pred   = nn.Linear(self.HIDDEN, patch_px)
+        self.refine = _ConvRefineHead(out_ch)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """z: [B,256,384] → [B,out_ch,64,2048]."""
@@ -217,9 +242,10 @@ class ViTXLDecoder(nn.Module):
         x = self.pred(self.norm(x))                      # [B,256,out_ch*8*64]
         B = x.shape[0]
         x = x.reshape(B, DINO_GRID_H, DINO_GRID_W, self.OUT_CH, self.PATCH_H, self.PATCH_W)
-        return x.permute(0,3,1,4,2,5).reshape(
+        x = x.permute(0,3,1,4,2,5).reshape(
             B, self.OUT_CH, DINO_GRID_H*self.PATCH_H, DINO_GRID_W*self.PATCH_W
-        )   # [B,out_ch,64,2048]
+        )                                                 # [B,out_ch,64,2048]
+        return self.refine(x)
 
 
 # ── Stage 1: RAE ────────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ kitti_root           = '/DATA2/shuhul/kitti'
 kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'
 kitti_poses_path     = '/DATA2/shuhul/kitti/poses'
 
-train_sequences = [0]           # expand to [0,1,2,3,4,5] for full training
+train_sequences = [0, 1, 2, 3, 4, 5]           # expand to [0,1,2,3,4,5] for full training
 val_sequences   = [6, 7]
 test_sequences  = [8, 9, 10]
 
