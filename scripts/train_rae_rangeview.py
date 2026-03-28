@@ -300,13 +300,13 @@ def _save_vis_stage1(step, args, x, x_rec):
         vis_dir = os.path.join(args.validation_path, 'vis_s1')
         os.makedirs(vis_dir, exist_ok=True)
         if getattr(args, 'log_range', False):
-            gt_depth   = (2.0 ** (x[0, 0].float().cpu().numpy()    * 6.0)) - 1.0
-            pred_depth = (2.0 ** (x_rec[0, 0].float().cpu().numpy() * 6.0)) - 1.0
+            gt_depth   = (2.0 ** (x[0, 0].float().detach().cpu().numpy()    * 6.0)) - 1.0
+            pred_depth = (2.0 ** (x_rec[0, 0].float().detach().cpu().numpy() * 6.0)) - 1.0
         else:
             mean0 = args.proj_img_mean[0]
             std0  = args.proj_img_stds[0]
-            gt_depth   = x[0, 0].float().cpu().numpy()    * std0 + mean0
-            pred_depth = x_rec[0, 0].float().cpu().numpy() * std0 + mean0
+            gt_depth   = x[0, 0].float().detach().cpu().numpy()    * std0 + mean0
+            pred_depth = x_rec[0, 0].float().detach().cpu().numpy() * std0 + mean0
         mae = float(np.abs(pred_depth - gt_depth).mean())
         render_rangeview_comparison(
             gt_depth=gt_depth,
