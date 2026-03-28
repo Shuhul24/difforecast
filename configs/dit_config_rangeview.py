@@ -38,11 +38,14 @@ range_channels = 2  # [range, intensity] — matches RangeLDM VAE in_channels=2
 image_size = (64, 2048)  # Fixed for KITTI
 
 # ===== Feature Normalization =====
-# KITTI Odometry dataset statistics (computed from training sequences 0-5)
-# Format: [range, intensity]
-# Matches the 2-channel input/output of the RangeLDM VAE.
-proj_img_mean = [10.839, 0.0]  # [range, intensity]
-proj_img_stds = [9.314,  1.0]  # [range, intensity]
+# Log-scale normalisation for range (following LiDARGen, Zyrianov et al.):
+#   depth_norm = log2(depth_m + 1) / 6    →  [0, 1]
+#   inverse:    depth_m = 2^(depth_norm*6) - 1
+# Intensity: clip to [0, 1] (no further transform).
+# proj_img_mean/stds kept for API compatibility but unused for range when log_range=True.
+log_range     = True
+proj_img_mean = [0.0, 0.0]  # [range, intensity] — unused for range in log_range mode
+proj_img_stds = [1.0, 1.0]  # [range, intensity] — unused for range in log_range mode
 
 # ===== Training Parameters =====
 # Stage-wise training is supported by the script via the ``--stage`` CLI

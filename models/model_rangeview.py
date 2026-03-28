@@ -65,6 +65,7 @@ class RangeViewVAE(nn.Module):
         self.kl_weight            = float(getattr(args, 'kl_weight',            1e-6))
         self.proj_img_mean        = list(getattr(args, 'proj_img_mean', [10.839, 0.0]))
         self.proj_img_stds        = list(getattr(args, 'proj_img_stds', [9.314,  1.0]))
+        self.log_range            = bool(getattr(args, 'log_range', False))
 
         logvar_init = float(getattr(args, 'vae_logvar_init', 0.0))
         self.register_buffer('logvar', torch.tensor(logvar_init, dtype=torch.float32))
@@ -114,11 +115,14 @@ class RangeViewVAE(nn.Module):
 
         bev_percep_loss = torch.zeros(1, device=features.device, dtype=features.dtype)
         if self.bev_perceptual_weight > 0:
-            range_std  = self.proj_img_stds[0]
-            range_mean = self.proj_img_mean[0]
-
-            pred_depth = (x_recon[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
-            gt_depth   = (features[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
+            if self.log_range:
+                pred_depth = (torch.exp2(x_recon[:, 0] * 6.) - 1.).reshape(features.shape[0], -1)
+                gt_depth   = (torch.exp2(features[:, 0] * 6.) - 1.).reshape(features.shape[0], -1)
+            else:
+                range_std  = self.proj_img_stds[0]
+                range_mean = self.proj_img_mean[0]
+                pred_depth = (x_recon[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
+                gt_depth   = (features[:, 0] * range_std + range_mean).reshape(features.shape[0], -1)
             pred_valid = pred_depth > 0.5
             gt_valid   = gt_depth   > 0.5
 
@@ -301,6 +305,7 @@ class RangeViewDiT(nn.Module):
         self.proj_img_stds = list(
             getattr(args, 'proj_img_stds', [9.314, 11.521, 8.262, 0.828, 1.0, 1.0])
         )
+        self.log_range = bool(getattr(args, 'log_range', False))
         self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
@@ -582,6 +587,11 @@ class RangeViewDiT(nn.Module):
                 range_mean = self.proj_img_mean[0]
                 range_std  = self.proj_img_stds[0]
 
+                def _unnorm_range(t):
+                    if self.log_range:
+                        return torch.exp2(t * 6.) - 1.
+                    return t * range_std + range_mean
+
                 # ---------------------------------------------------------- #
                 # GT target: use the original range view image (gt_images)
                 # instead of re-decoding the GT latents.  This ensures the
@@ -600,8 +610,8 @@ class RangeViewDiT(nn.Module):
                 # Valid mask from the original GT image (range ch > 0.5 m).
                 # Invalid pixels (empty LiDAR returns projected to 0) are excluded
                 # from both the L1 and Chamfer losses.
-                gt_range_unnorm = gt_range_img[:, 0] * range_std + range_mean  # [B*F, H, W]
-                gt_valid_spatial = gt_range_unnorm > 0.5                        # [B*F, H, W]
+                gt_range_unnorm  = _unnorm_range(gt_range_img[:, 0])  # [B*F, H, W]
+                gt_valid_spatial = gt_range_unnorm > 0.5              # [B*F, H, W]
 
                 # ---- Range L1 loss (pred decoded image vs original GT) ---- #
                 if self.range_view_loss_weight > 0:
@@ -625,9 +635,7 @@ class RangeViewDiT(nn.Module):
 
                 # ---- Depth maps shared by Chamfer + BEV perceptual --------- #
                 if chamfer_active or self.bev_perceptual_weight > 0:
-                    pred_range_unnorm = (
-                        predict_decoded[:, 0] * range_std + range_mean
-                    )  # [B*F, H, W]
+                    pred_range_unnorm = _unnorm_range(predict_decoded[:, 0])  # [B*F, H, W]
 
                     # Flatten spatial dims: [B*F, H*W]
                     pred_depth = pred_range_unnorm.reshape(pred_range_unnorm.shape[0], -1)

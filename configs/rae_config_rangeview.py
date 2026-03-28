@@ -36,12 +36,23 @@ range_h   = 64
 range_w   = 2048
 image_size = (64, 2048)
 
-# 5-channel input/output: range, x, y, z, intensity
+# 2-channel input/output: range (log-normalised) + intensity (clipped)
+# Following LiDARGen (Zyrianov et al.): log2(r+1)/6 for depth, clip [0,1] for intensity.
+# xyz dropped — analytically derivable from range + sensor geometry, redundant for CD.
+range_channels = 2
+five_channel   = False
+log_range      = True   # log2(depth+1)/6 normalisation; proj_img_mean/stds unused for range
+proj_img_mean  = [0.0, 0.0]   # kept for API compat; not used when log_range=True
+proj_img_stds  = [1.0, 1.0]   # kept for API compat; not used when log_range=True
+
+# ── FUTURE (5-channel mean/std normalised) ────────────────────────────────────
 # Stats: rough estimates — run scripts/calibrate_stats.py after first epoch
-range_channels = 5
-five_channel   = True
-proj_img_mean  = [10.839, 0.0,  0.0,  0.0, 0.0]   # [range, x, y, z, intensity]
-proj_img_stds  = [ 9.314, 10.0, 10.0, 2.0, 1.0]
+#   range_channels = 5
+#   five_channel   = True
+#   log_range      = False
+#   proj_img_mean  = [10.839, 0.0,  0.0,  0.0, 0.0]   # [range, x, y, z, intensity]
+#   proj_img_stds  = [ 9.314, 10.0, 10.0, 2.0, 1.0]
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── DINOv2 encoder ────────────────────────────────────────────────────────────
 # Download dinov2_vits14_pretrain.pth from:
@@ -53,8 +64,8 @@ dino_grid_w          = 32      # 2048 // patch_stride_w=64
 dino_n_patches       = 256     # 8×32
 
 # ── ViT-XL Decoder (RAE Stage 1) ─────────────────────────────────────────────
-# Channel weights for Stage 1 L1 loss: range >> xyz > intensity
-rae_ch_weights = [40., 10., 10., 10., 5.]
+# 2-channel weights: range dominant (40), intensity low (1).
+rae_ch_weights = [40., 1.]
 
 # Stage 1 RAE checkpoint used to initialise / freeze decoder in Stage 2
 rae_ckpt = None    # e.g. 'outputs/rae_stage1/rae_step50000.pkl'

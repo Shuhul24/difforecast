@@ -99,7 +99,8 @@ def make_dataset(args, train=True):
         pc_extension=args.pc_extension,
         pc_dtype=getattr(np, args.pc_dtype),
         pc_reshape=tuple(args.pc_reshape),
-        five_channel=True,   # 5-channel: range, x, y, z, intensity
+        five_channel=getattr(args, 'five_channel', True),
+        log_range=getattr(args, 'log_range', False),
     )
     if args.stage == '1':
         # Single-frame dataset for RAE training
@@ -174,6 +175,10 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
                 if not getattr(args, 'no_wandb', False) and global_rank == 0:
                     wandb.log({'s1/loss': loss.item(), 's1/rec': out['loss_rec'].item(),
                                's1/bev': out['loss_bev'].item(), 'step': step})
+
+            if (args.vis_steps > 0 and step % args.vis_steps == 0
+                    and global_rank == 0 and out.get('x_rec') is not None):
+                _save_vis_stage1(step, args, x, out['x_rec'])
 
             if step % args.eval_steps == 0 and global_rank == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
@@ -278,21 +283,51 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
     return step
 
 
+def _save_vis_stage1(step, args, x, x_rec):
+    """Save GT vs RAE reconstruction for the range channel during Stage 1 training."""
+    try:
+        import numpy as np
+        vis_dir = os.path.join(args.validation_path, 'vis_s1')
+        os.makedirs(vis_dir, exist_ok=True)
+        if getattr(args, 'log_range', False):
+            gt_depth   = (2.0 ** (x[0, 0].float().cpu().numpy()    * 6.0)) - 1.0
+            pred_depth = (2.0 ** (x_rec[0, 0].float().cpu().numpy() * 6.0)) - 1.0
+        else:
+            mean0 = args.proj_img_mean[0]
+            std0  = args.proj_img_stds[0]
+            gt_depth   = x[0, 0].float().cpu().numpy()    * std0 + mean0
+            pred_depth = x_rec[0, 0].float().cpu().numpy() * std0 + mean0
+        mae = float(np.abs(pred_depth - gt_depth).mean())
+        render_rangeview_comparison(
+            gt_depth=gt_depth,
+            pred_depth=pred_depth,
+            output_path=os.path.join(vis_dir, f'step_{step:07d}.png'),
+            frame_idx=step,
+            metrics={'MAE_m': mae},
+            title_suffix=' — Stage 1 RAE reconstruction',
+        )
+    except Exception as e:
+        logger.warning(f"[S1] Visualisation failed at step {step}: {e}")
+
+
 def _save_vis(step, args, features_cond, features_gt, predict):
     """Save a quick range-view comparison (range channel only) to disk."""
     try:
+        import numpy as np
         vis_dir = os.path.join(args.validation_path, 'vis')
         os.makedirs(vis_dir, exist_ok=True)
-        projector = RangeProjection(
-            fov_up=args.fov_up, fov_down=args.fov_down,
-            fov_left=args.fov_left, fov_right=args.fov_right,
-            proj_h=args.range_h, proj_w=args.range_w,
-        )
+        mean0 = args.proj_img_mean[0]
+        std0  = args.proj_img_stds[0]
+        gt_depth   = features_gt[0, 0, 0].float().cpu().numpy()  * std0 + mean0
+        pred_depth = predict[0, 0].float().cpu().numpy()          * std0 + mean0
+        mae = float(np.abs(pred_depth - gt_depth).mean())
         render_rangeview_comparison(
-            step=step, save_dir=vis_dir,
-            cond_frames=features_cond[0, :, 0].cpu().numpy(),   # [CF, H, W] range ch
-            gt_frame=features_gt[0, 0, 0].cpu().numpy(),
-            pred_frame=predict[0, 0].cpu().numpy(),
+            gt_depth=gt_depth,
+            pred_depth=pred_depth,
+            output_path=os.path.join(vis_dir, f'step_{step:07d}.png'),
+            frame_idx=step,
+            metrics={'MAE_m': mae},
+            title_suffix=' — Stage 2 prediction',
         )
     except Exception as e:
         logger.warning(f"Visualisation failed at step {step}: {e}")

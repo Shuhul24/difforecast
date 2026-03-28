@@ -120,6 +120,7 @@ class KITTIRangeViewDataset(Dataset):
         is_train=True,
         stride=None,
         five_channel=False,
+        log_range=False,
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
@@ -131,6 +132,7 @@ class KITTIRangeViewDataset(Dataset):
         self.is_train        = is_train
         self.stride          = stride
         self.five_channel    = five_channel   # return [range,x,y,z,intensity] if True
+        self.log_range       = log_range      # use log2(r+1)/6 norm instead of mean/std
 
         # Range projection
         self.projection = RangeProjection(
@@ -206,7 +208,14 @@ class KITTIRangeViewDataset(Dataset):
         """Project a point cloud to a normalised range-view tensor.
 
         Returns [2, H, W] (range, intensity) by default, or [5, H, W]
-        (range, x, y, z, intensity) when ``five_channel=True``.
+        (range, x, y, z, intensity) when ``five_channel=True`` and
+        ``log_range=False``.
+
+        Normalisation modes:
+          log_range=False  →  (feat - mean) / std  (mean/std z-normalisation)
+          log_range=True   →  range: log2(r+1)/6 clipped to [0,1];
+                               intensity: clipped to [0,1].
+                               Empty pixels (depth=-1) map to 0 after clamping.
 
         Empty pixels carry a -1 sentinel from doProjection; after z-norm they
         land well below any valid reading so make_valid_mask can recover them.
@@ -217,14 +226,23 @@ class KITTIRangeViewDataset(Dataset):
         intens = (torch.from_numpy(proj_pc[..., 3])
                   if pc.shape[1] >= 4 else torch.zeros_like(depth))
 
-        if self.five_channel:
-            # proj_pc[..., :3] = (x, y, z) projected to range-view grid
-            xyz   = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)  # [3,H,W]
-            feat  = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0)], 0)  # [5,H,W]
-        else:
-            feat  = torch.stack([depth, intens], dim=0)     # [2, H, W]
+        if self.log_range:
+            # Log-scale depth normalisation from LiDARGen:
+            #   empty pixels (depth=-1) → clamp to 0 → log2(1)/6 = 0
+            #   1 m  → log2(2)/6  ≈ 0.167
+            #   10 m → log2(11)/6 ≈ 0.573
+            #   80 m → log2(81)/6 ≈ 1.055 → clipped to 1.0
+            depth_norm  = (torch.log2(depth.clamp(min=0.) + 1.) / 6.).clamp(0., 1.)
+            intens_norm = intens.clamp(0., 1.)
+            return torch.stack([depth_norm, intens_norm], dim=0)   # [2, H, W]
 
-        return (feat - self.mean[:, None, None]) / self.std[:, None, None]
+        if self.five_channel:
+            xyz  = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)  # [3,H,W]
+            feat = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0)], 0)  # [5,H,W]
+        else:
+            feat = torch.stack([depth, intens], dim=0)              # [2, H, W]
+
+        return (feat - self.mean[:feat.shape[0], None, None]) / self.std[:feat.shape[0], None, None]
 
     # ── Dataset interface ──────────────────────────────────────────────────────
 

@@ -125,28 +125,40 @@ class RangeViewProjection:
 
 def make_valid_mask(
     features: torch.Tensor,
-    range_mean: float,
-    range_std: float,
+    range_mean: float = 0.,
+    range_std: float = 1.,
     min_range: float = 0.5,
+    log_range: bool = False,
 ) -> torch.Tensor:
     """Return a boolean mask for pixels that contain a real LiDAR return.
 
-    During projection empty pixels are filled with range = -1.  After
-    normalisation the range channel for an empty pixel is approximately
-    ``(-1 - mean) / std``.  We recover validity by checking that the
-    *unnormalised* range exceeds ``min_range`` metres.
+    Supports two normalisation modes:
+
+    log_range=False (mean/std):
+        During projection empty pixels are filled with range = -1.  After
+        normalisation the range channel for an empty pixel is approximately
+        ``(-1 - mean) / std``.  We recover validity by checking that the
+        *unnormalised* range exceeds ``min_range`` metres.
+
+    log_range=True (log2 normalisation):
+        Empty pixels clamp to 0 before log → normalised value = 0.
+        Valid pixels satisfy ``2^(feat*6) - 1 > min_range``.
 
     Args:
         features:   ``[..., L, C]`` normalised range-view features
                     (range channel at index 0).
-        range_mean: per-channel mean for the range channel.
-        range_std:  per-channel std  for the range channel.
+        range_mean: per-channel mean for the range channel (mean/std mode only).
+        range_std:  per-channel std  for the range channel (mean/std mode only).
         min_range:  minimum valid depth (metres); default 0.5 m.
+        log_range:  if True, use log2 inverse; otherwise use mean/std inverse.
 
     Returns:
         ``[..., L]`` bool tensor, True where the pixel is valid.
     """
-    range_unnorm = features[..., 0] * range_std + range_mean
+    if log_range:
+        range_unnorm = torch.exp2(features[..., 0] * 6.) - 1.
+    else:
+        range_unnorm = features[..., 0] * range_std + range_mean
     return range_unnorm > min_range
 
 

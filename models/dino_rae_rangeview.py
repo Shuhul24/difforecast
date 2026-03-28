@@ -248,6 +248,7 @@ class RangeViewRAE(nn.Module):
                                           [10.839, 0., 0., 0., 0.]))
         self.proj_img_stds = list(getattr(args, 'proj_img_stds',
                                           [9.314, 10., 10., 2., 1.]))
+        self.log_range     = bool(getattr(args, 'log_range', False))
 
         # Optional BEV perceptual loss (on range channel)
         self.bev_percep_weight = float(getattr(args, 'bev_perceptual_weight', 0.0))
@@ -283,9 +284,13 @@ class RangeViewRAE(nn.Module):
         loss_bev = torch.zeros(1, device=x.device)
 
         if self.bev_fn is not None:
-            mean0, std0 = self.proj_img_mean[0], self.proj_img_stds[0]
-            d_pred = rec[:,0] * std0 + mean0   # [B, H, W]
-            d_gt   = x[:,0]  * std0 + mean0    # [B, H, W]
+            if self.log_range:
+                d_pred = torch.exp2(rec[:,0] * 6.) - 1.   # [B, H, W]
+                d_gt   = torch.exp2(x[:,0]  * 6.) - 1.
+            else:
+                mean0, std0 = self.proj_img_mean[0], self.proj_img_stds[0]
+                d_pred = rec[:,0] * std0 + mean0           # [B, H, W]
+                d_gt   = x[:,0]  * std0 + mean0
             # valid mask: rec[:,0] is already the range channel [B,H,W],
             # so compare directly rather than using make_valid_mask (which
             # expects channel-last features and would index the W axis instead).
@@ -416,6 +421,7 @@ class RangeViewDINODiT(nn.Module):
         # ── Auxiliary loss config (mirrors RangeViewDiT) ────────────────────
         self.proj_img_mean          = list(getattr(args, 'proj_img_mean', [10.839,0.,0.,0.,0.]))
         self.proj_img_stds          = list(getattr(args, 'proj_img_stds', [9.314,10.,10.,2.,1.]))
+        self.log_range              = bool(getattr(args, 'log_range', False))
         self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
@@ -563,8 +569,11 @@ class RangeViewDINODiT(nn.Module):
             # Denormalise before decoder
             predict_decoded = self.decode_latents(predict_lats)   # [B,5,H,W]
             gt_img = features_gt[:, 0]                            # [B,5,H,W]
-            range_mean, range_std = self.proj_img_mean[0], self.proj_img_stds[0]
-            gt_unnorm  = gt_img[:, 0] * range_std + range_mean
+            if self.log_range:
+                gt_unnorm = torch.exp2(gt_img[:, 0] * 6.) - 1.
+            else:
+                range_mean, range_std = self.proj_img_mean[0], self.proj_img_stds[0]
+                gt_unnorm = gt_img[:, 0] * range_std + range_mean
             gt_valid   = gt_unnorm > 0.5
 
             if self.log_w_l1 is not None:
@@ -577,7 +586,10 @@ class RangeViewDINODiT(nn.Module):
                 diff_loss = diff_loss + self._uw(self.log_w_l1, z_l1)
 
             if self.log_w_chamfer is not None and step >= self.chamfer_start:
-                pd = (predict_decoded[:,0] * range_std + range_mean).reshape(B,-1)
+                if self.log_range:
+                    pd = (torch.exp2(predict_decoded[:,0] * 6.) - 1.).reshape(B,-1)
+                else:
+                    pd = (predict_decoded[:,0] * range_std + range_mean).reshape(B,-1)
                 gd = gt_unnorm.reshape(B,-1)
                 z_cd = batch_chamfer_distance(
                     pd, gd, pd > 0.5, gd > 0.5,
@@ -586,7 +598,10 @@ class RangeViewDINODiT(nn.Module):
                 diff_loss = diff_loss + self._uw(self.log_w_chamfer, z_cd)
 
             if self.log_w_bev is not None and self.bev_perceptual_fn is not None:
-                pd = (predict_decoded[:,0] * range_std + range_mean).reshape(B,-1)
+                if self.log_range:
+                    pd = (torch.exp2(predict_decoded[:,0] * 6.) - 1.).reshape(B,-1)
+                else:
+                    pd = (predict_decoded[:,0] * range_std + range_mean).reshape(B,-1)
                 gd = gt_unnorm.reshape(B,-1)
                 z_bev = self.bev_perceptual_fn(pd, gd, pd>0.5, gd>0.5) * t_sample.mean()
                 diff_loss = diff_loss + self._uw(self.log_w_bev, z_bev)
