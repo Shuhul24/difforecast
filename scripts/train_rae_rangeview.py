@@ -23,7 +23,7 @@ Usage:
       --config configs/rae_config_rangeview.py
 """
 
-import os, sys, math, time, random, logging, argparse
+import os, sys, math, time, random, logging, argparse, glob
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -184,6 +184,7 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
                 raw.save_model(args.save_model_path, step, rank=global_rank)
                 logger.info(f"[S1] Saved checkpoint at step {step}")
+                _delete_old_checkpoints(args.save_model_path, step)
 
     return step
 
@@ -279,8 +280,17 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
                 raw.save_model(args.save_model_path, step, rank=global_rank)
                 logger.info(f"[S2] Saved checkpoint at step {step}")
+                _delete_old_checkpoints(args.save_model_path, step)
 
     return step
+
+
+def _delete_old_checkpoints(save_dir, current_step):
+    """Delete all rae_stepXXXX.pkl files except the one just saved."""
+    for f in glob.glob(os.path.join(save_dir, 'rae_step*.pkl')):
+        if f != os.path.join(save_dir, f'rae_step{current_step}.pkl'):
+            os.remove(f)
+            logger.info(f"Deleted old checkpoint: {f}")
 
 
 def _save_vis_stage1(step, args, x, x_rec):
