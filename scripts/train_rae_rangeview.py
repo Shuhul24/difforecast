@@ -134,6 +134,7 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
     """Train RAE (ViT-XL decoder) using per-channel L1 + BEV perceptual loss."""
     model_engine.train()
     time_stamp = time.time()
+    steps_per_epoch = len(loader)
 
     for epoch in range(99999):
         for batch in loader:
@@ -160,11 +161,12 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
                 scheduler.step()
 
             step += 1
+            epoch_frac = step / steps_per_epoch
             elapsed = time.time() - time_stamp; time_stamp = time.time()
 
             if step % 50 == 0 and global_rank == 0:
                 lr = model_engine.get_lr()[0]
-                msg = (f"[S1] step={step} | loss={loss.item():.4f} | "
+                msg = (f"[S1] epoch={epoch_frac:.2f} | step={step} | loss={loss.item():.4f} | "
                        f"rec={out['loss_rec'].item():.4f} | "
                        f"bev={out['loss_bev'].item():.4f} | "
                        f"lr={lr:.2e} | {elapsed:.2f}s/step")
@@ -174,7 +176,8 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
                     args.writer.add_scalar('stage1/loss_rec', out['loss_rec'].item(), step)
                 if not getattr(args, 'no_wandb', False) and global_rank == 0:
                     wandb.log({'s1/loss': loss.item(), 's1/rec': out['loss_rec'].item(),
-                               's1/bev': out['loss_bev'].item(), 'step': step})
+                               's1/bev': out['loss_bev'].item(), 'step': step,
+                               'epoch': epoch_frac})
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0
                     and global_rank == 0 and out.get('x_rec') is not None):
