@@ -184,22 +184,22 @@ class _ViTLayer(nn.Module):
 
 
 class ViTXLDecoder(nn.Module):
-    """ViT-XL decoder: [B,256,384] → [B,5,64,2048].
+    """ViT-XL decoder: [B,256,384] → [B,out_ch,64,2048].
 
     Config (RAE ViTXL): 28 layers, hidden=1152, heads=16, FFN=4096.
-    Output: 5 channels (range, x, y, z, intensity) matching encoder input.
-    Each patch token reconstructs an 8×64 pixel region (2560 values).
+    Each patch token reconstructs an 8×64 pixel region.
+    out_ch matches the encoder input channels (2 or 5).
     """
     HIDDEN   = 1152
     N_HEADS  = 16
     FFN_DIM  = 4096
     N_LAYERS = 28
-    OUT_CH   = 5       # range, x, y, z, intensity
     PATCH_H, PATCH_W = 8, 64   # ConvStem patch_stride
 
-    def __init__(self, enc_dim: int = DINO_EMBED_DIM):
+    def __init__(self, enc_dim: int = DINO_EMBED_DIM, out_ch: int = 5):
         super().__init__()
-        patch_px = self.OUT_CH * self.PATCH_H * self.PATCH_W   # 2560
+        self.OUT_CH  = out_ch
+        patch_px = self.OUT_CH * self.PATCH_H * self.PATCH_W
         self.embed   = nn.Linear(enc_dim, self.HIDDEN)
         self.pos_emb = nn.Parameter(torch.zeros(1, DINO_N_PATCHES, self.HIDDEN))
         nn.init.normal_(self.pos_emb, std=0.02)
@@ -210,16 +210,16 @@ class ViTXLDecoder(nn.Module):
         self.pred = nn.Linear(self.HIDDEN, patch_px)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: [B,256,384] → [B,5,64,2048]."""
+        """z: [B,256,384] → [B,out_ch,64,2048]."""
         x = self.embed(z) + self.pos_emb                 # [B,256,1152]
         for blk in self.blocks:
             x = blk(x)
-        x = self.pred(self.norm(x))                      # [B,256,2560]
+        x = self.pred(self.norm(x))                      # [B,256,out_ch*8*64]
         B = x.shape[0]
         x = x.reshape(B, DINO_GRID_H, DINO_GRID_W, self.OUT_CH, self.PATCH_H, self.PATCH_W)
         return x.permute(0,3,1,4,2,5).reshape(
             B, self.OUT_CH, DINO_GRID_H*self.PATCH_H, DINO_GRID_W*self.PATCH_W
-        )   # [B,5,64,2048]
+        )   # [B,out_ch,64,2048]
 
 
 # ── Stage 1: RAE ────────────────────────────────────────────────────────────
@@ -236,11 +236,12 @@ class RangeViewRAE(nn.Module):
 
     def __init__(self, args, local_rank=-1):
         super().__init__()
+        n_ch = int(getattr(args, 'range_channels', 5))
         self.encoder = RangeViewDINOv2Encoder(
-            in_channels=int(getattr(args, 'range_channels', 5)),
+            in_channels=n_ch,
             pretrained_path=getattr(args, 'dino_pretrained_path', None),
         )
-        self.decoder = ViTXLDecoder(enc_dim=DINO_EMBED_DIM)
+        self.decoder = ViTXLDecoder(enc_dim=DINO_EMBED_DIM, out_ch=n_ch)
         ch_w = list(getattr(args, 'rae_ch_weights', self.DEFAULT_CH_WEIGHTS))
         self.register_buffer('ch_weights', torch.tensor(ch_w, dtype=torch.float32))
 
@@ -271,11 +272,11 @@ class RangeViewRAE(nn.Module):
         else:
             self.bev_fn = None; self.log_w_bev = None
 
-    def encode(self, x): return self.encoder(x)    # [B,5,H,W] → [B,256,384]
-    def decode(self, z): return self.decoder(z)    # [B,256,384] → [B,5,H,W]
+    def encode(self, x): return self.encoder(x)    # [B,C,H,W] → [B,256,384]
+    def decode(self, z): return self.decoder(z)    # [B,256,384] → [B,C,H,W]
 
     def forward(self, x: torch.Tensor):
-        """x: [B,5,64,2048] → reconstruction losses dict."""
+        """x: [B,C,64,2048] → reconstruction losses dict."""
         z   = self.encode(x)
         rec = self.decode(z)
 
