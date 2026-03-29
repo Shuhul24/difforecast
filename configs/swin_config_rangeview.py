@@ -1,0 +1,145 @@
+"""
+Configuration for TULIP-inspired Swin Transformer Range View Pipeline.
+
+Two-stage training:
+  Stage 1  train TULIPRangeEncoder + TULIPRangeDecoder (Swin RAE)
+  Stage 2  train STT + FluxDiT in Swin bottleneck latent space (forecasting)
+
+Key differences from rae_config_rangeview.py (DINOv2):
+  - No pretrained backbone; encoder trained from scratch with range-image priors
+  - Hierarchical Swin attention with circular padding (azimuth wrap-around)
+  - Berhu loss on range channel (better for sharp depth edges than plain L1)
+  - Bottleneck [B, 256, 384] identical to DINOv2 → STT/DiT configs unchanged
+  - swin_ckpt replaces rae_ckpt for Stage 2 init
+"""
+
+seed = 43
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+kitti_root           = '/DATA2/shuhul/kitti'
+kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'
+kitti_poses_path     = '/DATA2/shuhul/kitti/poses'
+
+train_sequences = [0, 1, 2, 3, 4, 5]
+val_sequences   = [6, 7]
+test_sequences  = [8, 9, 10]
+
+pc_extension = '.bin'
+pc_dtype     = 'float32'
+pc_reshape   = (-1, 4)
+
+# ── Range view projection ─────────────────────────────────────────────────────
+fov_up    =  3.0
+fov_down  = -25.0
+fov_left  = -180.0
+fov_right =  180.0
+range_h   = 64
+range_w   = 2048
+image_size = (64, 2048)
+
+# 2-channel (range + intensity); log2 normalisation for range channel.
+range_channels = 2
+five_channel   = False
+log_range      = True
+proj_img_mean  = [0.0, 0.0]
+proj_img_stds  = [1.0, 1.0]
+
+# ── Swin Transformer encoder / decoder ───────────────────────────────────────
+# Patch size (4, 8) on 64×2048 → initial grid (16, 256) = 4096 patches.
+# After 2 PatchMerging ops: (4, 64) = 256 tokens at dim=384 → [B, 256, 384].
+# This matches the DINOv2 latent shape exactly.
+swin_embed_dim   = 96
+swin_depths      = (2, 6, 2)      # blocks per stage (encoder & decoder symmetric)
+swin_num_heads   = (3, 6, 12)    # attention heads per stage
+swin_window_size = (4, 8)        # window height × width (asymmetric for range images)
+swin_mlp_ratio   = 4.0
+swin_drop_rate   = 0.0
+swin_attn_drop   = 0.0
+swin_drop_path   = 0.1           # stochastic depth max rate
+
+# ── Stage 1 RAE loss weights ──────────────────────────────────────────────────
+# ch 0 = range (Berhu loss, high weight), ch 1 = intensity (L1, low weight).
+rae_ch_weights = [40., 1.]
+
+# Stage 1 Swin-RAE checkpoint for Stage 2 init
+swin_ckpt = None    # e.g. 'outputs/swin_ckpt/swin-stage1/swin_rae_step50000.pkl'
+
+# ── Temporal configuration ────────────────────────────────────────────────────
+condition_frames = 5
+forward_iter     = 5
+block_size       = 1
+multifw_perstep  = 1
+
+# ── Augmentation ─────────────────────────────────────────────────────────────
+drop_feature = 0
+augmentation_config = {
+    'p_transx': 0.5, 'trans_xmin': -0.5, 'trans_xmax': 0.5,
+    'p_transy': 0.5, 'trans_ymin': -0.5, 'trans_ymax': 0.5,
+    'p_transz': 0.5, 'trans_zmin': -0.1, 'trans_zmax': 0.1,
+    'p_rot_roll':  0.5, 'rot_rollmin':  -5., 'rot_rollmax':  5.,
+    'p_rot_pitch': 0.5, 'rot_pitchmin': -5., 'rot_pitchmax': 5.,
+    'p_rot_yaw':   0.5, 'rot_yawmin':   -5., 'rot_yawmax':   5.,
+    'p_scale': 0.5, 'scale_min': 0.95, 'scale_max': 1.05,
+}
+
+# ── STT (identical to rae_config_rangeview.py) ────────────────────────────────
+n_layer = [6, 8, 8]
+n_head  = 8
+n_embd  = 1024
+
+# ── FluxDiT (identical; latent dim 384 is same as DINOv2) ────────────────────
+n_embd_dit     = 768
+n_head_dit     = 12
+axes_dim_dit   = [16, 16, 32]
+mlp_ratio_dit  = 4.0
+drop_path_rate = 0.1
+
+# ── Pose encoding ─────────────────────────────────────────────────────────────
+pose_x_vocab_size = 128
+pose_y_vocab_size = 128
+yaw_vocab_size    = 512
+pose_x_bound      = 50.
+pose_y_bound      = 10.
+yaw_bound         = 12.
+
+# ── Diffusion ─────────────────────────────────────────────────────────────────
+diffusion_model_type = 'flow'
+num_sampling_steps   = 100
+return_predict       = True
+latent_scale         = 1.0
+
+# ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
+range_view_loss_weight = 1.0
+chamfer_loss_weight    = 0.0     # enable after model stabilises
+chamfer_max_pts        = 2048
+chamfer_start          = 0
+bev_perceptual_weight  = 0.1
+bev_h, bev_w           = 256, 256
+bev_x_range            = 25.6
+bev_y_range            = 25.6
+
+# ── Training ──────────────────────────────────────────────────────────────────
+blr          = 1e-4
+warmup_steps = 2000
+weight_decay = 0.01
+num_workers  = 8
+distributed  = True
+
+# ── Output directories ────────────────────────────────────────────────────────
+outdir         = '/DATA2/shuhul/exp/swin_ckpt'
+logdir         = '/DATA2/shuhul/exp/swin_log'
+tdir           = '/DATA2/shuhul/exp/swin_tboard'
+validation_dir = '/DATA2/shuhul/exp/swin_validation'
+
+# ── Example usage ─────────────────────────────────────────────────────────────
+"""
+# Stage 1 — train Swin RAE
+torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py \
+    --stage 1 --batch_size 4 --exp_name swin-stage1 \
+    --config configs/swin_config_rangeview.py
+
+# Stage 2 — update swin_ckpt in config, then:
+torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py \
+    --stage 2 --batch_size 2 --exp_name swin-stage2 \
+    --config configs/swin_config_rangeview.py
+"""
