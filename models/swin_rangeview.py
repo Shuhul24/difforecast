@@ -1,25 +1,32 @@
 """
-TULIP-inspired Swin Transformer V2 encoder + decoder for range-view LiDAR images.
+TULIP-compatible Swin Transformer V1 encoder + decoder for range-view LiDAR images.
+
+Uses SwinV1 attention (learnable relative-position-bias table) to match the
+TULIP pre-trained KITTI checkpoint exactly, enabling weight transfer for all
+Swin blocks, PatchMerging, PatchExpanding, skip projections, and norms.
 
 Encoder: PatchEmbed(4×8, circular pad on azimuth)
-         → grid (16,256)  →  Stage-0 (2 blocks)  →  PatchMerging
-         → grid (8,128)   →  Stage-1 (6 blocks)  →  PatchMerging
-         → grid (4,64)    →  Stage-2 (2 blocks, bottleneck)
-         → flatten  →  [B, 256, 384]   ← same latent shape as DINOv2 pipeline
+         → grid (16,256)  →  Stage-0 (2 blocks)   →  PatchMerging
+         → grid (8,128)   →  Stage-1 (2 blocks)   →  PatchMerging
+         → grid (4,64)    →  Stage-2 (2 blocks)   →  PatchMerging
+         → grid (2,32)    →  Stage-3 (2 blocks, bottleneck)
+         → flatten  →  [B, 64, 768]
 
-Decoder: [B, 256, 384]  →  unflatten  →  Stage-0 (2 blocks)  →  PatchExpanding
-         → grid (8,128)  →  Stage-1 (6 blocks)  →  PatchExpanding
-         → grid (16,256) →  Stage-2 (2 blocks)
+Decoder: [B, 64, 768]
+         → Stage-0 (2 blocks, 2×32) → PatchExpanding → cat(skip-2) → Linear
+         → Stage-1 (2 blocks, 4×64) → PatchExpanding → cat(skip-1) → Linear
+         → Stage-2 (2 blocks, 8×128) → PatchExpanding → cat(skip-0) → Linear
+         → Stage-3 (2 blocks, 16×256)
          → AsymmetricExpand(4×8) + Conv2d  →  [B, C, 64, 2048]
 
-No skip connections: the bottleneck must encode all information, making it a clean
-latent for the DiT diffusion model in Stage 2.
-
-Key adaptations from TULIP (https://github.com/ethz-asl/TULIP):
-  - Circular padding on width axis (azimuth wrap-around)
-  - Asymmetric patch size (4×8) for the 1:32 aspect ratio of range images
-  - SwinV2 cosine attention + continuous relative position bias (MLP-based)
-  - Bottleneck latent [B,256,384] directly compatible with FluxDiT (same as DINOv2)
+Differences from TULIP kept intentional:
+  - 2-channel input (range + intensity) vs TULIP's 1-channel
+  - Asymmetric patch (4×8) on 64×2048 vs TULIP's (1×4) on 16×1024
+    → both produce the same initial token grid (16×256) and bottleneck (2×32)
+  - AsymmetricExpand final head vs TULIP's PixelShuffle (different task:
+    same-resolution reconstruction vs 4× upsampling)
+  All Swin block weights, merging/expanding, skip projections, and norms
+  are directly compatible with TULIP pre-trained weights.
 """
 
 import math
@@ -75,74 +82,55 @@ def _window_reverse(windows, wh, ww, H, W):
     return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
 
 
-# ── SwinV2 Window Attention (cosine similarity + continuous RPB) ──────────────
+# ── SwinV1 Window Attention (learnable relative-position-bias table) ──────────
 
-class _WindowAttnV2(nn.Module):
-    """Window multi-head self-attention (SwinV2 variant).
+class _WindowAttnV1(nn.Module):
+    """Window multi-head self-attention — SwinV1 variant.
 
-    Modifications from SwinV1:
-      - Cosine similarity attention with per-head learnable log temperature.
-      - Continuous relative position bias via a 2-layer MLP (log-spaced coords).
+    Uses a learnable relative-position-bias table of shape
+    [(2*wh-1)*(2*ww-1), num_heads], identical to the TULIP KITTI checkpoint.
+    With window (2, 8): table size = 3*15 = 45 entries  — exact match.
     """
     def __init__(self, dim, window_size, num_heads, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         wh, ww = window_size
-        N = wh * ww
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
 
-        # Per-head learnable temperature (log scale, clamped to [0, log(100)])
-        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones(num_heads, 1, 1)))
-
-        # Continuous relative position bias MLP: 2-d log-spaced coords → bias
-        self.cpb_mlp = nn.Sequential(
-            nn.Linear(2, 512, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, num_heads, bias=False),
+        # Learnable RPB table  [(2wh-1)*(2ww-1), num_heads]
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * wh - 1) * (2 * ww - 1), num_heads)
         )
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
-        # Log-spaced relative coordinate table [(2wh-1)*(2ww-1), 2]
-        rh = torch.arange(-(wh - 1), wh, dtype=torch.float32)
-        rw = torch.arange(-(ww - 1), ww, dtype=torch.float32)
-        rel = torch.stack(torch.meshgrid(rh, rw, indexing='ij'), dim=-1)  # [(2wh-1),(2ww-1),2]
-        norm = torch.tensor([max(wh - 1, 1), max(ww - 1, 1)], dtype=torch.float32)
-        rel = rel / norm * 8
-        rel = torch.sign(rel) * torch.log2(torch.abs(rel) + 1.0) / math.log2(9)
-        self.register_buffer('rel_coords', rel.view(-1, 2), persistent=False)
-
-        # Relative position index [N, N]
+        # Relative position index  [wh*ww, wh*ww]
         ch = torch.arange(wh); cw = torch.arange(ww)
         coords = torch.stack(torch.meshgrid(ch, cw, indexing='ij')).flatten(1)  # [2, N]
-        idx = coords[:, :, None] - coords[:, None, :]   # [2, N, N]
-        idx = idx.permute(1, 2, 0)
-        idx[:, :, 0] += wh - 1
-        idx[:, :, 1] += ww - 1
-        idx[:, :, 0] *= 2 * ww - 1
-        self.register_buffer('rel_idx', idx.sum(-1), persistent=False)  # [N, N]
+        rel = coords[:, :, None] - coords[:, None, :]   # [2, N, N]
+        rel = rel.permute(1, 2, 0)
+        rel[:, :, 0] += wh - 1
+        rel[:, :, 1] += ww - 1
+        rel[:, :, 0] *= 2 * ww - 1
+        self.register_buffer('relative_position_index', rel.sum(-1), persistent=False)
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=False)
-        self.q_bias = nn.Parameter(torch.zeros(dim))
-        self.v_bias = nn.Parameter(torch.zeros(dim))
+        self.qkv      = nn.Linear(dim, dim * 3, bias=True)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj      = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, mask=None):
         B_, N, C = x.shape
         Nh = self.num_heads
-        bias = torch.cat([self.q_bias, torch.zeros_like(self.v_bias), self.v_bias])
-        qkv = F.linear(x, self.qkv.weight, bias).view(B_, N, 3, Nh, C // Nh).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)  # each [B_, Nh, N, head_dim]
+        qkv = self.qkv(x).view(B_, N, 3, Nh, C // Nh).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
 
-        q = F.normalize(q, dim=-1)
-        k = F.normalize(k, dim=-1)
-        scale = torch.clamp(self.logit_scale, max=math.log(100.)).exp()
-        attn = (q @ k.transpose(-2, -1)) * scale  # [B_, Nh, N, N]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        # Continuous RPB
-        cpb = self.cpb_mlp(self.rel_coords)                 # [(2wh-1)*(2ww-1), Nh]
-        cpb = 16 * torch.sigmoid(cpb)
-        bias_mat = cpb[self.rel_idx.view(-1)].view(N, N, Nh).permute(2, 0, 1)  # [Nh, N, N]
-        attn = attn + bias_mat.unsqueeze(0)
+        # Relative position bias
+        rpb = self.relative_position_bias_table[self.relative_position_index.view(-1)]
+        rpb = rpb.view(N, N, Nh).permute(2, 0, 1)        # [Nh, N, N]
+        attn = attn + rpb.unsqueeze(0)
 
         if mask is not None:
             nW = mask.shape[0]
@@ -154,16 +142,19 @@ class _WindowAttnV2(nn.Module):
         return self.proj_drop(self.proj(x))
 
 
-# ── SwinV2 Transformer Block ──────────────────────────────────────────────────
+# ── Swin Transformer Block ────────────────────────────────────────────────────
 
-class SwinV2Block(nn.Module):
-    """Pre-LN SwinV2 block with window attention and SW-MSA option.
+class SwinBlock(nn.Module):
+    """Pre-LN Swin block with window attention (W-MSA) and SW-MSA option.
 
-    Handles asymmetric windows (wh, ww) and the degenerate case H == wh by
-    disabling vertical shifting (only horizontal shift remains useful).
+    Uses SwinV1 attention (_WindowAttnV1) to be weight-compatible with
+    TULIP pre-trained checkpoints.
+
+    Handles asymmetric windows (wh, ww) and the degenerate case H == wh
+    by disabling vertical shifting.
     """
     def __init__(self, dim, input_resolution, num_heads,
-                 window_size=(4, 8), shift_size=(0, 0),
+                 window_size=(2, 8), shift_size=(0, 0),
                  mlp_ratio=4., drop=0., attn_drop=0., drop_path=0.):
         super().__init__()
         H, W = input_resolution
@@ -171,17 +162,16 @@ class SwinV2Block(nn.Module):
         ww = min(window_size[1], W)
         self.window_size = (wh, ww)
         self.input_resolution = input_resolution
-        # Disable vertical shift when H == wh (only 1 window row)
         sh = shift_size[0] if H > wh else 0
         sw = shift_size[1] if W > ww else 0
         self.shift_size = (sh, sw)
 
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = _WindowAttnV2(dim, self.window_size, num_heads,
-                                   attn_drop=attn_drop, proj_drop=drop)
-        self.dp = _DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.attn  = _WindowAttnV1(dim, self.window_size, num_heads,
+                                    attn_drop=attn_drop, proj_drop=drop)
+        self.dp    = _DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = nn.LayerNorm(dim)
-        self.mlp = _Mlp(dim, int(dim * mlp_ratio), drop=drop)
+        self.mlp   = _Mlp(dim, int(dim * mlp_ratio), drop=drop)
 
         # Precompute SW-MSA attention mask
         if sh > 0 or sw > 0:
@@ -191,8 +181,7 @@ class SwinV2Block(nn.Module):
                 for w in (slice(0, -ww), slice(-ww, -sw), slice(-sw, None)):
                     img_mask[:, h, w, :] = cnt
                     cnt += 1
-            mask_win = _window_partition(img_mask.float(), wh, ww)  # [nW, wh*ww, 1]
-            mask_win = mask_win.squeeze(-1)                          # [nW, wh*ww]
+            mask_win = _window_partition(img_mask.float(), wh, ww).squeeze(-1)
             attn_mask = mask_win.unsqueeze(1) - mask_win.unsqueeze(2)
             attn_mask = attn_mask.masked_fill(attn_mask != 0, -100.).masked_fill(attn_mask == 0, 0.)
         else:
@@ -208,10 +197,10 @@ class SwinV2Block(nn.Module):
         if self.shift_size[0] > 0 or self.shift_size[1] > 0:
             x2d = torch.roll(x2d, shifts=(-self.shift_size[0], -self.shift_size[1]), dims=(1, 2))
 
-        x_win = _window_partition(x2d, *self.window_size)     # [B*nW, wh*ww, C]
+        x_win = _window_partition(x2d, *self.window_size)
         x_win = x_win + self.dp(self.attn(self.norm1(x_win), mask=self.attn_mask))
         x_win = x_win + self.dp(self.mlp(self.norm2(x_win)))
-        x2d = _window_reverse(x_win, *self.window_size, H, W) # [B, H, W, C]
+        x2d = _window_reverse(x_win, *self.window_size, H, W)
 
         if self.shift_size[0] > 0 or self.shift_size[1] > 0:
             x2d = torch.roll(x2d, shifts=(self.shift_size[0], self.shift_size[1]), dims=(1, 2))
@@ -226,6 +215,9 @@ class SwinPatchEmbed(nn.Module):
 
     Uses a conv with kernel (Ph, Pw+4) after circular-padding 2 pixels each side
     on the width (azimuth) dimension — mirrors TULIP's circular_padding mode.
+
+    With patch (4,8) on 64×2048: produces the same (16,256) grid as TULIP's
+    patch (1,4) on 16×1024, so all downstream Swin weights are compatible.
     """
     def __init__(self, img_size=(64, 2048), patch_size=(4, 8), in_chans=2, embed_dim=96):
         super().__init__()
@@ -238,17 +230,17 @@ class SwinPatchEmbed(nn.Module):
     def forward(self, x):
         """[B, C, H, W] → [B, Hp*Wp, embed_dim]"""
         x = F.pad(x, (2, 2, 0, 0), mode='circular')
-        x = self.proj(x)                     # [B, embed_dim, Hp, Wp]
+        x = self.proj(x)
         B, C, Hp, Wp = x.shape
         x = x.permute(0, 2, 3, 1).contiguous().view(B, Hp * Wp, C)
         return self.norm(x)
 
 
 class _PatchMerging(nn.Module):
-    """2× spatial downsample, 2× channel expansion (SwinV2 style with pre-norm)."""
+    """2× spatial downsample, 2× channel expansion (SwinV1 style with pre-norm)."""
     def __init__(self, dim):
         super().__init__()
-        self.norm = nn.LayerNorm(4 * dim)
+        self.norm      = nn.LayerNorm(4 * dim)
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
 
     def forward(self, x, H, W):
@@ -256,44 +248,45 @@ class _PatchMerging(nn.Module):
         B, _, C = x.shape
         x = x.view(B, H, W, C)
         x = torch.cat([x[:, 0::2, 0::2], x[:, 1::2, 0::2],
-                        x[:, 0::2, 1::2], x[:, 1::2, 1::2]], dim=-1)   # [B,H/2,W/2,4C]
+                        x[:, 0::2, 1::2], x[:, 1::2, 1::2]], dim=-1)
         x = x.view(B, (H // 2) * (W // 2), 4 * C)
         return self.reduction(self.norm(x))
 
 
 class _PatchExpanding(nn.Module):
-    """2× spatial upsample, halve channels (used in decoder)."""
+    """2× spatial upsample, halve channels (used in decoder).
+
+    Weight-compatible with TULIP's PatchUnmerging Conv2d(dim, 2*dim, 1×1):
+    our Linear(dim, 2*dim) weight [2C, C] = Conv2d weight [2C, C, 1, 1].squeeze().
+    """
     def __init__(self, dim):
         super().__init__()
         self.expand = nn.Linear(dim, 2 * dim, bias=False)
-        self.norm = nn.LayerNorm(dim // 2)
+        self.norm   = nn.LayerNorm(dim // 2)
 
     def forward(self, x, H, W):
         """[B, H*W, C] → [B, (2H)*(2W), C//2]"""
         B = x.shape[0]
-        x = self.expand(x)                         # [B, H*W, 2C]
+        x = self.expand(x)
         x = x.view(B, H, W, -1)
         x = rearrange(x, 'B H W (P1 P2 C) -> B (H P1) (W P2) C', P1=2, P2=2)
         return self.norm(x.view(B, (H * 2) * (W * 2), -1))
 
 
 class _AsymmetricExpand(nn.Module):
-    """Final expand: patch grid → pixel space with asymmetric (Ph, Pw) patch size.
-
-    Goes from [B, Hp*Wp, C] to [B, (Hp*Ph)*(Wp*Pw), C], then conv to output channels.
-    """
+    """Final expand: patch grid → pixel space with asymmetric (Ph, Pw) patch size."""
     def __init__(self, dim, patch_h, patch_w, out_chans):
         super().__init__()
         self.ph, self.pw = patch_h, patch_w
         self.expand = nn.Linear(dim, patch_h * patch_w * dim, bias=False)
-        self.norm = nn.LayerNorm(dim)
-        self.pred = nn.Conv2d(dim, out_chans, kernel_size=1, bias=True)
+        self.norm   = nn.LayerNorm(dim)
+        self.pred   = nn.Conv2d(dim, out_chans, kernel_size=1, bias=True)
 
     def forward(self, x, Hp, Wp):
         """[B, Hp*Wp, C] → [B, out_chans, Hp*Ph, Wp*Pw]"""
         B = x.shape[0]
         ph, pw = self.ph, self.pw
-        x = self.expand(x)                                    # [B, Hp*Wp, ph*pw*C]
+        x = self.expand(x)
         x = x.view(B, Hp, Wp, -1)
         x = rearrange(x, 'B H W (Ph Pw C) -> B (H Ph) (W Pw) C', Ph=ph, Pw=pw)
         x = self.norm(x.view(B, Hp * ph * Wp * pw, -1))
@@ -310,40 +303,44 @@ def _stoch_depth_rates(total_depth, drop_path_rate):
 # ── Encoder ───────────────────────────────────────────────────────────────────
 
 class TULIPRangeEncoder(nn.Module):
-    """Hierarchical Swin encoder for range-view LiDAR images.
+    """4-stage Swin encoder for range-view LiDAR images.
 
-    Produces [B, 256, 384] latents — same shape as the DINOv2 encoder in
-    dino_rae_rangeview.py — so Stage-2 DiT/STT configs are reused unchanged.
+    Produces [B, 64, 768] latents.  All Swin block weights (qkv, proj, mlp,
+    norms, RPB tables) and PatchMerging weights are directly compatible with
+    the TULIP KITTI pre-trained checkpoint.
 
     Spatial flow:
       [B, C, 64, 2048]
         → PatchEmbed(4×8, circular)   [B, 4096, 96]    grid (16,256)
-        → Stage 0 (2 SwinV2 blocks)
-        → PatchMerging               [B, 1024, 192]   grid (8,128)
-        → Stage 1 (6 SwinV2 blocks)
-        → PatchMerging               [B, 256,  384]   grid (4,64)
-        → Stage 2 (2 SwinV2 blocks, bottleneck)
-        → LayerNorm                  [B, 256,  384]
+        → Stage 0 (2 blocks)
+        → PatchMerging                [B, 1024, 192]   grid (8,128)   ← skip-0
+        → Stage 1 (2 blocks)
+        → PatchMerging                [B, 256,  384]   grid (4,64)    ← skip-1
+        → Stage 2 (2 blocks)
+        → PatchMerging                [B, 64,   768]   grid (2,32)    ← skip-2
+        → Stage 3 (2 blocks, bottleneck)
+        → LayerNorm                   [B, 64,   768]
+
+    Returns (z, skips) where skips = [feat_s0, feat_s1, feat_s2].
     """
-    # Constants exposed so Stage-2 code can query them
-    GRID_BOTTLENECK = (4, 64)        # (H, W) at bottleneck
-    LATENT_TOKENS   = 256            # 4*64
-    LATENT_DIM      = 384            # embed_dim * 4
+    GRID_BOTTLENECK = (2, 32)
+    LATENT_TOKENS   = 64
+    LATENT_DIM      = 768
 
     def __init__(
         self,
         in_chans       = 2,
         embed_dim      = 96,
-        depths         = (2, 6, 2),
-        num_heads      = (3, 6, 12),
-        window_size    = (4, 8),
+        depths         = (2, 2, 2, 2),
+        num_heads      = (3, 6, 12, 24),
+        window_size    = (2, 8),
         mlp_ratio      = 4.,
         drop_rate      = 0.,
         attn_drop_rate = 0.,
         drop_path_rate = 0.1,
     ):
         super().__init__()
-        assert len(depths) == len(num_heads) == 3
+        assert len(depths) == len(num_heads) == 4
         self.embed_dim = embed_dim
 
         self.patch_embed = SwinPatchEmbed(
@@ -352,23 +349,22 @@ class TULIPRangeEncoder(nn.Module):
         )
         self.pos_drop = nn.Dropout(drop_rate)
 
-        # Stochastic depth schedule shared across all blocks
         dpr = _stoch_depth_rates(sum(depths), drop_path_rate)
         dpr_idx = 0
 
-        self.stages  = nn.ModuleList()
-        self.merges  = nn.ModuleList()
-        grids = [(16, 256), (8, 128), (4, 64)]
-        dims  = [embed_dim, embed_dim * 2, embed_dim * 4]
+        self.stages = nn.ModuleList()
+        self.merges = nn.ModuleList()
+        grids = [(16, 256), (8, 128), (4, 64), (2, 32)]
+        dims  = [embed_dim, embed_dim * 2, embed_dim * 4, embed_dim * 8]
 
-        for s in range(3):
+        for s in range(4):
             H_s, W_s = grids[s]
             d_s = dims[s]
             blocks = nn.ModuleList()
             for i in range(depths[s]):
                 sh = window_size[0] // 2 if i % 2 == 1 else 0
                 sw = window_size[1] // 2 if i % 2 == 1 else 0
-                blocks.append(SwinV2Block(
+                blocks.append(SwinBlock(
                     dim=d_s, input_resolution=(H_s, W_s),
                     num_heads=num_heads[s], window_size=window_size,
                     shift_size=(sh, sw), mlp_ratio=mlp_ratio,
@@ -377,78 +373,79 @@ class TULIPRangeEncoder(nn.Module):
                 ))
                 dpr_idx += 1
             self.stages.append(blocks)
-            if s < 2:
+            if s < 3:
                 self.merges.append(_PatchMerging(d_s))
 
-        self.norm = nn.LayerNorm(dims[2])
+        self.norm = nn.LayerNorm(dims[3])
 
     def forward(self, x):
-        """[B, C, 64, 2048] → [B, 256, 384]"""
-        x = self.pos_drop(self.patch_embed(x))   # [B, 4096, 96]
+        """[B, C, 64, 2048] → (z [B, 64, 768], skips: list of 3)"""
+        x = self.pos_drop(self.patch_embed(x))
 
         H, W = 16, 256
+        skips = []
         for s, blocks in enumerate(self.stages):
             for blk in blocks:
                 x = blk(x)
-            if s < 2:
+            if s < 3:
+                skips.append(x)
                 x = self.merges[s](x, H, W)
                 H, W = H // 2, W // 2
 
-        return self.norm(x)   # [B, 256, 384]
+        return self.norm(x), skips
 
 
 # ── Decoder ───────────────────────────────────────────────────────────────────
 
 class TULIPRangeDecoder(nn.Module):
-    """Hierarchical Swin decoder for range-view LiDAR images.
+    """4-stage Swin decoder with skip connections (TULIP U-Net style).
 
-    Symmetric to TULIPRangeEncoder; no skip connections so it operates entirely
-    from the [B, 256, 384] DiT-predicted latent, which already encodes temporal
-    context from Stage-2 conditioning.
+    All Swin block weights, PatchExpanding weights (Linear ≡ Conv2d 1×1),
+    skip projection weights, and the final norm are directly compatible with
+    the TULIP KITTI pre-trained checkpoint.
 
     Spatial flow:
-      [B, 256, 384]
-        → Stage 0 (2 SwinV2 blocks)  [B, 256, 384]   grid (4,64)
-        → PatchExpanding             [B, 1024, 192]   grid (8,128)
-        → Stage 1 (6 SwinV2 blocks)  [B, 1024, 192]
-        → PatchExpanding             [B, 4096, 96]    grid (16,256)
-        → Stage 2 (2 SwinV2 blocks)  [B, 4096, 96]
-        → AsymmetricExpand(4×8)      [B, out_chans, 64, 2048]
+      [B, 64, 768]
+        → Stage 0 (2 blocks, 2×32) → PatchExpanding → cat(skip-2) → Linear
+        → Stage 1 (2 blocks, 4×64) → PatchExpanding → cat(skip-1) → Linear
+        → Stage 2 (2 blocks, 8×128) → PatchExpanding → cat(skip-0) → Linear
+        → Stage 3 (2 blocks, 16×256)
+        → LayerNorm → AsymmetricExpand(4×8) → [B, out_chans, 64, 2048]
     """
     def __init__(
         self,
         out_chans      = 2,
         embed_dim      = 96,
-        depths         = (2, 6, 2),
-        num_heads      = (3, 6, 12),
-        window_size    = (4, 8),
+        depths         = (2, 2, 2, 2),
+        num_heads      = (3, 6, 12, 24),
+        window_size    = (2, 8),
         mlp_ratio      = 4.,
         drop_rate      = 0.,
         attn_drop_rate = 0.,
         drop_path_rate = 0.1,
     ):
         super().__init__()
-        assert len(depths) == len(num_heads) == 3
-        # Decoder mirrors encoder: bottleneck first, finest last
+        assert len(depths) == len(num_heads) == 4
         dec_depths = depths[::-1]
         dec_heads  = num_heads[::-1]
-        grids = [(4, 64), (8, 128), (16, 256)]
-        dims  = [embed_dim * 4, embed_dim * 2, embed_dim]
+        grids = [(2, 32), (4, 64), (8, 128), (16, 256)]
+        dims  = [embed_dim * 8, embed_dim * 4, embed_dim * 2, embed_dim]
 
         dpr = _stoch_depth_rates(sum(dec_depths), drop_path_rate)
         dpr_idx = 0
 
-        self.stages  = nn.ModuleList()
-        self.expands = nn.ModuleList()
+        self.stages     = nn.ModuleList()
+        self.expands    = nn.ModuleList()
+        self.skip_projs = nn.ModuleList()
 
-        for s in range(3):
+        for s in range(4):
             H_s, W_s = grids[s]
             d_s = dims[s]
             blocks = nn.ModuleList()
             for i in range(dec_depths[s]):
                 sh = window_size[0] // 2 if i % 2 == 1 else 0
                 sw = window_size[1] // 2 if i % 2 == 1 else 0
-                blocks.append(SwinV2Block(
+                blocks.append(SwinBlock(
                     dim=d_s, input_resolution=(H_s, W_s),
                     num_heads=dec_heads[s], window_size=window_size,
                     shift_size=(sh, sw), mlp_ratio=mlp_ratio,
@@ -457,28 +454,33 @@ class TULIPRangeDecoder(nn.Module):
                 ))
                 dpr_idx += 1
             self.stages.append(blocks)
-            if s < 2:
+            if s < 3:
                 self.expands.append(_PatchExpanding(d_s))
+                self.skip_projs.append(nn.Linear(d_s, d_s // 2, bias=True))
 
-        self.norm = nn.LayerNorm(embed_dim)
-        self.final_expand = _AsymmetricExpand(embed_dim, patch_h=4, patch_w=8, out_chans=out_chans)
+        self.norm         = nn.LayerNorm(dims[3])
+        self.final_expand = _AsymmetricExpand(dims[3], patch_h=4, patch_w=8, out_chans=out_chans)
 
-    def forward(self, z):
-        """[B, 256, 384] → [B, out_chans, 64, 2048]"""
+    def forward(self, z, skips=None):
+        """z: [B,64,768], skips: list of 3 or None → [B, out_chans, 64, 2048]"""
         x = z
-        H, W = 4, 64
+        H, W = 2, 32
         for s, blocks in enumerate(self.stages):
             for blk in blocks:
                 x = blk(x)
-            if s < 2:
+            if s < 3:
                 x = self.expands[s](x, H, W)
                 H, W = H * 2, W * 2
+                if skips is not None:
+                    x = self.skip_projs[s](
+                        torch.cat([x, skips[2 - s]], dim=-1)
+                    )
 
-        x = self.norm(x)                      # [B, 4096, 96]
-        return self.final_expand(x, H, W)     # [B, out_chans, 64, 2048]
+        x = self.norm(x)
+        return self.final_expand(x, H, W)
 
 
-# ── Weight initialisation (from TULIP / Swin paper) ──────────────────────────
+# ── Weight initialisation ─────────────────────────────────────────────────────
 
 def _init_weights(m):
     if isinstance(m, nn.Linear):

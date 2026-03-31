@@ -2,15 +2,17 @@
 Configuration for TULIP-inspired Swin Transformer Range View Pipeline.
 
 Two-stage training:
-  Stage 1  train TULIPRangeEncoder + TULIPRangeDecoder (Swin RAE)
-  Stage 2  train STT + FluxDiT in Swin bottleneck latent space (forecasting)
+  Stage 1  train TULIPRangeEncoder + TULIPRangeDecoder (Swin RAE, with skip connections)
+  Stage 2  train STT + FluxDiT in TULIP 4-stage Swin bottleneck latent space (forecasting)
 
-Key differences from rae_config_rangeview.py (DINOv2):
+Architecture:
+  - 4-stage hierarchical Swin encoder/decoder matching TULIP-base (depths 2-6-2-2)
+  - Bottleneck: [B, 64, 768] — grid (2×32), embed_dim×8
+  - Skip connections in decoder (U-Net style, as in TULIP)
   - No pretrained backbone; encoder trained from scratch with range-image priors
-  - Hierarchical Swin attention with circular padding (azimuth wrap-around)
+  - Circular padding on azimuth axis (azimuth wrap-around, from TULIP)
   - Berhu loss on range channel (better for sharp depth edges than plain L1)
-  - Bottleneck [B, 256, 384] identical to DINOv2 → STT/DiT configs unchanged
-  - swin_ckpt replaces rae_ckpt for Stage 2 init
+  - swin_ckpt used for Stage 2 init (Stage 1 checkpoint)
 """
 
 seed = 43
@@ -46,16 +48,17 @@ proj_img_stds  = [1.0, 1.0]
 
 # ── Swin Transformer encoder / decoder ───────────────────────────────────────
 # Patch size (4, 8) on 64×2048 → initial grid (16, 256) = 4096 patches.
-# After 2 PatchMerging ops: (4, 64) = 256 tokens at dim=384 → [B, 256, 384].
-# This matches the DINOv2 latent shape exactly.
+# After 3 PatchMerging ops: (2, 32) = 64 tokens at dim=768 → [B, 64, 768].
+# Matches TULIP-KITTI checkpoint exactly: depths (2,2,2,2), window (2,8).
+# RPB table shape: (2*2-1)*(2*8-1) = 3*15 = 45 entries per head.
 swin_embed_dim   = 96
-swin_depths      = (2, 6, 2)      # blocks per stage (encoder & decoder symmetric)
-swin_num_heads   = (3, 6, 12)    # attention heads per stage
-swin_window_size = (4, 8)        # window height × width (asymmetric for range images)
+swin_depths      = (2, 2, 2, 2)       # matches TULIP-KITTI checkpoint (uniform 2-block stages)
+swin_num_heads   = (3, 6, 12, 24)    # attention heads per stage
+swin_window_size = (2, 8)             # matches TULIP-KITTI: RPB table [45, heads]
 swin_mlp_ratio   = 4.0
 swin_drop_rate   = 0.0
 swin_attn_drop   = 0.0
-swin_drop_path   = 0.1           # stochastic depth max rate
+swin_drop_path   = 0.1                # stochastic depth max rate
 
 # ── Stage 1 RAE loss weights ──────────────────────────────────────────────────
 # ch 0 = range (Berhu loss, high weight), ch 1 = intensity (L1, low weight).
@@ -113,7 +116,7 @@ range_view_loss_weight = 1.0
 chamfer_loss_weight    = 0.0     # enable after model stabilises
 chamfer_max_pts        = 2048
 chamfer_start          = 0
-bev_perceptual_weight  = 0.1
+bev_perceptual_weight  = 0.0     # disabled for Stage 1; re-enable (e.g. 0.1) for Stage 2 if desired
 bev_h, bev_w           = 256, 256
 bev_x_range            = 25.6
 bev_y_range            = 25.6

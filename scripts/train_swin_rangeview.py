@@ -8,7 +8,8 @@ Stage 1  --stage 1
 
 Stage 2  --stage 2
   Train STT + FluxDiT with frozen Swin encoder and decoder.
-  Rectified-flow diffusion in Swin bottleneck latent space [B, T, 256, 384].
+  Rectified-flow diffusion in TULIP 4-stage Swin bottleneck latent space [B, T, 64, 768].
+  Frozen decoder uses skip features from the last condition frame.
   Chain-of-forward autoregressive training (fw_iter AR steps per batch).
 
 Usage:

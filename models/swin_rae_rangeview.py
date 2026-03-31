@@ -2,21 +2,22 @@
 Swin-RAE Range View Models  (TULIP-inspired two-stage pipeline)
 
 Stage 1 – Reconstruction Autoencoder (RAE):
-  TULIPRangeEncoder  →  TULIPRangeDecoder
+  TULIPRangeEncoder  →  TULIPRangeDecoder (with skip connections)
   Input/output: [B, 2, 64, 2048]  (range log-normalised + intensity)
-  Latent:       [B, 256, 384]     (4×64 Swin bottleneck tokens)
+  Latent:       [B, 64, 768]      (2×32 Swin bottleneck, 4-stage TULIP design)
   Loss: Berhu on range channel + L1 on intensity + optional BEV perceptual
 
 Stage 2 – Latent Diffusion Transformer (forecasting):
   Frozen TULIPRangeEncoder → STT (temporal) → FluxDiT (flow matching)
-  → Frozen TULIPRangeDecoder
-  Latent space identical to DINOv2 pipeline → STT / FluxDiT configs reused.
-  Chain-of-forward autoregressive training preserved.
+  → Frozen TULIPRangeDecoder (with skip connections from last condition frame)
+  Latent space: [B, 64, 768] — TULIP 4-stage bottleneck.
 
 Key design:
-  - No skip connections → bottleneck [B,256,384] must encode all information
-  - Circular padding in encoder preserves azimuth wrap-around
-  - Berhu (inverse Huber) loss encourages sharp depth edges over plain L1
+  - 4-stage hierarchical Swin encoder/decoder matching TULIP-base
+  - Skip connections in decoder (U-Net style, as in TULIP)
+  - Berhu (inverse Huber) loss promotes sharp depth edges over plain L1
+  - For Stage 2 decoding, encoder skip features from the last condition
+    frame are fed into the frozen decoder as a structural scene prior
 """
 
 import math
@@ -44,7 +45,8 @@ def berhu_loss(pred, target, threshold_frac=0.2):
     """Berhu loss: L1 for small errors, L2-like for large errors.
 
     Adaptive threshold c = threshold_frac * max(|pred - target|).
-    Inspired by TULIP's evaluation metric (inverse_huber_loss in tulip/util/evaluation.py).
+    Mirrors TULIP's inverse_huber_loss but used here as a training objective
+    (TULIP only uses it for evaluation).
     """
     absdiff = (pred - target).abs()
     c = (threshold_frac * absdiff.detach().max()).clamp(min=1e-4)
@@ -54,7 +56,7 @@ def berhu_loss(pred, target, threshold_frac=0.2):
 # ── Stage 1: RangeViewSwinRAE ─────────────────────────────────────────────────
 
 class RangeViewSwinRAE(nn.Module):
-    """Stage 1: Swin encoder + Swin decoder (RAE pre-training).
+    """Stage 1: 4-stage Swin encoder + decoder with skip connections (RAE pre-training).
 
     Losses:
       - Berhu on range channel (ch 0): captures sharp depth discontinuities.
@@ -62,6 +64,7 @@ class RangeViewSwinRAE(nn.Module):
       - Optional BEV perceptual loss on the decoded range channel.
 
     Both encoder and decoder are trainable in Stage 1.
+    The decoder receives skip features from the encoder (U-Net style).
     """
 
     def __init__(self, args, local_rank=-1):
@@ -71,8 +74,8 @@ class RangeViewSwinRAE(nn.Module):
         enc_kw = dict(
             in_chans       = n_ch,
             embed_dim      = int(getattr(args, 'swin_embed_dim',      96)),
-            depths         = tuple(getattr(args, 'swin_depths',       (2, 6, 2))),
-            num_heads      = tuple(getattr(args, 'swin_num_heads',    (3, 6, 12))),
+            depths         = tuple(getattr(args, 'swin_depths',       (2, 6, 2, 2))),
+            num_heads      = tuple(getattr(args, 'swin_num_heads',    (3, 6, 12, 24))),
             window_size    = tuple(getattr(args, 'swin_window_size',  (4, 8))),
             mlp_ratio      = float(getattr(args, 'swin_mlp_ratio',    4.0)),
             drop_rate      = float(getattr(args, 'swin_drop_rate',    0.0)),
@@ -116,15 +119,17 @@ class RangeViewSwinRAE(nn.Module):
             self.log_w_bev = None
 
     def encode(self, x):
-        return self.encoder(x)   # [B, C, H, W] → [B, 256, 384]
+        """[B, C, H, W] → (z [B, 64, 768], skips: list of 3)"""
+        return self.encoder(x)
 
-    def decode(self, z):
-        return self.decoder(z)   # [B, 256, 384] → [B, C, H, W]
+    def decode(self, z, skips=None):
+        """(z [B, 64, 768], skips) → [B, C, H, W]"""
+        return self.decoder(z, skips)
 
     def forward(self, x):
         """x: [B, C, 64, 2048] → loss dict."""
-        z   = self.encode(x)
-        rec = self.decode(z)
+        z, skips = self.encode(x)
+        rec = self.decode(z, skips)
 
         # Berhu on range (ch 0), L1 on intensity (ch 1+)
         loss_range = berhu_loss(rec[:, 0], x[:, 0])
@@ -157,6 +162,114 @@ class RangeViewSwinRAE(nn.Module):
         return {'loss_all': loss_all, 'loss_rec': loss_rec,
                 'loss_bev': loss_bev, 'x_rec': rec}
 
+    def load_from_tulip(self, ckpt_path):
+        """Load TULIP-KITTI pre-trained weights into the encoder and decoder.
+
+        TULIP uses SwinV1 with depths=(2,2,2,2) and window=(2,8).  Our model
+        must match those settings for shapes to align (see swin_config_rangeview).
+
+        Incompatible keys are skipped with a note:
+          - patch_embed.proj  (TULIP: 1-ch; ours: 2-ch, different kernel)
+          - decoder_pred / ps_head  (TULIP output heads, no equivalent here)
+          - PatchExpand.expand.bias  (TULIP Conv2d has bias; our Linear does not)
+          - skip_connection_layers.*.bias  (same reason)
+          - encoder.norm  (final encoder LN; not present in TULIP)
+          - decoder.expands.*.norm  (extra LN in our PatchExpand; not in TULIP)
+          - decoder.final_expand  (our output head; not in TULIP)
+
+        Decoder stage 0 is initialised from TULIP's encoder stage 3 (bottleneck).
+        This is sound: both operate on [B, 64, 768] tokens.
+
+        Returns: {'loaded': [...], 'skipped': [...]}
+        """
+        raw = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        sd  = raw.get('model', raw)
+
+        own_sd  = {k: v.clone() for k, v in self.state_dict().items()}
+        new_sd  = {}
+        loaded, skipped = [], []
+
+        def _try(src_key, dst_key):
+            if src_key not in sd:
+                return
+            src = sd[src_key]
+            if dst_key not in own_sd:
+                skipped.append(f'SKIP {src_key} → {dst_key}  (dst missing)')
+                return
+            # Conv2d [Co, Ci, 1, 1] → Linear [Co, Ci]
+            if src.dim() == 4 and src.shape[2:] == (1, 1) and own_sd[dst_key].dim() == 2:
+                src = src.squeeze(-1).squeeze(-1)
+            if src.shape != own_sd[dst_key].shape:
+                skipped.append(f'SKIP {src_key} → {dst_key}  '
+                               f'({list(src.shape)} vs {list(own_sd[dst_key].shape)})')
+                return
+            new_sd[dst_key] = src
+            loaded.append(dst_key)
+
+        # ── Encoder stages 0-3 ────────────────────────────────────────────────
+        for s in range(4):
+            for b in range(2):
+                ps = f'layers.{s}.blocks.{b}.'
+                pd = f'encoder.stages.{s}.{b}.'
+                for k in own_sd:
+                    if k.startswith(pd):
+                        _try(ps + k[len(pd):], k)
+
+        # ── Encoder PatchMerging (stages 0-2) ─────────────────────────────────
+        for s in range(3):
+            ps = f'layers.{s}.downsample.'
+            pd = f'encoder.merges.{s}.'
+            for k in own_sd:
+                if k.startswith(pd):
+                    _try(ps + k[len(pd):], k)
+
+        # ── Encoder patch-embed norm ───────────────────────────────────────────
+        _try('patch_embed.norm.weight', 'encoder.patch_embed.norm.weight')
+        _try('patch_embed.norm.bias',   'encoder.patch_embed.norm.bias')
+
+        # ── Decoder stage 0  ← TULIP encoder stage 3 (bottleneck) ────────────
+        for b in range(2):
+            ps = f'layers.3.blocks.{b}.'
+            pd = f'decoder.stages.0.{b}.'
+            for k in own_sd:
+                if k.startswith(pd):
+                    _try(ps + k[len(pd):], k)
+
+        # ── Decoder stages 1-3  ← TULIP layers_up.0-2 ────────────────────────
+        for i in range(3):
+            for b in range(2):
+                ps = f'layers_up.{i}.blocks.{b}.'
+                pd = f'decoder.stages.{i+1}.{b}.'
+                for k in own_sd:
+                    if k.startswith(pd):
+                        _try(ps + k[len(pd):], k)
+
+        # ── Decoder PatchExpanding ────────────────────────────────────────────
+        _try('first_patch_expanding.expand.weight', 'decoder.expands.0.expand.weight')
+        for i in range(2):
+            _try(f'layers_up.{i}.upsample.expand.weight', f'decoder.expands.{i+1}.expand.weight')
+
+        # ── Skip-connection projections ───────────────────────────────────────
+        for i in range(3):
+            _try(f'skip_connection_layers.{i}.weight', f'decoder.skip_projs.{i}.weight')
+            _try(f'skip_connection_layers.{i}.bias',   f'decoder.skip_projs.{i}.bias')
+
+        # ── Final decoder norm ────────────────────────────────────────────────
+        _try('norm_up.weight', 'decoder.norm.weight')
+        _try('norm_up.bias',   'decoder.norm.bias')
+
+        own_sd.update(new_sd)
+        missing, unexpected = self.load_state_dict(own_sd, strict=False)
+
+        print(f'[load_from_tulip]  loaded {len(loaded)} tensors  '
+              f'skipped {len(skipped)}  missing {len(missing)}  '
+              f'unexpected {len(unexpected)}')
+        if skipped:
+            for msg in skipped:
+                print(f'  {msg}')
+        return {'loaded': loaded, 'skipped': skipped,
+                'missing': missing, 'unexpected': unexpected}
+
     def save_model(self, path, step, rank=0):
         if rank == 0:
             torch.save({'model_state_dict': self.state_dict(), 'step': step},
@@ -166,24 +279,24 @@ class RangeViewSwinRAE(nn.Module):
 # ── Stage 2: RangeViewSwinDiT ─────────────────────────────────────────────────
 
 class RangeViewSwinDiT(nn.Module):
-    """Stage 2: FluxDiT forecasting in Swin bottleneck latent space.
+    """Stage 2: FluxDiT forecasting in the TULIP 4-stage Swin bottleneck space.
 
-    Frozen TULIPRangeEncoder extracts [B, T, 256, 384] latents from past frames.
+    Frozen TULIPRangeEncoder extracts [B, T, 64, 768] latents from past frames.
     STT provides temporal context; FluxDiT (rectified flow) predicts the future
-    latent. Frozen TULIPRangeDecoder reconstructs the predicted range view.
+    latent. Frozen TULIPRangeDecoder (with skip connections from the last
+    condition frame's encoder) reconstructs the predicted range view.
 
-    The latent shape [B, 256, 384] is identical to the DINOv2 pipeline, so all
-    STT / FluxDiT hyperparameters carry over unchanged.
+    Latent shape: [B, 64, 768] — grid (2×32) at embed_dim×8=768.
     """
 
     def __init__(self, args, local_rank=-1, load_path=None):
         super().__init__()
         self.args = args
 
-        # Token geometry (matches dino_rae_rangeview.py constants)
-        self.h, self.w      = 4, 64              # bottleneck grid
-        self.img_token_size = 256                # 4*64
-        self.latent_dim     = 384                # embed_dim*4
+        # Token geometry — TULIP 4-stage bottleneck
+        self.h, self.w      = 2, 32              # bottleneck grid
+        self.img_token_size = 64                 # 2*32
+        self.latent_dim     = 768                # embed_dim*8
         self.condition_frames = int(getattr(args, 'condition_frames', 5))
 
         self.pose_token_size  = 2 * int(getattr(args, 'block_size', 1))
@@ -209,8 +322,8 @@ class RangeViewSwinDiT(nn.Module):
         enc_kw = dict(
             in_chans       = n_ch,
             embed_dim      = int(getattr(args, 'swin_embed_dim',      96)),
-            depths         = tuple(getattr(args, 'swin_depths',       (2, 6, 2))),
-            num_heads      = tuple(getattr(args, 'swin_num_heads',    (3, 6, 12))),
+            depths         = tuple(getattr(args, 'swin_depths',       (2, 6, 2, 2))),
+            num_heads      = tuple(getattr(args, 'swin_num_heads',    (3, 6, 12, 24))),
             window_size    = tuple(getattr(args, 'swin_window_size',  (4, 8))),
             mlp_ratio      = float(getattr(args, 'swin_mlp_ratio',    4.0)),
             drop_rate      = 0.,
@@ -238,7 +351,7 @@ class RangeViewSwinDiT(nn.Module):
         for p in self.decoder.parameters():
             p.requires_grad_(False)
 
-        # ── STT (same architecture; vae_emb_dim=384 instead of 256) ──────────
+        # ── STT (vae_emb_dim=768 for TULIP bottleneck) ───────────────────────
         self.model = SpatialTemporalTransformer(
             block_size=self.condition_frames * self.total_token_size,
             n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd,
@@ -249,16 +362,16 @@ class RangeViewSwinDiT(nn.Module):
             local_rank=local_rank,
             condition_frames=self.condition_frames,
             token_size_dict=tok_dict,
-            vae_emb_dim=self.latent_dim,          # 384
+            vae_emb_dim=self.latent_dim,          # 768
             temporal_block=int(getattr(args, 'block_size', 1)),
         )
         self.model.cuda()
 
-        # ── FluxDiT (in/out_channels=384) ────────────────────────────────────
+        # ── FluxDiT (in/out_channels=768 for TULIP bottleneck) ───────────────
         _pfx = self.total_token_size - self.img_token_size
         self.dit = FluxDiT(FluxParams(
-            in_channels=self.latent_dim,
-            out_channels=self.latent_dim,
+            in_channels=self.latent_dim,           # 768
+            out_channels=self.latent_dim,          # 768
             vec_in_dim=args.n_embd * _pfx,
             vec_hidden_dim=args.n_embd,
             context_in_dim=args.n_embd,
@@ -335,14 +448,35 @@ class RangeViewSwinDiT(nn.Module):
 
     @torch.no_grad()
     def encode_sequence(self, x):
-        """[B, T, C, H, W] → [B, T, 256, 384]"""
-        B, T, C, H, W = x.shape
-        z = self.swin_encoder(rearrange(x, 'b t c h w -> (b t) c h w'))
-        return rearrange(z, '(b t) n d -> b t n d', b=B, t=T)
+        """[B, T, C, H, W] → (latents [B, T, 64, 768], skips_per_frame)
 
-    def decode_latents(self, z):
-        """[B, 256, 384] → [B, C, 64, 2048]"""
-        return self.decoder(z * self.latent_scale)
+        skips_per_frame: list of 3 tensors, each [B, T, N, D]
+          skips_per_frame[0]: [B, T, 4096, 96]
+          skips_per_frame[1]: [B, T, 1024, 192]
+          skips_per_frame[2]: [B, T, 256,  384]
+        """
+        B, T, C, H, W = x.shape
+        z, sk = self.swin_encoder(rearrange(x, 'b t c h w -> (b t) c h w'))
+        latents = rearrange(z, '(b t) n d -> b t n d', b=B, t=T)
+        all_skips = []
+        for s in sk:
+            BT, N, D = s.shape
+            all_skips.append(s.view(B, T, N, D))
+        return latents, all_skips
+
+    @torch.no_grad()
+    def get_frame_skips(self, x_frame):
+        """Encode a single frame and return only its skip features.
+
+        x_frame: [B, C, H, W]
+        Returns: list of 3 tensors — skips[i] shape [B, N_i, D_i]
+        """
+        _, skips = self.swin_encoder(x_frame)
+        return skips
+
+    def decode_latents(self, z, skips=None):
+        """z: [B, 64, 768], skips: list of 3 or None → [B, C, 64, 2048]"""
+        return self.decoder(z * self.latent_scale, skips)
 
     # ── Training step ─────────────────────────────────────────────────────────
 
@@ -357,10 +491,14 @@ class RangeViewSwinDiT(nn.Module):
 
         with torch.no_grad():
             if latents_cond_precomputed is not None:
-                lat_gt  = self.encode_sequence(features_gt)
+                lat_gt, _ = self.encode_sequence(features_gt)
                 lat_all = torch.cat([latents_cond_precomputed, lat_gt], 1)
             else:
-                lat_all = self.encode_sequence(features_all)
+                lat_all, _ = self.encode_sequence(features_all)
+
+            # Skip features always come from the last condition frame
+            # (structural scene prior for the decoder of the predicted frame)
+            last_cond_skips = self.get_frame_skips(features[:, -1])
 
         lat_cond   = lat_all[:, :self.condition_frames]
         lat_target = lat_all[:,  self.condition_frames]
@@ -409,7 +547,7 @@ class RangeViewSwinDiT(nn.Module):
         predict_decoded = None
 
         if predict_lats is not None:
-            predict_decoded = self.decode_latents(predict_lats)
+            predict_decoded = self.decode_latents(predict_lats, last_cond_skips)
             gt_img = features_gt[:, 0]
 
             if self.log_range:
@@ -470,7 +608,10 @@ class RangeViewSwinDiT(nn.Module):
         Returns:  [B, C, H, W]
         """
         self.model.eval(); self.dit.eval()
-        lat = self.encode_sequence(features)
+        lat, all_skips = self.encode_sequence(features)
+        # Use last condition frame's skip features for the decoder
+        last_cond_skips = [s[:, -1] for s in all_skips]
+
         pose_idx = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size,
                                     x_range=float(self.pose_x_bound),
                                     y_range=float(self.pose_y_bound * 2))
@@ -485,7 +626,7 @@ class RangeViewSwinDiT(nn.Module):
         noise = torch.randn(B, self.img_token_size, self.latent_dim).to(stt_feat)
         steps = get_schedule(int(self.args.num_sampling_steps), self.img_token_size)
         pred_z = self.dit.sample(noise, img_ids, stt_feat, cond_ids, pose_emb, steps)
-        return self.decode_latents(pred_z)
+        return self.decode_latents(pred_z, last_cond_skips)
 
     def forward(self, features, rot_matrix, features_gt=None,
                 rel_pose_cond=None, rel_yaw_cond=None,
