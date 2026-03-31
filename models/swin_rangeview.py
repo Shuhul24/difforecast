@@ -142,20 +142,113 @@ class _WindowAttnV1(nn.Module):
         return self.proj_drop(self.proj(x))
 
 
+# ── SwinV2 Window Attention (cosine attention + continuous position bias) ──────
+
+class _WindowAttnV2(nn.Module):
+    """Window multi-head self-attention — SwinV2 variant.
+
+    Uses cosine attention with a learnable logit_scale, separate q_bias / v_bias
+    (k_bias stays zero), and a small MLP (cpb_mlp) that maps 2-D log-space
+    relative coordinates to per-head position biases.  Matches the parameter
+    layout produced by training with the TULIP V2 / SwinV2 backbone.
+
+    cpb_mlp layout: Linear(2→512, bias=True) → ReLU → Linear(512→num_heads, bias=False)
+    """
+    def __init__(self, dim, window_size, num_heads, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        wh, ww = window_size
+
+        # Cosine-attention temperature (one per head)
+        self.logit_scale = nn.Parameter(
+            torch.log(10 * torch.ones(num_heads, 1, 1))
+        )
+
+        # Continuous position bias MLP
+        self.cpb_mlp = nn.Sequential(
+            nn.Linear(2, 512, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, num_heads, bias=False),
+        )
+
+        # Log-space relative coordinate table  [1, (2wh-1), (2ww-1), 2]
+        rh = torch.arange(-(wh - 1), wh, dtype=torch.float32)
+        rw = torch.arange(-(ww - 1), ww, dtype=torch.float32)
+        table = torch.stack(torch.meshgrid(rh, rw, indexing='ij')).permute(1, 2, 0).unsqueeze(0)
+        table[..., 0] /= max(wh - 1, 1)
+        table[..., 1] /= max(ww - 1, 1)
+        table = table * 8
+        table = torch.sign(table) * torch.log2(table.abs() + 1.0) / math.log2(8)
+        self.register_buffer('relative_coords_table', table, persistent=False)
+
+        # Relative position index  [wh*ww, wh*ww]
+        ch = torch.arange(wh); cw = torch.arange(ww)
+        coords = torch.stack(torch.meshgrid(ch, cw, indexing='ij')).flatten(1)
+        rel = coords[:, :, None] - coords[:, None, :]
+        rel = rel.permute(1, 2, 0)
+        rel[:, :, 0] += wh - 1
+        rel[:, :, 1] += ww - 1
+        rel[:, :, 0] *= 2 * ww - 1
+        self.register_buffer('relative_position_index', rel.sum(-1), persistent=False)
+
+        # QKV weight without bias; biases handled separately
+        self.qkv      = nn.Linear(dim, dim * 3, bias=False)
+        self.q_bias   = nn.Parameter(torch.zeros(dim))
+        self.v_bias   = nn.Parameter(torch.zeros(dim))
+
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj      = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, mask=None):
+        B_, N, C = x.shape
+        Nh = self.num_heads
+
+        qkv_bias = torch.cat([self.q_bias,
+                               torch.zeros(C, device=x.device, dtype=x.dtype),
+                               self.v_bias])
+        qkv = F.linear(x, self.qkv.weight, qkv_bias)
+        qkv = qkv.view(B_, N, 3, Nh, C // Nh).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+
+        # Cosine attention
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+        scale = torch.clamp(self.logit_scale, max=math.log(100.0)).exp()
+        attn  = (q @ k.transpose(-2, -1)) * scale
+
+        # Continuous position bias
+        rpb = self.cpb_mlp(self.relative_coords_table)   # [1, 2wh-1, 2ww-1, Nh]
+        rpb = 16 * torch.sigmoid(rpb)
+        rpb = rpb.view(-1, Nh)                           # [(2wh-1)(2ww-1), Nh]
+        rpb = rpb[self.relative_position_index.view(-1)].view(N, N, Nh).permute(2, 0, 1)
+        attn = attn + rpb.unsqueeze(0)
+
+        if mask is not None:
+            nW = mask.shape[0]
+            attn = attn.view(B_ // nW, nW, Nh, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, Nh, N, N)
+
+        attn = self.attn_drop(F.softmax(attn, dim=-1))
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        return self.proj_drop(self.proj(x))
+
+
 # ── Swin Transformer Block ────────────────────────────────────────────────────
 
 class SwinBlock(nn.Module):
     """Pre-LN Swin block with window attention (W-MSA) and SW-MSA option.
 
-    Uses SwinV1 attention (_WindowAttnV1) to be weight-compatible with
-    TULIP pre-trained checkpoints.
+    Supports both SwinV1 (_WindowAttnV1) and SwinV2 (_WindowAttnV2) attention
+    via the ``use_v2`` flag (default True to match trained checkpoints).
 
     Handles asymmetric windows (wh, ww) and the degenerate case H == wh
     by disabling vertical shifting.
     """
     def __init__(self, dim, input_resolution, num_heads,
                  window_size=(2, 8), shift_size=(0, 0),
-                 mlp_ratio=4., drop=0., attn_drop=0., drop_path=0.):
+                 mlp_ratio=4., drop=0., attn_drop=0., drop_path=0.,
+                 use_v2=True):
         super().__init__()
         H, W = input_resolution
         wh = min(window_size[0], H)
@@ -167,8 +260,9 @@ class SwinBlock(nn.Module):
         self.shift_size = (sh, sw)
 
         self.norm1 = nn.LayerNorm(dim)
-        self.attn  = _WindowAttnV1(dim, self.window_size, num_heads,
-                                    attn_drop=attn_drop, proj_drop=drop)
+        attn_cls = _WindowAttnV2 if use_v2 else _WindowAttnV1
+        self.attn = attn_cls(dim, self.window_size, num_heads,
+                             attn_drop=attn_drop, proj_drop=drop)
         self.dp    = _DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = nn.LayerNorm(dim)
         self.mlp   = _Mlp(dim, int(dim * mlp_ratio), drop=drop)
@@ -338,6 +432,7 @@ class TULIPRangeEncoder(nn.Module):
         drop_rate      = 0.,
         attn_drop_rate = 0.,
         drop_path_rate = 0.1,
+        use_v2         = True,
     ):
         super().__init__()
         assert len(depths) == len(num_heads) == 4
@@ -370,6 +465,7 @@ class TULIPRangeEncoder(nn.Module):
                     shift_size=(sh, sw), mlp_ratio=mlp_ratio,
                     drop=drop_rate, attn_drop=attn_drop_rate,
                     drop_path=dpr[dpr_idx],
+                    use_v2=use_v2,
                 ))
                 dpr_idx += 1
             self.stages.append(blocks)
@@ -423,6 +519,7 @@ class TULIPRangeDecoder(nn.Module):
         drop_rate      = 0.,
         attn_drop_rate = 0.,
         drop_path_rate = 0.1,
+        use_v2         = True,
     ):
         super().__init__()
         assert len(depths) == len(num_heads) == 4
@@ -451,12 +548,13 @@ class TULIPRangeDecoder(nn.Module):
                     shift_size=(sh, sw), mlp_ratio=mlp_ratio,
                     drop=drop_rate, attn_drop=attn_drop_rate,
                     drop_path=dpr[dpr_idx],
+                    use_v2=use_v2,
                 ))
                 dpr_idx += 1
             self.stages.append(blocks)
             if s < 3:
                 self.expands.append(_PatchExpanding(d_s))
-                self.skip_projs.append(nn.Linear(d_s, d_s // 2, bias=True))
+                self.skip_projs.append(nn.Linear(d_s, d_s // 2, bias=False))
 
         self.norm         = nn.LayerNorm(dims[3])
         self.final_expand = _AsymmetricExpand(dims[3], patch_h=4, patch_w=8, out_chans=out_chans)

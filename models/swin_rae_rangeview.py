@@ -81,6 +81,7 @@ class RangeViewSwinRAE(nn.Module):
             drop_rate      = float(getattr(args, 'swin_drop_rate',    0.0)),
             attn_drop_rate = float(getattr(args, 'swin_attn_drop',    0.0)),
             drop_path_rate = float(getattr(args, 'swin_drop_path',    0.1)),
+            use_v2         = bool(getattr(args, 'swin_v2',            True)),
         )
         self.encoder = TULIPRangeEncoder(**enc_kw)
         self.decoder = TULIPRangeDecoder(

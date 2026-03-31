@@ -6,7 +6,7 @@ Two-stage training:
   Stage 2  train STT + FluxDiT in TULIP 4-stage Swin bottleneck latent space (forecasting)
 
 Architecture:
-  - 4-stage hierarchical Swin encoder/decoder matching TULIP-base (depths 2-6-2-2)
+  - 4-stage hierarchical Swin encoder/decoder (depths 2-6-2-2, SwinV2 attention)
   - Bottleneck: [B, 64, 768] — grid (2×32), embed_dim×8
   - Skip connections in decoder (U-Net style, as in TULIP)
   - No pretrained backbone; encoder trained from scratch with range-image priors
@@ -49,16 +49,16 @@ proj_img_stds  = [1.0, 1.0]
 # ── Swin Transformer encoder / decoder ───────────────────────────────────────
 # Patch size (4, 8) on 64×2048 → initial grid (16, 256) = 4096 patches.
 # After 3 PatchMerging ops: (2, 32) = 64 tokens at dim=768 → [B, 64, 768].
-# Matches TULIP-KITTI checkpoint exactly: depths (2,2,2,2), window (2,8).
-# RPB table shape: (2*2-1)*(2*8-1) = 3*15 = 45 entries per head.
+# SwinV2 cpb_mlp takes 2-D log-space relative coords; window (2,8) → table [3,15,2].
 swin_embed_dim   = 96
-swin_depths      = (2, 2, 2, 2)       # matches TULIP-KITTI checkpoint (uniform 2-block stages)
+swin_depths      = (2, 6, 2, 2)       # TULIP-base depths; stage-1 has 6 blocks
 swin_num_heads   = (3, 6, 12, 24)    # attention heads per stage
-swin_window_size = (2, 8)             # matches TULIP-KITTI: RPB table [45, heads]
+swin_window_size = (2, 8)             # asymmetric window for 64×2048 range images
 swin_mlp_ratio   = 4.0
 swin_drop_rate   = 0.0
 swin_attn_drop   = 0.0
 swin_drop_path   = 0.1                # stochastic depth max rate
+swin_v2          = True               # use SwinV2 attention (cosine + cpb_mlp)
 
 # ── Stage 1 RAE loss weights ──────────────────────────────────────────────────
 # ch 0 = range (Berhu loss, high weight), ch 1 = intensity (L1, low weight).
