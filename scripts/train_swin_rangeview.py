@@ -251,17 +251,14 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 lr = model_engine.get_lr()[0]
                 msg = (f"[S2] step={step} | loss={loss.item():.4f} | "
                        f"diff={out['loss_diff'].item():.4f} | "
-                       f"l1={out['loss_range_l1'].item():.4f} | "
                        f"bev={out['loss_bev_percep'].item():.4f} | "
                        f"lr={lr:.2e} | {elapsed:.2f}s/step")
                 logger.info(msg)
                 if hasattr(args, 'writer') and args.writer:
                     args.writer.add_scalar('stage2/loss_all',  loss.item(), step)
                     args.writer.add_scalar('stage2/loss_diff', out['loss_diff'].item(), step)
-                    args.writer.add_scalar('stage2/loss_l1',   out['loss_range_l1'].item(), step)
                 if not getattr(args, 'no_wandb', False) and global_rank == 0:
                     wandb.log({'s2/loss': loss.item(), 's2/diff': out['loss_diff'].item(),
-                               's2/l1': out['loss_range_l1'].item(),
                                's2/bev': out['loss_bev_percep'].item(), 'step': step})
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0

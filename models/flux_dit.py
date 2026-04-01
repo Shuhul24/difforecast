@@ -176,8 +176,15 @@ class FluxDiT(nn.Module):
         x_t = x_t.to(pred.dtype)
         predict = x_t + pred * (1. - t.to(pred.dtype))
         terms["mse"] = mean_flat((target - pred) ** 2)
-        
-        terms["loss"] = terms["mse"].mean()
+
+        # Min-SNR-γ weighting (γ=5): down-weights very noisy timesteps that
+        # dominate the loss but contribute little to perceptual quality.
+        # SNR for rectified flow: t^2 / (1-t)^2
+        gamma = 5.0
+        t_flat = t.reshape(-1)  # (B,)
+        snr = (t_flat ** 2) / ((1. - t_flat) ** 2 + 1e-8)
+        min_snr_weight = torch.clamp(snr, max=gamma) / (snr + 1e-8)  # (B,)
+        terms["loss"] = (terms["mse"] * min_snr_weight).mean()
         if return_predict:
             terms["predict"] = predict
         else:

@@ -262,18 +262,18 @@ def save_training_visualization(
     if is_vae_mode:
         # VAE Mode: features_gt is [B*T, C, H, W], predict_decoded is [B*T, C, H, W]
         # We just visualize the first sample in the flattened batch
-        gt_np = features_gt[0].float().cpu().numpy()      # [C, H, W]
-        pred_np = predict_decoded[0].float().cpu().numpy() # [C, H, W]
+        gt_np = features_gt[0].detach().float().cpu().numpy()      # [C, H, W]
+        pred_np = predict_decoded[0].detach().float().cpu().numpy() # [C, H, W]
     else:
         # Forecast Mode: features_cond is [B, CF, C, H, W]
-        cond_np  = features_cond[0].float().cpu().numpy()   # [CF, C, H, W]
+        cond_np  = features_cond[0].detach().float().cpu().numpy()   # [CF, C, H, W]
         # features_gt is [B, 1, C, H, W]
-        gt_np    = features_gt[0, 0].float().cpu().numpy()  # [C, H, W]
+        gt_np    = features_gt[0, 0].detach().float().cpu().numpy()  # [C, H, W]
         # predict_decoded logic below...
 
     if not is_vae_mode:
         cf = cond_np.shape[0]
-        pred_np  = predict_decoded[cf - 1].float().cpu().numpy()  # [C, H, W]
+        pred_np  = predict_decoded[cf - 1].detach().float().cpu().numpy()  # [C, H, W]
 
     # --- unnormalise depth channel (ch 0) to metres ---
     def to_depth(feat_chw):

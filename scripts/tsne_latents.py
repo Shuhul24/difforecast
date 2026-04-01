@@ -87,6 +87,8 @@ def extract_sequence_features(
 
     n_frames <= 0  →  use every frame in the sequence.
     n_frames  > 0  →  evenly subsample to that many frames.
+
+    Returns mean-pooled latents [N, 768] for swin (64 tokens × 768 dim).
     """
     try:
         ds = KITTIRangeViewDataset(
@@ -126,8 +128,8 @@ def extract_sequence_features(
         batch_idx = indices[s: s + batch_sz]
         imgs = torch.stack([ds[int(i)][0][0] for i in batch_idx])   # [B, C, H, W]
         imgs = imgs.to(device, dtype=torch.float32)
-        latents = model.encode(imgs)        # [B, 256, 384]
-        feats.append(latents.mean(dim=1).cpu())  # mean over tokens → [B, 384]
+        z, _ = model.encode(imgs)           # z: [B, 64, 768]
+        feats.append(z.mean(dim=1).cpu())   # mean over tokens → [B, 768]
 
     return torch.cat(feats, dim=0)          # [N, 384]
 

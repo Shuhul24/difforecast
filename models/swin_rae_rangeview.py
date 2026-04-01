@@ -382,7 +382,7 @@ class RangeViewSwinDiT(nn.Module):
             depth=args.n_layer[1],
             depth_single_blocks=args.n_layer[2],
             axes_dim=args.axes_dim_dit,
-            theta=10_000, qkv_bias=True, guidance_embed=False,
+            theta=10_000, qkv_bias=True, guidance_embed=True,
             drop_path_rate=float(getattr(args, 'drop_path_rate', 0.0)),
         ))
         self.dit.cuda()
@@ -394,7 +394,6 @@ class RangeViewSwinDiT(nn.Module):
         self.log_range              = bool(getattr(args,  'log_range',              True))
         self.proj_img_mean          = list(getattr(args,  'proj_img_mean',          [0.0, 0.0]))
         self.proj_img_stds          = list(getattr(args,  'proj_img_stds',          [1.0, 1.0]))
-        self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 1.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
         self.chamfer_start          = int(getattr(args,   'chamfer_start',          0))
@@ -403,7 +402,6 @@ class RangeViewSwinDiT(nn.Module):
         def _log_w(w):
             return nn.Parameter(torch.tensor(math.log(1.0 / w))) if w > 0 else None
 
-        self.log_w_l1      = _log_w(self.range_view_loss_weight)
         self.log_w_chamfer = _log_w(self.chamfer_loss_weight)
         self.log_w_bev     = _log_w(self.bev_perceptual_weight)
 
@@ -523,7 +521,9 @@ class RangeViewSwinDiT(nn.Module):
         yaw_idx  = yaws_to_indices(rel_yaw, self.yaw_vocab_size)
 
         lat_cond_norm = lat_cond / self.latent_scale
-        logits        = self.model(lat_cond_norm, pose_idx, yaw_idx,
+        lat_target_norm = (lat_target / self.latent_scale).unsqueeze(1)          # [B,1,T,C]
+        lat_all_norm  = torch.cat([lat_cond_norm, lat_target_norm], dim=1)       # [B,CF+1,T,C]
+        logits        = self.model(lat_all_norm, pose_idx, yaw_idx,
                                    drop_feature=self.args.drop_feature)
         stt_features  = logits['logits']
         pose_emb_all  = logits['pose_emb']
@@ -534,17 +534,22 @@ class RangeViewSwinDiT(nn.Module):
         pose_last = rearrange(pose_emb_all, '(b cf) d   -> b cf d',   b=B)[:, -1]
 
         tgt_norm  = lat_target / self.latent_scale
-        t_sample  = torch.rand((B, 1, 1), device=tgt_norm.device)
+        # Logit-normal timestep sampling: concentrates mass around t≈0.5
+        # (harder, intermediate noise levels) rather than uniform [0,1]
+        u = torch.randn((B, 1, 1), device=tgt_norm.device)
+        t_sample  = torch.sigmoid(u)
+        guidance = torch.full((B,), float(getattr(self.args, 'cfg_scale', 3.5)),
+                              device=tgt_norm.device, dtype=tgt_norm.dtype)
         loss_terms = self.dit.training_losses(
             img=tgt_norm, img_ids=self.img_ids[:B],
             cond=stt_last, cond_ids=self.cond_ids[:B],
-            t=t_sample, y=pose_last,
+            t=t_sample, y=pose_last, guidance=guidance,
             return_predict=self.args.return_predict,
         )
         diff_loss    = loss_terms['loss'].mean()
         predict_lats = loss_terms.get('predict')
 
-        z_l1 = z_cd = z_bev = torch.zeros(1, device=tgt_norm.device, dtype=tgt_norm.dtype)
+        z_cd = z_bev = torch.zeros(1, device=tgt_norm.device, dtype=tgt_norm.dtype)
         predict_decoded = None
 
         if predict_lats is not None:
@@ -556,16 +561,6 @@ class RangeViewSwinDiT(nn.Module):
             else:
                 m0, s0 = self.proj_img_mean[0], self.proj_img_stds[0]
                 gt_unnorm = gt_img[:, 0].float() * s0 + m0
-            gt_valid = gt_unnorm > 0.5
-
-            if self.log_w_l1 is not None:
-                l1_range = (predict_decoded[:, 0] - gt_img[:, 0]).abs()
-                l1_rest  = (predict_decoded[:, 1:] - gt_img[:, 1:]).abs().mean(1) if gt_img.shape[1] > 1 \
-                           else torch.zeros_like(l1_range)
-                l1_map   = l1_range + 0.25 * l1_rest
-                z_l1 = ((l1_map * gt_valid.float() * t_sample.squeeze()).sum()
-                        / (gt_valid.float().sum() + 1e-8))
-                diff_loss = diff_loss + self._uw(self.log_w_l1, z_l1)
 
             if self.log_w_chamfer is not None and step >= self.chamfer_start:
                 if self.log_range:
@@ -591,7 +586,6 @@ class RangeViewSwinDiT(nn.Module):
         return {
             'loss_all':        diff_loss,
             'loss_diff':       loss_terms['loss'].mean().detach(),
-            'loss_range_l1':   z_l1,
             'loss_chamfer':    z_cd,
             'loss_bev_percep': z_bev,
             'predict':         predict_decoded,

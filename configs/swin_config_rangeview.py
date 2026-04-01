@@ -65,7 +65,7 @@ swin_v2          = True               # use SwinV2 attention (cosine + cpb_mlp)
 rae_ch_weights = [40., 1.]
 
 # Stage 1 Swin-RAE checkpoint for Stage 2 init
-swin_ckpt = None    # e.g. 'outputs/swin_ckpt/swin-stage1/swin_rae_step50000.pkl'
+swin_ckpt = '/DATA2/shuhul/exp/swin_ckpt/swin-s1/swin_rae_step46000.pkl'
 
 # ── Temporal configuration ────────────────────────────────────────────────────
 condition_frames = 5
