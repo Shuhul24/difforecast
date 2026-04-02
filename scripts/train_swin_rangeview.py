@@ -263,7 +263,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0
                     and global_rank == 0 and out.get('predict') is not None):
-                _save_vis(step, args, features_cond, features_gt, out['predict'])
+                _save_vis(step, args, features_cond, features_gt, out['predict'].detach())
 
             if step % args.eval_steps == 0 and global_rank == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine

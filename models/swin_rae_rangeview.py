@@ -434,10 +434,14 @@ class RangeViewSwinDiT(nn.Module):
 
     def _load_ckpt(self, path):
         sd = torch.load(path, map_location='cpu').get('model_state_dict', {})
-        for attr, pfx in [('model', 'module.model.'), ('dit', 'module.dit.')]:
+        for attr, prefixes in [('model', ['module.model.', 'model.']),
+                                ('dit',   ['module.dit.',   'dit.'])]:
             obj = getattr(self, attr)
-            obj_sd = {k: sd[pfx + k] for k in obj.state_dict() if pfx + k in sd}
-            obj.load_state_dict(obj_sd, strict=False)
+            for pfx in prefixes:
+                obj_sd = {k: sd[pfx + k] for k in obj.state_dict() if pfx + k in sd}
+                if obj_sd:
+                    obj.load_state_dict(obj_sd, strict=False)
+                    break
         print(f"[SwinDiT] STT+DiT loaded from {path}")
 
     @staticmethod

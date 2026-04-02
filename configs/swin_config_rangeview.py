@@ -86,7 +86,7 @@ augmentation_config = {
 }
 
 # ── STT (identical to rae_config_rangeview.py) ────────────────────────────────
-n_layer = [6, 8, 8]
+n_layer = [10, 8, 8]   # n_layer[0] = CausalTimeSpaceBlock depth (only this value builds blocks)
 n_head  = 8
 n_embd  = 1024
 
@@ -108,8 +108,8 @@ yaw_bound         = 12.
 # ── Diffusion ─────────────────────────────────────────────────────────────────
 diffusion_model_type = 'flow'
 num_sampling_steps   = 100
-return_predict       = True
-latent_scale         = 1.0
+return_predict       = False      # no aux losses active — skip decoder forward during training
+latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_latent_stats.py
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
 range_view_loss_weight = 1.0

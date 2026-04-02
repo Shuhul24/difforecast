@@ -46,3 +46,23 @@ torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 13 --lr 3e-4
 
 # RAE Stage 2 training from checkpoint:
 # torchrun --nproc_per_node=1 scripts/train_rae_rangeview.py --stage 2 --batch_size 2 --exp_name "rae_stage_2" --config configs/rae_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/rae_stage_2/<step>" --resume_step <step> --no_log_file
+
+# ── SWIN Transformer pipeline (TULIPRangeEncoder + TULIPRangeDecoder) ────────
+
+# SWIN Stage 1 training (Swin RAE: encoder + decoder; Berhu/L1 recon loss):
+# torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 1 --batch_size 4 --exp_name "swin_stage_1" --config configs/swin_config_rangeview.py --eval_steps 2000 --no_log_file
+
+# SWIN Stage 1 training from checkpoint:
+# torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 1 --batch_size 4 --exp_name "swin_stage_1" --config configs/swin_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/swin_stage_1/<step>" --resume_step <step> --no_log_file
+
+# SWIN Stage 1 sanity check (forward/backward pass + mini-training loop):
+# python scripts/test_swin_stage1.py --config configs/swin_config_rangeview.py --steps 50
+
+# SWIN Stage 2 training (STT + FluxDiT in Swin bottleneck latent space; set swin_ckpt in config first):
+# torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 2 --batch_size 2 --exp_name "swin_stage_2" --config configs/swin_config_rangeview.py --eval_steps 2000 --no_log_file
+
+# SWIN Stage 2 training from checkpoint:
+# torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 2 --batch_size 2 --exp_name "swin_stage_2" --config configs/swin_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/swin_stage_2/<step>" --resume_step <step> --no_log_file
+
+# SWIN Stage 2 evaluation (autoregressive inference, per-frame metrics + BEV figures):
+# python scripts/eval_swin_stage2.py --config configs/swin_config_rangeview.py --ckpt /scratch/p24cs0005/exp/ckpt/swin_stage_2/swin_dit_step<step>.pkl --out outputs/eval_swin_s2_step<step> --n_samples 200

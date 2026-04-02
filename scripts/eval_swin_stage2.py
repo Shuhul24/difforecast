@@ -230,10 +230,14 @@ def main():
     )
 
     # ── Load model ────────────────────────────────────────────────────────────
+    # Suppress swin_ckpt loading in __init__: the Stage 2 checkpoint already
+    # contains the frozen encoder+decoder weights, so the Stage 1 swin_ckpt
+    # load is redundant and would crash if that path is stale.
     print(f'Loading checkpoint: {args_cli.ckpt}')
+    ckpt = torch.load(args_cli.ckpt, map_location='cpu')
+    cfg.swin_ckpt = None
     model = RangeViewSwinDiT(cfg, local_rank=0)
-    ckpt  = torch.load(args_cli.ckpt, map_location='cpu')
-    model.load_state_dict(ckpt['model_state_dict'])
+    model.load_state_dict(ckpt['model_state_dict'], strict=True)
     model = model.cuda().eval()
     print(f'  Loaded step {ckpt["step"]}')
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
