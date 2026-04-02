@@ -144,15 +144,30 @@ TAB10 = [
 
 def _make_3d_figure(emb, seqs, seq_ids_present, step_ckpt, arch, encoder_desc):
     traces = []
+    # per-sequence local scan counters so hover shows the actual .bin index
+    seq_local = {sid: 0 for sid in seq_ids_present}
+    for i, sid in enumerate(seqs):
+        sid = int(sid)
+        if sid not in seq_local:
+            seq_local[sid] = 0
+    # rebuild with correct local indices
+    seq_scan_idx = {}   # global_idx → local scan index within its sequence
+    counters = {sid: 0 for sid in seq_ids_present}
+    for gi in range(len(seqs)):
+        sid = int(seqs[gi])
+        seq_scan_idx[gi] = counters[sid]
+        counters[sid] += 1
+
     for sid in seq_ids_present:
         mask  = seqs == sid
         color = TAB10[sid % len(TAB10)]
-        fi    = np.where(mask)[0]
+        gi    = np.where(mask)[0]
+        local = [seq_scan_idx[g] for g in gi]
         traces.append(go.Scatter3d(
             x=emb[mask, 0], y=emb[mask, 1], z=emb[mask, 2],
             mode='markers', name=f'seq {sid:02d}',
             marker=dict(size=4, color=color, opacity=0.80),
-            text=[f'seq {sid:02d} frame {i}' for i in fi],
+            text=[f'seq {sid:02d}  scan {l:06d}' for l in local],
             hovertemplate='%{text}<extra></extra>',
         ))
     fig = go.Figure(data=traces)
@@ -179,15 +194,23 @@ def _make_3d_figure(emb, seqs, seq_ids_present, step_ckpt, arch, encoder_desc):
 
 def _make_2d_figure(emb, seqs, seq_ids_present, step_ckpt, arch, encoder_desc):
     traces = []
+    counters = {sid: 0 for sid in seq_ids_present}
+    seq_scan_idx = {}
+    for gi in range(len(seqs)):
+        sid = int(seqs[gi])
+        seq_scan_idx[gi] = counters[sid]
+        counters[sid] += 1
+
     for sid in seq_ids_present:
         mask  = seqs == sid
         color = TAB10[sid % len(TAB10)]
-        fi    = np.where(mask)[0]
+        gi    = np.where(mask)[0]
+        local = [seq_scan_idx[g] for g in gi]
         traces.append(go.Scatter(
             x=emb[mask, 0], y=emb[mask, 1],
             mode='markers', name=f'seq {sid:02d}',
             marker=dict(size=5, color=color, opacity=0.80),
-            text=[f'seq {sid:02d} frame {i}' for i in fi],
+            text=[f'seq {sid:02d}  scan {l:06d}' for l in local],
             hovertemplate='%{text}<extra></extra>',
         ))
     fig = go.Figure(data=traces)
@@ -204,6 +227,126 @@ def _make_2d_figure(emb, seqs, seq_ids_present, step_ckpt, arch, encoder_desc):
         legend=dict(title='KITTI sequence', itemsizing='constant'),
         margin=dict(l=40, r=20, t=80, b=40),
         width=1100, height=700,
+    )
+    return fig
+
+
+# ── Animated 3-D figure (scan-by-scan reveal for one sequence) ────────────────
+
+def _make_animated_3d_figure(
+    emb, seqs, seq_ids_present, animate_seq, step_ckpt, arch, encoder_desc
+):
+    """3-D t-SNE with a play/slider animation that reveals one sequence scan-by-scan.
+
+    All other sequences are shown as static faded background markers.
+    The animated sequence grows point-by-point (cumulative reveal) so you can
+    watch the trajectory through latent space as the drive progresses.
+    """
+    # build per-sequence local scan index (same logic as static figures)
+    counters = {sid: 0 for sid in seq_ids_present}
+    seq_scan_idx = {}
+    for gi in range(len(seqs)):
+        sid = int(seqs[gi])
+        seq_scan_idx[gi] = counters[sid]
+        counters[sid] += 1
+
+    anim_mask = seqs == animate_seq
+    anim_gi   = np.where(anim_mask)[0]
+    n_anim    = len(anim_gi)
+
+    # Static background traces (all sequences except the animated one)
+    bg_traces = []
+    for sid in seq_ids_present:
+        if sid == animate_seq:
+            continue
+        mask  = seqs == sid
+        gi    = np.where(mask)[0]
+        local = [seq_scan_idx[g] for g in gi]
+        bg_traces.append(go.Scatter3d(
+            x=emb[mask, 0], y=emb[mask, 1], z=emb[mask, 2],
+            mode='markers', name=f'seq {sid:02d}',
+            marker=dict(size=3, color=TAB10[sid % len(TAB10)], opacity=0.25),
+            text=[f'seq {sid:02d}  scan {l:06d}' for l in local],
+            hovertemplate='%{text}<extra></extra>',
+        ))
+
+    anim_color = TAB10[animate_seq % len(TAB10)]
+    anim_local = [seq_scan_idx[g] for g in anim_gi]
+
+    # Frame 0 = empty animated trace so slider starts blank
+    def _anim_trace(n_shown):
+        idx = anim_gi[:n_shown]
+        local_shown = anim_local[:n_shown]
+        return go.Scatter3d(
+            x=emb[idx, 0], y=emb[idx, 1], z=emb[idx, 2],
+            mode='markers', name=f'seq {animate_seq:02d} (animated)',
+            marker=dict(size=5, color=anim_color, opacity=0.90),
+            text=[f'seq {animate_seq:02d}  scan {l:06d}' for l in local_shown],
+            hovertemplate='%{text}<extra></extra>',
+        )
+
+    # Use every scan or stride to keep the HTML size reasonable (max 500 frames)
+    stride = max(1, n_anim // 500)
+    frame_counts = list(range(0, n_anim + 1, stride))
+    if frame_counts[-1] != n_anim:
+        frame_counts.append(n_anim)
+
+    plotly_frames = [
+        go.Frame(
+            data=bg_traces + [_anim_trace(k)],
+            name=str(k),
+        )
+        for k in frame_counts
+    ]
+
+    fig = go.Figure(
+        data=bg_traces + [_anim_trace(0)],
+        frames=plotly_frames,
+    )
+
+    sliders = [dict(
+        active=0,
+        steps=[dict(
+            args=[[str(k)], dict(frame=dict(duration=0, redraw=True), mode='immediate')],
+            label=str(frame_counts[i]),
+            method='animate',
+        ) for i, k in enumerate(frame_counts)],
+        currentvalue=dict(prefix=f'seq {animate_seq:02d} scans shown: ', font=dict(size=13)),
+        len=0.9, x=0.05, y=0.02,
+    )]
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                f'[{arch.upper()}] latent space — animated seq {animate_seq:02d}  '
+                f'(ckpt step {step_ckpt})<br>'
+                f'<sup>{encoder_desc}</sup>'
+            ),
+            x=0.5,
+        ),
+        scene=dict(
+            xaxis_title='t-SNE dim 1', yaxis_title='t-SNE dim 2', zaxis_title='t-SNE dim 3',
+            xaxis=dict(showticklabels=False),
+            yaxis=dict(showticklabels=False),
+            zaxis=dict(showticklabels=False),
+        ),
+        legend=dict(title='KITTI sequence', itemsizing='constant'),
+        margin=dict(l=0, r=0, t=80, b=80),
+        width=1100, height=850,
+        updatemenus=[dict(
+            type='buttons', showactive=False, y=0.06, x=0.02, xanchor='left',
+            buttons=[
+                dict(label='▶ Play',
+                     method='animate',
+                     args=[None, dict(frame=dict(duration=80, redraw=True),
+                                      fromcurrent=True, mode='immediate')]),
+                dict(label='⏸ Pause',
+                     method='animate',
+                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                        mode='immediate')]),
+            ],
+        )],
+        sliders=sliders,
     )
     return fig
 
@@ -231,6 +374,8 @@ def parse_args():
                    help='t-SNE perplexity; -1 auto-sets to max(5, min(sqrt(N)/2, 200))')
     p.add_argument('--n_iter',       type=int, default=1000)
     p.add_argument('--device',       default='cuda')
+    p.add_argument('--animate_seq',  type=int, default=-1,
+                   help='If >= 0, also save an animated HTML revealing this sequence scan-by-scan')
     return p.parse_args()
 
 
@@ -311,6 +456,25 @@ def main():
     )
     fig.write_html(save_path, include_plotlyjs='cdn')
     print(f"\nSaved → {save_path}  (open in any browser)")
+
+    if args.animate_seq >= 0:
+        if args.animate_seq not in seq_ids_present:
+            print(f"Warning: seq {args.animate_seq} not in loaded sequences — skipping animation.")
+        elif nc != 3:
+            print("Animation is only supported for 3-D t-SNE (--n_components 3) — skipping.")
+        else:
+            print(f"Building animated HTML for seq {args.animate_seq:02d} …")
+            fig_anim = _make_animated_3d_figure(
+                emb, seqs, seq_ids_present,
+                animate_seq=args.animate_seq,
+                step_ckpt=step_ckpt, arch=args.arch, encoder_desc=encoder_desc,
+            )
+            anim_path = os.path.join(
+                args.output_dir,
+                f'{args.arch}_tsne_3d_step{step_ckpt}_seq{args.animate_seq:02d}_animated.html',
+            )
+            fig_anim.write_html(anim_path, include_plotlyjs='cdn')
+            print(f"Saved → {anim_path}")
 
 
 if __name__ == '__main__':

@@ -198,9 +198,13 @@ class FluxDiT(nn.Module):
                 cond_ids: Tensor,
                 vec: Tensor,
                 timesteps: list[float],
+                guidance: float = 3.5,
             ):
         for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
             t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+            guidance_vec = torch.full((img.shape[0],), guidance,
+                                      dtype=img.dtype, device=img.device) \
+                           if self.params.guidance_embed else None
             pred = self(
                 img=img,
                 img_ids=img_ids,
@@ -208,6 +212,7 @@ class FluxDiT(nn.Module):
                 cond_ids=cond_ids,
                 y=vec,
                 timesteps=t_vec,
+                guidance=guidance_vec,
             )
             img = img + (t_prev - t_curr) * pred
         return img

@@ -310,12 +310,12 @@ def _save_vis(step, args, features_cond, features_gt, predict):
         vis_dir = os.path.join(args.validation_path, 'vis')
         os.makedirs(vis_dir, exist_ok=True)
         if getattr(args, 'log_range', True):
-            gt_depth   = (2.0 ** (features_gt[0, 0, 0].float().cpu().numpy() * 6.0)) - 1.0
-            pred_depth = (2.0 ** (predict[0, 0].float().cpu().numpy()         * 6.0)) - 1.0
+            gt_depth   = (2.0 ** (features_gt[0, 0, 0].float().detach().cpu().numpy() * 6.0)) - 1.0
+            pred_depth = (2.0 ** (predict[0, 0].float().detach().cpu().numpy()         * 6.0)) - 1.0
         else:
             m0, s0 = args.proj_img_mean[0], args.proj_img_stds[0]
-            gt_depth   = features_gt[0, 0, 0].float().cpu().numpy() * s0 + m0
-            pred_depth = predict[0, 0].float().cpu().numpy()         * s0 + m0
+            gt_depth   = features_gt[0, 0, 0].float().detach().cpu().numpy() * s0 + m0
+            pred_depth = predict[0, 0].float().detach().cpu().numpy()         * s0 + m0
         mae = float(np.abs(pred_depth - gt_depth).mean())
         render_rangeview_comparison(
             gt_depth=gt_depth, pred_depth=pred_depth,
