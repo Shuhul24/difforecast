@@ -121,6 +121,7 @@ class KITTIRangeViewDataset(Dataset):
         stride=None,
         five_channel=False,
         log_range=False,
+        depth_only=False,
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
@@ -133,6 +134,7 @@ class KITTIRangeViewDataset(Dataset):
         self.stride          = stride
         self.five_channel    = five_channel   # return [range,x,y,z,intensity] if True
         self.log_range       = log_range      # use log2(r+1)/6 norm instead of mean/std
+        self.depth_only      = depth_only     # return only the range channel [1, H, W]
 
         # Range projection
         self.projection = RangeProjection(
@@ -233,10 +235,14 @@ class KITTIRangeViewDataset(Dataset):
             #   10 m → log2(11)/6 ≈ 0.573
             #   80 m → log2(81)/6 ≈ 1.055 → clipped to 1.0
             depth_norm  = (torch.log2(depth.clamp(min=0.) + 1.) / 6.).clamp(0., 1.)
+            if self.depth_only:
+                return depth_norm.unsqueeze(0)                      # [1, H, W]
             intens_norm = intens.clamp(0., 1.)
             return torch.stack([depth_norm, intens_norm], dim=0)   # [2, H, W]
 
-        if self.five_channel:
+        if self.depth_only:
+            feat = depth.unsqueeze(0)                               # [1, H, W]
+        elif self.five_channel:
             xyz  = torch.from_numpy(proj_pc[..., :3]).permute(2, 0, 1)  # [3,H,W]
             feat = torch.cat([depth.unsqueeze(0), xyz, intens.unsqueeze(0)], 0)  # [5,H,W]
         else:

@@ -39,12 +39,12 @@ range_h   = 64
 range_w   = 2048
 image_size = (64, 2048)
 
-# 2-channel (range + intensity); log2 normalisation for range channel.
-range_channels = 2
+# 1-channel (range/depth only); log2 normalisation.
+range_channels = 1
 five_channel   = False
 log_range      = True
-proj_img_mean  = [0.0, 0.0]
-proj_img_stds  = [1.0, 1.0]
+proj_img_mean  = [0.0]
+proj_img_stds  = [1.0]
 
 # ── Swin Transformer encoder / decoder ───────────────────────────────────────
 # Patch size (4, 8) on 64×2048 → initial grid (16, 256) = 4096 patches.
@@ -61,8 +61,8 @@ swin_drop_path   = 0.1                # stochastic depth max rate
 swin_v2          = True               # use SwinV2 attention (cosine + cpb_mlp)
 
 # ── Stage 1 RAE loss weights ──────────────────────────────────────────────────
-# ch 0 = range (Berhu loss, high weight), ch 1 = intensity (L1, low weight).
-rae_ch_weights = [40., 1.]
+# ch 0 = range (Berhu loss).
+rae_ch_weights = [40.]
 
 # Stage 1 Swin-RAE checkpoint for Stage 2 init
 swin_ckpt = '/DATA2/shuhul/exp/swin_ckpt/swin-s1/swin_rae_step46000.pkl'

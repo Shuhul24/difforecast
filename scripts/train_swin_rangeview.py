@@ -100,6 +100,7 @@ def make_dataset(args, train=True):
         pc_reshape=tuple(args.pc_reshape),
         five_channel=getattr(args, 'five_channel', False),
         log_range=getattr(args, 'log_range', True),
+        depth_only=(int(getattr(args, 'range_channels', 2)) == 1),
     )
     if args.stage == '1':
         return KITTIRangeViewDataset(
