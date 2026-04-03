@@ -59,7 +59,7 @@ class RangeViewSwinRAE(nn.Module):
     """Stage 1: 4-stage Swin encoder + decoder with skip connections (RAE pre-training).
 
     Losses:
-      - Berhu on range channel (ch 0): captures sharp depth discontinuities.
+      - MAE on range channel (ch 0): matches TULIP training objective.
       - L1 on intensity channel (ch 1): simple reconstruction.
       - Optional BEV perceptual loss on the decoded range channel.
 
@@ -95,7 +95,7 @@ class RangeViewSwinRAE(nn.Module):
         self.proj_img_stds = list(getattr(args, 'proj_img_stds', [1.0, 1.0]))
 
         # Per-channel loss weights: [range, intensity]
-        ch_w = list(getattr(args, 'rae_ch_weights', [40., 1.]))
+        ch_w = list(getattr(args, 'rae_ch_weights', [1., 1.]))
         self.register_buffer('ch_weights', torch.tensor(ch_w, dtype=torch.float32))
 
         # Optional BEV perceptual loss
@@ -132,8 +132,8 @@ class RangeViewSwinRAE(nn.Module):
         z, skips = self.encode(x)
         rec = self.decode(z, skips)
 
-        # Berhu on range (ch 0), L1 on intensity (ch 1+)
-        loss_range = berhu_loss(rec[:, 0], x[:, 0])
+        # MAE on range (ch 0), L1 on intensity (ch 1+)
+        loss_range = (rec[:, 0] - x[:, 0]).abs()
         if x.shape[1] > 1:
             loss_int = (rec[:, 1:] - x[:, 1:]).abs().mean(dim=1)
         else:
