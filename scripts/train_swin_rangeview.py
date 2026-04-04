@@ -195,16 +195,23 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
     """Train STT + FluxDiT + PoseDiT with chain-of-forward autoregressive training.
 
     AR loop (fw_iter steps per batch):
-      1. Forward: FluxDiT predicts next latent frame; PoseDiT predicts next relative pose.
-      2. Backward + optimizer step using the combined loss (diff + pose + optional aux).
-      3. Slide the conditioning window: append predicted latent and predicted pose,
-         replacing the oldest condition frame / pose in the window.
-    Losses are accumulated across fw_iter steps and averaged for logging.
+      1. Forward with AR conditioning: predicted frames + predicted poses from
+         ar_rot_window (not GT), learning joint p(x, pose | history).
+      2. Backward + optimizer step on combined loss (diff + pose + aux).
+      3. Slide ALL conditioning windows (pixel, latent, rotation).
+         ar_rot_window accumulates predicted absolute rotations so rel_pose_cond
+         is derived entirely from model predictions — no GT teacher forcing on
+         transitions involving predicted conditioning frames.
+      4. Optionally (ar_eval_rollout=True in config): obtain clean AR predictions
+         via eval-mode forward pass (no dropout, full diffusion sampling),
+         mirroring Epona's clean-sampling approach. Default uses training-pass
+         predictions (fast path).
     """
     model_engine.train()
     time_stamp = time.time()
     fw_iter = args.forward_iter
     CF      = args.condition_frames
+    ar_eval = getattr(args, 'ar_eval_rollout', False)
 
     for epoch in range(99999):
         for batch in loader:
@@ -217,18 +224,28 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
             rot_matrix  = poses[:, :CF + fw_iter]   # [B, CF+fw_iter, 4, 4]
 
             # ── Initialise AR state ───────────────────────────────────────────
-            latents_cond_next = None   # pre-encoded latent window (None → encode on-the-fly)
-            rel_pose_cond     = None   # [B, CF, 2] predicted relative x,y from previous step
-            rel_yaw_cond      = None   # [B, CF, 1] predicted relative yaw from previous step
+            latents_cond_next = None
+            rel_pose_cond     = None   # [B, CF, 2] — derived from ar_rot_window after j=0
+            rel_yaw_cond      = None   # [B, CF, 1]
             features_cond     = range_views[:, :CF]
+            # Tracks predicted absolute rotations for conditioning frames.
+            # Starts as GT; after each AR step the oldest GT is replaced by the
+            # next predicted absolute rotation (_compose_predicted_rot).
+            # Drives rel_pose_cond so the model learns p(x, pose | history)
+            # rather than p(x | GT_pose, history) · p(pose | history).
+            ar_rot_window     = rot_matrix[:, :CF].clone()   # [B, CF, 4, 4]
 
             # Cumulative losses over fw_iter steps (for logging)
             cumul_diff = cumul_pose = cumul_cd = cumul_bev = 0.0
             last_out   = None   # keep for vis / logging
 
             for j in range(fw_iter):
-                features_gt   = range_views[:, j + CF:j + CF + 1]
-                rot_slice     = rot_matrix[:, j:j + CF + 1]   # [B, CF+1, 4, 4]
+                features_gt = range_views[:, j + CF:j + CF + 1]
+                # rot_slice stays all-GT: the conditioning portion is superseded by
+                # rel_pose_cond (from ar_rot_window) when j > 0. Only the last
+                # (target) entry is used by step_train for the pose loss target,
+                # so keeping it GT is correct and does not constitute teacher forcing.
+                rot_slice   = rot_matrix[:, j:j + CF + 1]   # [B, CF+1, 4, 4]
 
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     out = model_engine(
@@ -244,11 +261,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                     print(f"[S2] Step {step} AR-step {j}: loss={loss.item()}, stopping")
                     sys.exit(1)
 
-                # ── Per-step backward for FluxDiT + PoseDiT ─────────────────
-                # DeepSpeed routes gradients to each DiT from its loss component:
-                #   diff_loss  → FluxDiT  (visual latent rectified flow)
-                #   pose_loss  → PoseDiT  (relative-pose rectified flow)
-                # Both share the frozen STT context, but STT is not updated here.
+                # ── Backward + step (joint diff + pose loss) ─────────────────
                 model_engine.backward(loss)
                 model_engine.step()
                 if scheduler is not None:
@@ -262,49 +275,79 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 last_out    = out
 
                 if j < fw_iter - 1:
-                    # ── Slide latent conditioning window ─────────────────────
-                    # Replace the oldest condition frame's latent with the
-                    # current FluxDiT prediction (or fall back to GT encoding).
-                    pred_lats  = out.get('predict_latents')
+                    # ── Obtain AR predictions for next-step conditioning ──────
+                    if ar_eval:
+                        # Epona-style clean rollout: eval mode disables dropout and
+                        # uses full diffusion sampling for unbiased AR predictions.
+                        # Limitation: step_eval re-derives poses from GT rot_slice,
+                        # so ar_rot_window-based pose conditioning only applies on
+                        # the fast path (ar_eval_rollout=False).
+                        inner = model_engine.module if hasattr(model_engine, 'module') \
+                                else model_engine
+                        inner.eval()
+                        with torch.no_grad():
+                            with torch.autocast('cuda', dtype=torch.bfloat16):
+                                ar_pred_frame = inner(
+                                    features_cond, rot_slice, sample_last=True,
+                                )  # [B, C, H, W]  — routes to step_eval
+                            # Re-encode the clean prediction for latent-space AR
+                            ar_pred_lats, _ = inner.encode_sequence(
+                                ar_pred_frame.unsqueeze(1).to(torch.bfloat16)
+                            )
+                            ar_pred_lats = ar_pred_lats[:, 0]   # [B, T, C]
+                        inner.train()
+                    else:
+                        # Fast path: use training-pass predictions (detached)
+                        ar_pred_frame = out.get('predict')
+                        ar_pred_lats  = out.get('predict_latents')
+
+                    # ── Slide pixel conditioning window ───────────────────────
+                    if ar_pred_frame is None:
+                        raise RuntimeError(
+                            f"[S2] AR step {j}: model returned no 'predict'; "
+                            "cannot continue autoregressive rollout. "
+                            "Ensure return_predict=True in config."
+                        )
+                    features_cond = torch.cat(
+                        [features_cond[:, 1:],
+                         ar_pred_frame.detach().unsqueeze(1)], dim=1
+                    )
+
+                    # ── Slide latent conditioning window ──────────────────────
                     slide_from = latents_cond_next if latents_cond_next is not None \
                                  else out.get('latents_cond_enc')
-                    if pred_lats is not None and slide_from is not None:
+                    if ar_pred_lats is not None and slide_from is not None:
                         latents_cond_next = torch.cat([
                             slide_from[:, 1:],
-                            pred_lats.detach().unsqueeze(1),
+                            ar_pred_lats.detach().unsqueeze(1),
                         ], dim=1)
 
-                    # ── Slide pixel conditioning window ──────────────────────
-                    if out.get('predict') is not None:
-                        features_cond = torch.cat([
-                            features_cond[:, 1:],
-                            out['predict'].detach().unsqueeze(1),
-                        ], dim=1)
-                    else:
-                        features_cond = range_views[:, j + 1:j + 1 + CF]
-
-                    # ── Update pose conditioning from PoseDiT predictions ────
-                    # rel_pose_cond[j+1] = [GT poses for frames j+1..j+CF-1,
-                    #                       PoseDiT prediction for frame j+CF]
-                    # This replaces the oldest GT pose with the model's prediction,
-                    # matching the latent AR conditioning and enabling pose
-                    # autoregression consistent with the Epona training scheme.
+                    # ── Advance AR rotation window + update pose conditioning ─
+                    # Compose the predicted absolute rotation for the newly added
+                    # conditioning frame, slide ar_rot_window forward, then derive
+                    # ALL conditioning relative poses from accumulated predictions.
+                    # For fw_iter > 2 this correctly uses predicted rotations for
+                    # predicted conditioning frames (unlike GT-based rp_prev which
+                    # leaked GT rotations for already-predicted frames).
                     pred_pose_xy  = out.get('predict_pose_xy')   # [B, 1, 2]
                     pred_pose_yaw = out.get('predict_pose_yaw')  # [B, 1, 1]
                     if pred_pose_xy is not None and pred_pose_yaw is not None:
                         with torch.no_grad():
+                            pred_abs_rot = _compose_predicted_rot(
+                                ar_rot_window[:, -1],
+                                pred_pose_xy[:, 0].float(),    # [B, 2]  metres
+                                pred_pose_yaw[:, 0].float(),   # [B, 1]  degrees
+                            )  # [B, 4, 4]
+                            ar_rot_window = torch.cat(
+                                [ar_rot_window[:, 1:],
+                                 pred_abs_rot.unsqueeze(1)], dim=1
+                            )  # [B, CF, 4, 4]
+                            # All conditioning relative poses from predicted rots —
+                            # no GT leakage for transitions involving predicted frames
                             with torch.cuda.amp.autocast(enabled=False):
-                                # GT sequential relative poses for new condition frames
-                                # j+1 .. j+CF-1  (CF-1 frames → CF-1 pairs from get_rel_pose)
-                                rp_prev, ry_prev = get_rel_pose(
-                                    rot_matrix[:, j + 1:j + CF].float()
-                                )
-                        rel_pose_cond = torch.cat(
-                            [rp_prev, pred_pose_xy.detach()], dim=1
-                        )   # [B, CF, 2]
-                        rel_yaw_cond = torch.cat(
-                            [ry_prev, pred_pose_yaw.detach()], dim=1
-                        )   # [B, CF, 1]
+                                rel_pose_cond, rel_yaw_cond = get_rel_pose(
+                                    ar_rot_window.float()
+                                )   # [B, CF, 2],  [B, CF, 1]
 
             step    += 1
             elapsed  = time.time() - time_stamp
@@ -365,6 +408,34 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _compose_predicted_rot(base_rot, pred_xy, pred_yaw_deg):
+    """Compose a predicted absolute 4×4 pose from the previous frame's absolute
+    rotation and a predicted relative (dx, dy, yaw_deg) pose.
+
+    Inverts get_rel_pose: base_rot @ T_rel → predicted absolute transform.
+
+    base_rot    : [B, 4, 4]  last condition frame absolute pose (float32)
+    pred_xy     : [B, 2]     predicted (dx, dy) in body frame (metres)
+    pred_yaw_deg: [B, 1]     predicted yaw relative rotation (degrees)
+    Returns     : [B, 4, 4]  predicted absolute pose of the next frame
+    """
+    B     = base_rot.shape[0]
+    yaw   = pred_yaw_deg[:, 0] * (math.pi / 180.)   # degrees → radians
+    cos_y = torch.cos(yaw)
+    sin_y = torch.sin(yaw)
+    dx    = pred_xy[:, 0]
+    dy    = pred_xy[:, 1]
+    z     = torch.zeros(B, device=base_rot.device, dtype=base_rot.dtype)
+    o     = torch.ones_like(z)
+    T_rel = torch.stack([
+        cos_y, -sin_y, z, dx,
+        sin_y,  cos_y, z, dy,
+        z,      z,     o, z,
+        z,      z,     z, o,
+    ], dim=1).view(B, 4, 4)
+    return base_rot @ T_rel
+
 
 def _delete_old_checkpoints(save_dir, current_step, prefix='swin_rae_step'):
     for f in glob.glob(os.path.join(save_dir, f'{prefix}*.pkl')):
