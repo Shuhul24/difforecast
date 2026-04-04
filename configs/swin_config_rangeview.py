@@ -135,7 +135,7 @@ bev_y_range            = 25.6
 blr          = 1e-4
 warmup_steps = 2000
 weight_decay = 0.01
-num_workers  = 8
+num_workers  = 4
 distributed  = True
 
 # ── Output directories ────────────────────────────────────────────────────────

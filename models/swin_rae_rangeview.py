@@ -577,20 +577,68 @@ class RangeViewSwinDiT(nn.Module):
 
         B = lat_target.shape[0]
         CF = self.condition_frames
-        stt_last  = rearrange(stt_features, '(b cf) s e -> b cf s e', b=B)[:, -1]
-        pose_last = rearrange(pose_emb_all, '(b cf) d   -> b cf d',   b=B)[:, -1]
+        stt_last = rearrange(stt_features, '(b cf) s e -> b cf s e', b=B)[:, -1]
 
-        tgt_norm  = lat_target / self.latent_scale
+        tgt_norm = lat_target / self.latent_scale
+
+        # ── PoseDiT FIRST: predict next relative pose (x, y, yaw) ───────────
+        # Running PoseDiT before FluxDiT lets us use the predicted pose as
+        # FluxDiT's vector conditioning `y`, achieving joint p(x, pose | history)
+        # rather than conditioning FluxDiT on the GT target pose (leakage).
+        pose_target_xy  = rel_pose[:, -1:]           # [B, 1, 2]
+        pose_target_yaw = rel_yaw[:, -1:]            # [B, 1, 1]
+        pose_target     = torch.cat([pose_target_xy, pose_target_yaw], dim=-1)  # [B, 1, 3]
+        pose_target_norm = self._normalize_pose(pose_target).to(torch.bfloat16)
+
+        u_pose = torch.randn((B, 1, 1), device=tgt_norm.device)
+        t_pose = torch.sigmoid(u_pose)               # logit-normal timestep
+        pose_loss_terms = self.pose_dit.training_losses(
+            traj=pose_target_norm,
+            traj_ids=self.pose_traj_ids[:B],
+            cond=stt_last,
+            cond_ids=self.cond_ids[:B],
+            t=t_pose,
+            return_predict=True,                     # always needed for AR conditioning
+        )
+        raw_pose_loss = pose_loss_terms['loss'].mean()
+        pose_loss     = self.lambda_pose * raw_pose_loss
+
+        # Denormalise predicted pose for AR conditioning and physical-unit outputs
+        predict_pose_norm = pose_loss_terms['predict']          # [B, 1, 3] normalised
+        predict_pose_raw  = self._denormalize_pose(predict_pose_norm.float())  # [B, 1, 3]
+        predict_pose_xy   = predict_pose_raw[:, :, :2]          # [B, 1, 2]
+        predict_pose_yaw  = predict_pose_raw[:, :, 2:3]         # [B, 1, 1]
+
+        # Quantise predicted pose → vocab indices → re-embed for FluxDiT `y`.
+        # Detached: PoseDiT gradients do not flow through the FluxDiT forward pass,
+        # keeping the two DiT losses independent (same as Flux/Stable Diffusion practice).
+        with torch.no_grad():
+            pred_pose_idx = poses_to_indices(
+                predict_pose_xy.detach().float(),
+                self.pose_x_vocab_size, self.pose_y_vocab_size,
+                x_range=float(self.pose_x_bound),
+                y_range=float(self.pose_y_bound * 2),
+            )   # [B, 1, 2]
+            pred_yaw_idx = yaws_to_indices(
+                predict_pose_yaw.detach().float(),
+                self.yaw_vocab_size,
+            )   # [B, 1, 1]
+            # get_pose_emb expects [B, T, 2] / [B, T, 1]; pass as-is ([B, 1, 2] / [B, 1, 1])
+            y_pred = self.model.get_pose_emb(
+                pred_pose_idx,   # [B, 1, 2]
+                pred_yaw_idx,    # [B, 1, 1]
+            )   # [B, n_embd*3]  ← matches FluxDiT vec_in_dim
+
+        # ── FluxDiT: predict next latent using predicted pose as `y` ─────────
         # Logit-normal timestep sampling: concentrates mass around t≈0.5
-        # (harder, intermediate noise levels) rather than uniform [0,1]
         u = torch.randn((B, 1, 1), device=tgt_norm.device)
-        t_sample  = torch.sigmoid(u)
+        t_sample = torch.sigmoid(u)
         guidance = torch.full((B,), float(getattr(self.args, 'cfg_scale', 3.5)),
                               device=tgt_norm.device, dtype=tgt_norm.dtype)
         loss_terms = self.dit.training_losses(
             img=tgt_norm, img_ids=self.img_ids[:B],
             cond=stt_last, cond_ids=self.cond_ids[:B],
-            t=t_sample, y=pose_last, guidance=guidance,
+            t=t_sample, y=y_pred, guidance=guidance,
             return_predict=self.args.return_predict,
         )
         diff_loss    = loss_terms['loss'].mean()
@@ -630,34 +678,12 @@ class RangeViewSwinDiT(nn.Module):
                 z_bev = self.bev_perceptual_fn(pd, gd, pd > 0.5, gd > 0.5) * t_sample.mean()
                 diff_loss = diff_loss + self._uw(self.log_w_bev, z_bev)
 
-        # ── PoseDiT: predict next single-step relative pose (x, y, yaw) ──────
-        # GT target: pose of the target frame relative to the last condition frame.
-        # rel_pose / rel_yaw have shape [B, CF+1, *]; index -1 is the target pose.
-        pose_target_xy  = rel_pose[:, -1:]           # [B, 1, 2]
-        pose_target_yaw = rel_yaw[:, -1:]            # [B, 1, 1]
-        pose_target     = torch.cat([pose_target_xy, pose_target_yaw], dim=-1)  # [B, 1, 3]
-        pose_target_norm = self._normalize_pose(pose_target).to(torch.bfloat16)
-
-        u_pose  = torch.randn((B, 1, 1), device=tgt_norm.device)
-        t_pose  = torch.sigmoid(u_pose)              # logit-normal timestep
-        pose_loss_terms = self.pose_dit.training_losses(
-            traj=pose_target_norm,
-            traj_ids=self.pose_traj_ids[:B],
-            cond=stt_last,
-            cond_ids=self.cond_ids[:B],
-            t=t_pose,
-            return_predict=True,                     # always needed for AR conditioning
-        )
-        raw_pose_loss = pose_loss_terms['loss'].mean()
-        pose_loss     = self.lambda_pose * raw_pose_loss
-
-        # Denormalise the predicted pose so callers can use it in physical units
-        predict_pose_norm = pose_loss_terms['predict']          # [B, 1, 3] (normalised)
-        predict_pose_raw  = self._denormalize_pose(predict_pose_norm)  # [B, 1, 3]
-        predict_pose_xy   = predict_pose_raw[:, :, :2]          # [B, 1, 2]
-        predict_pose_yaw  = predict_pose_raw[:, :, 2:3]         # [B, 1, 1]
-
         loss_all = diff_loss + pose_loss
+
+        # STT conditioning diagnostics (detached scalars — no memory overhead)
+        stt_last_f = stt_last.float()
+        stt_last_norm = stt_last_f.norm(dim=-1).mean().detach()
+        stt_last_std  = stt_last_f.std(0).mean().detach()
 
         return {
             'loss_all':         loss_all,
@@ -671,6 +697,9 @@ class RangeViewSwinDiT(nn.Module):
             # Predicted pose for next AR step (physical units, detached in training loop)
             'predict_pose_xy':  predict_pose_xy,
             'predict_pose_yaw': predict_pose_yaw,
+            # STT conditioning diagnostics
+            'stt_last_norm':    stt_last_norm,
+            'stt_last_std':     stt_last_std,
         }
 
     # ── Evaluation step ───────────────────────────────────────────────────────

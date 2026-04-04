@@ -362,10 +362,16 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 avg_bev  = cumul_bev  / fw_iter
                 avg_total= avg_diff + avg_pose + avg_cd + avg_bev
 
+                stt_norm = last_out.get('stt_last_norm', torch.tensor(0.)).item() \
+                           if last_out else 0.
+                stt_std  = last_out.get('stt_last_std',  torch.tensor(0.)).item() \
+                           if last_out else 0.
+
                 msg = (
                     f"[S2] step={step} | total={avg_total:.4f} | "
                     f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
                     f"cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
+                    f"stt_norm={stt_norm:.3f} | stt_std={stt_std:.3f} | "
                     f"lr={lr:.2e} | {elapsed:.2f}s/step"
                 )
                 logger.info(msg)
@@ -376,6 +382,8 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                     args.writer.add_scalar('stage2/loss_pose',  avg_pose,  step)
                     args.writer.add_scalar('stage2/loss_cd',    avg_cd,    step)
                     args.writer.add_scalar('stage2/loss_bev',   avg_bev,   step)
+                    args.writer.add_scalar('debug/stt_last_norm', stt_norm, step)
+                    args.writer.add_scalar('debug/stt_last_std',  stt_std,  step)
 
                 if not getattr(args, 'no_wandb', False):
                     wandb.log({
@@ -387,6 +395,9 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                         's2/aux/loss_bev':         avg_bev,
                         # Combined
                         's2/loss_total':           avg_total,
+                        # STT conditioning diagnostics
+                        'debug/stt_last_norm':     stt_norm,
+                        'debug/stt_last_std':      stt_std,
                         # Training diagnostics
                         'train/lr':                lr,
                         'train/step':              step,
