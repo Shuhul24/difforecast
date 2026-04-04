@@ -40,7 +40,7 @@ range_w   = 2048
 image_size = (64, 2048)
 
 # 1-channel (range/depth only); log2 normalisation.
-range_channels = 1
+range_channels = 2
 five_channel   = False
 log_range      = True
 proj_img_mean  = [0.0]
@@ -97,6 +97,15 @@ axes_dim_dit   = [16, 16, 32]
 mlp_ratio_dit  = 4.0
 drop_path_rate = 0.1
 
+# ── PoseDiT (single-step relative-pose prediction: x, y, yaw) ────────────────
+# pe_dim = n_embd_dit_traj / n_head_dit_traj = 512/8 = 64 = sum(axes_dim_dit_traj)
+n_embd_dit_traj   = 512
+n_head_dit_traj   = 8
+axes_dim_dit_traj = [16, 16, 32]   # sum = 64 = pe_dim
+n_layer_traj      = [4, 4]         # [double_stream_blocks, single_stream_blocks]
+lambda_yaw_pose   = 0.1            # weight for pose diffusion loss
+return_predict_traj = True         # must be True — predictions used for AR conditioning
+
 # ── Pose encoding ─────────────────────────────────────────────────────────────
 pose_x_vocab_size = 128
 pose_y_vocab_size = 128
@@ -109,6 +118,7 @@ yaw_bound         = 12.
 diffusion_model_type = 'flow'
 num_sampling_steps   = 100
 return_predict       = False      # no aux losses active — skip decoder forward during training
+traj_len             = 1         # single future step for PoseDiT
 latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_latent_stats.py
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────

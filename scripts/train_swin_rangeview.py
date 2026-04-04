@@ -25,6 +25,10 @@ Usage:
 """
 
 import os, sys, math, time, random, logging, argparse, glob
+
+root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(root_path)
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -33,9 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 import deepspeed
 import wandb
-
-root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(root_path)
+from utils.preprocess import get_rel_pose
 
 from utils.config_utils import Config
 from utils.deepspeed_utils import get_deepspeed_config
@@ -190,10 +192,19 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
 # ── Stage 2 training loop ─────────────────────────────────────────────────────
 
 def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
-    """Train STT + FluxDiT with chain-of-forward autoregressive training."""
+    """Train STT + FluxDiT + PoseDiT with chain-of-forward autoregressive training.
+
+    AR loop (fw_iter steps per batch):
+      1. Forward: FluxDiT predicts next latent frame; PoseDiT predicts next relative pose.
+      2. Backward + optimizer step using the combined loss (diff + pose + optional aux).
+      3. Slide the conditioning window: append predicted latent and predicted pose,
+         replacing the oldest condition frame / pose in the window.
+    Losses are accumulated across fw_iter steps and averaged for logging.
+    """
     model_engine.train()
     time_stamp = time.time()
     fw_iter = args.forward_iter
+    CF      = args.condition_frames
 
     for epoch in range(99999):
         for batch in loader:
@@ -203,15 +214,21 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
             range_views, poses = batch
             range_views = range_views.cuda(non_blocking=True).to(torch.bfloat16)
             poses       = poses.cuda(non_blocking=True).float()
-            rot_matrix  = poses[:, :args.condition_frames + fw_iter]
+            rot_matrix  = poses[:, :CF + fw_iter]   # [B, CF+fw_iter, 4, 4]
 
-            latents_cond_next = None
-            rel_pose_cond = rel_yaw_cond = None
+            # ── Initialise AR state ───────────────────────────────────────────
+            latents_cond_next = None   # pre-encoded latent window (None → encode on-the-fly)
+            rel_pose_cond     = None   # [B, CF, 2] predicted relative x,y from previous step
+            rel_yaw_cond      = None   # [B, CF, 1] predicted relative yaw from previous step
+            features_cond     = range_views[:, :CF]
+
+            # Cumulative losses over fw_iter steps (for logging)
+            cumul_diff = cumul_pose = cumul_cd = cumul_bev = 0.0
+            last_out   = None   # keep for vis / logging
 
             for j in range(fw_iter):
-                features_cond = range_views[:, j:j + args.condition_frames]
-                features_gt   = range_views[:, j + args.condition_frames:j + args.condition_frames + 1]
-                rot_slice     = rot_matrix[:, j:(j + args.condition_frames + 1)]
+                features_gt   = range_views[:, j + CF:j + CF + 1]
+                rot_slice     = rot_matrix[:, j:j + CF + 1]   # [B, CF+1, 4, 4]
 
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     out = model_engine(
@@ -224,47 +241,119 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
 
                 loss = out['loss_all']
                 if not math.isfinite(loss.item()):
-                    print(f"Step {step}: loss={loss.item()}, stopping"); sys.exit(1)
+                    print(f"[S2] Step {step} AR-step {j}: loss={loss.item()}, stopping")
+                    sys.exit(1)
 
+                # ── Per-step backward for FluxDiT + PoseDiT ─────────────────
+                # DeepSpeed routes gradients to each DiT from its loss component:
+                #   diff_loss  → FluxDiT  (visual latent rectified flow)
+                #   pose_loss  → PoseDiT  (relative-pose rectified flow)
+                # Both share the frozen STT context, but STT is not updated here.
                 model_engine.backward(loss)
                 model_engine.step()
                 if scheduler is not None:
                     scheduler.step()
 
-                if j < fw_iter - 1 and out.get('predict_latents') is not None:
-                    pred_lat  = out['predict_latents'].detach()
+                # ── Accumulate losses for logging ────────────────────────────
+                cumul_diff += out['loss_diff'].item()
+                cumul_pose += out['loss_pose'].item()
+                cumul_cd   += out.get('loss_chamfer',    torch.tensor(0.)).item()
+                cumul_bev  += out.get('loss_bev_percep', torch.tensor(0.)).item()
+                last_out    = out
+
+                if j < fw_iter - 1:
+                    # ── Slide latent conditioning window ─────────────────────
+                    # Replace the oldest condition frame's latent with the
+                    # current FluxDiT prediction (or fall back to GT encoding).
+                    pred_lats  = out.get('predict_latents')
                     slide_from = latents_cond_next if latents_cond_next is not None \
                                  else out.get('latents_cond_enc')
-                    if slide_from is not None:
+                    if pred_lats is not None and slide_from is not None:
                         latents_cond_next = torch.cat([
-                            slide_from[:, 1:], pred_lat.unsqueeze(1)
+                            slide_from[:, 1:],
+                            pred_lats.detach().unsqueeze(1),
                         ], dim=1)
+
+                    # ── Slide pixel conditioning window ──────────────────────
                     if out.get('predict') is not None:
                         features_cond = torch.cat([
                             features_cond[:, 1:],
                             out['predict'].detach().unsqueeze(1),
                         ], dim=1)
+                    else:
+                        features_cond = range_views[:, j + 1:j + 1 + CF]
 
-            step += 1
-            elapsed = time.time() - time_stamp; time_stamp = time.time()
+                    # ── Update pose conditioning from PoseDiT predictions ────
+                    # rel_pose_cond[j+1] = [GT poses for frames j+1..j+CF-1,
+                    #                       PoseDiT prediction for frame j+CF]
+                    # This replaces the oldest GT pose with the model's prediction,
+                    # matching the latent AR conditioning and enabling pose
+                    # autoregression consistent with the Epona training scheme.
+                    pred_pose_xy  = out.get('predict_pose_xy')   # [B, 1, 2]
+                    pred_pose_yaw = out.get('predict_pose_yaw')  # [B, 1, 1]
+                    if pred_pose_xy is not None and pred_pose_yaw is not None:
+                        with torch.no_grad():
+                            with torch.cuda.amp.autocast(enabled=False):
+                                # GT sequential relative poses for new condition frames
+                                # j+1 .. j+CF-1  (CF-1 frames → CF-1 pairs from get_rel_pose)
+                                rp_prev, ry_prev = get_rel_pose(
+                                    rot_matrix[:, j + 1:j + CF].float()
+                                )
+                        rel_pose_cond = torch.cat(
+                            [rp_prev, pred_pose_xy.detach()], dim=1
+                        )   # [B, CF, 2]
+                        rel_yaw_cond = torch.cat(
+                            [ry_prev, pred_pose_yaw.detach()], dim=1
+                        )   # [B, CF, 1]
 
+            step    += 1
+            elapsed  = time.time() - time_stamp
+            time_stamp = time.time()
+
+            # ── Logging (every 50 steps, rank 0 only) ────────────────────────
             if step % 50 == 0 and global_rank == 0:
-                lr = model_engine.get_lr()[0]
-                msg = (f"[S2] step={step} | loss={loss.item():.4f} | "
-                       f"diff={out['loss_diff'].item():.4f} | "
-                       f"bev={out['loss_bev_percep'].item():.4f} | "
-                       f"lr={lr:.2e} | {elapsed:.2f}s/step")
+                lr       = model_engine.get_lr()[0]
+                avg_diff = cumul_diff / fw_iter
+                avg_pose = cumul_pose / fw_iter
+                avg_cd   = cumul_cd   / fw_iter
+                avg_bev  = cumul_bev  / fw_iter
+                avg_total= avg_diff + avg_pose + avg_cd + avg_bev
+
+                msg = (
+                    f"[S2] step={step} | total={avg_total:.4f} | "
+                    f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
+                    f"cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
+                    f"lr={lr:.2e} | {elapsed:.2f}s/step"
+                )
                 logger.info(msg)
+
                 if hasattr(args, 'writer') and args.writer:
-                    args.writer.add_scalar('stage2/loss_all',  loss.item(), step)
-                    args.writer.add_scalar('stage2/loss_diff', out['loss_diff'].item(), step)
-                if not getattr(args, 'no_wandb', False) and global_rank == 0:
-                    wandb.log({'s2/loss': loss.item(), 's2/diff': out['loss_diff'].item(),
-                               's2/bev': out['loss_bev_percep'].item(), 'step': step})
+                    args.writer.add_scalar('stage2/loss_total', avg_total, step)
+                    args.writer.add_scalar('stage2/loss_diff',  avg_diff,  step)
+                    args.writer.add_scalar('stage2/loss_pose',  avg_pose,  step)
+                    args.writer.add_scalar('stage2/loss_cd',    avg_cd,    step)
+                    args.writer.add_scalar('stage2/loss_bev',   avg_bev,   step)
+
+                if not getattr(args, 'no_wandb', False):
+                    wandb.log({
+                        # Individual DiT losses — separate W&B tabs/charts
+                        's2/FluxDiT/loss_diff':    avg_diff,
+                        's2/PoseDiT/loss_pose':    avg_pose,
+                        # Auxiliary losses
+                        's2/aux/loss_chamfer':     avg_cd,
+                        's2/aux/loss_bev':         avg_bev,
+                        # Combined
+                        's2/loss_total':           avg_total,
+                        # Training diagnostics
+                        'train/lr':                lr,
+                        'train/step':              step,
+                    })
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0
-                    and global_rank == 0 and out.get('predict') is not None):
-                _save_vis(step, args, features_cond, features_gt, out['predict'].detach())
+                    and global_rank == 0 and last_out is not None
+                    and last_out.get('predict') is not None):
+                _save_vis(step, args, features_cond, features_gt,
+                          last_out['predict'].detach())
 
             if step % args.eval_steps == 0 and global_rank == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine

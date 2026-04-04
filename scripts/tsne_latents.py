@@ -39,7 +39,9 @@ import sys
 import argparse
 import numpy as np
 import torch
+import matplotlib.cm as cm
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 
@@ -64,8 +66,23 @@ def _load_dino_model(cfg, ckpt_path, device):
 
 def _load_swin_model(cfg, ckpt_path, device):
     from models.swin_rae_rangeview import RangeViewSwinRAE
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    # Infer input channel count from the patch-embed conv weight in the checkpoint
+    # so the model is built correctly regardless of what the config says.
+    ckpt_n_ch = ckpt['model_state_dict']['encoder.patch_embed.proj.weight'].shape[1]
+    cfg_n_ch  = 5 if getattr(cfg, 'five_channel', False) else getattr(cfg, 'range_channels', 1)
+    if ckpt_n_ch != cfg_n_ch:
+        print(f"  [info] checkpoint uses {ckpt_n_ch} input channels "
+              f"(config says {cfg_n_ch}) — patching cfg")
+        cfg.range_channels = ckpt_n_ch
+        cfg.five_channel   = False          # five_channel is a separate flag
+        # ch_weights must match the channel count
+        cfg.rae_ch_weights = list(
+            ckpt['model_state_dict']['ch_weights'].cpu().float().numpy()
+        )
+
     model = RangeViewSwinRAE(cfg, local_rank=-1)
-    ckpt  = torch.load(ckpt_path, map_location='cpu')
     model.load_state_dict(ckpt['model_state_dict'], strict=True)
     model.eval().to(device)
     step = ckpt.get('step', '?')
@@ -78,17 +95,21 @@ def _load_swin_model(cfg, ckpt_path, device):
 def extract_sequence_features(
     model,
     cfg,
-    seq_id   : int,
-    n_frames : int,
-    batch_sz : int,
-    device   : torch.device,
-) -> torch.Tensor | None:
-    """Encode one KITTI sequence and return mean-pooled latents [N, 384].
+    seq_id        : int,
+    n_frames      : int,
+    batch_sz      : int,
+    device        : torch.device,
+    return_images : bool = False,
+):
+    """Encode one KITTI sequence and return mean-pooled latents [N, D].
 
     n_frames <= 0  →  use every frame in the sequence.
     n_frames  > 0  →  evenly subsample to that many frames.
 
-    Returns mean-pooled latents [N, 768] for swin (64 tokens × 768 dim).
+    Returns:
+        feats  : Tensor [N, D] of mean-pooled encoder tokens, or None on failure.
+        images : list of N cpu Tensors [C, H, W] (raw, un-normalised) when
+                 return_images=True, else None.
     """
     try:
         ds = KITTIRangeViewDataset(
@@ -114,27 +135,47 @@ def extract_sequence_features(
         )
     except Exception as e:
         print(f"  Seq {seq_id:02d}: skipped ({e})")
-        return None
+        return None, None
 
     total = len(ds)
     if total == 0:
-        return None
+        return None, None
 
     indices = (np.arange(total) if n_frames <= 0
                else np.linspace(0, total - 1, min(n_frames, total), dtype=int))
 
-    feats = []
+    feats     = []
+    imgs_out  = [] if return_images else None
+
     for s in range(0, len(indices), batch_sz):
         batch_idx = indices[s: s + batch_sz]
-        imgs = torch.stack([ds[int(i)][0][0] for i in batch_idx])   # [B, C, H, W]
-        imgs = imgs.to(device, dtype=torch.float32)
-        z, _ = model.encode(imgs)           # z: [B, 64, 768]
-        feats.append(z.mean(dim=1).cpu())   # mean over tokens → [B, 768]
+        raw = torch.stack([ds[int(i)][0][0] for i in batch_idx])   # [B, C, H, W]
+        if return_images:
+            imgs_out.extend(raw.unbind(0))          # list of cpu [C, H, W] tensors
+        imgs = raw.to(device, dtype=torch.float32)
+        z, _ = model.encode(imgs)                   # z: [B, tokens, D]
+        feats.append(z.mean(dim=1).cpu())           # mean over tokens → [B, D]
 
-    return torch.cat(feats, dim=0)          # [N, 384]
+    return torch.cat(feats, dim=0), imgs_out        # ([N, D], list|None)
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
+
+def _to_rgb_image(img_tensor: torch.Tensor, max_w: int = 640) -> np.ndarray:
+    """Convert a [C,H,W] range-view tensor → uint8 RGB [H,W,3] via viridis.
+
+    Uses the range channel (index 0).  Widths above max_w are stride-subsampled
+    so the embedded HTML stays compact.
+    """
+    ch = img_tensor[0].cpu().float().numpy()   # [H, W]
+    h, w = ch.shape
+    if w > max_w:
+        step = max(1, w // max_w)
+        ch = ch[:, ::step]
+    vmin, vmax = ch.min(), ch.max()
+    ch_n = (ch - vmin) / (vmax - vmin + 1e-8)
+    return (cm.viridis(ch_n)[:, :, :3] * 255).astype(np.uint8)   # [H,W,3]
+
 
 TAB10 = [
     '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
@@ -234,13 +275,19 @@ def _make_2d_figure(emb, seqs, seq_ids_present, step_ckpt, arch, encoder_desc):
 # ── Animated 3-D figure (scan-by-scan reveal for one sequence) ────────────────
 
 def _make_animated_3d_figure(
-    emb, seqs, seq_ids_present, animate_seq, step_ckpt, arch, encoder_desc
+    emb, seqs, seq_ids_present, animate_seq, step_ckpt, arch, encoder_desc,
+    images=None,
 ):
     """3-D t-SNE with a play/slider animation that reveals one sequence scan-by-scan.
 
     All other sequences are shown as static faded background markers.
-    The animated sequence grows point-by-point (cumulative reveal) so you can
-    watch the trajectory through latent space as the drive progresses.
+    The animated sequence grows point-by-point (cumulative reveal).
+
+    When *images* is provided (a list of [C,H,W] cpu tensors in the same order
+    as the animated sequence's rows in *emb*) the figure gains a second panel
+    that shows the corresponding range-view image for the most recently revealed
+    scan, so the user can see which real-world scene is being projected into the
+    latent space.
     """
     # build per-sequence local scan index (same logic as static figures)
     counters = {sid: 0 for sid in seq_ids_present}
@@ -272,10 +319,12 @@ def _make_animated_3d_figure(
 
     anim_color = TAB10[animate_seq % len(TAB10)]
     anim_local = [seq_scan_idx[g] for g in anim_gi]
+    n_bg       = len(bg_traces)
+    has_images = images is not None and len(images) > 0
 
-    # Frame 0 = empty animated trace so slider starts blank
-    def _anim_trace(n_shown):
-        idx = anim_gi[:n_shown]
+    # ── trace builders ────────────────────────────────────────────────────────
+    def _anim_scatter(n_shown):
+        idx         = anim_gi[:n_shown]
         local_shown = anim_local[:n_shown]
         return go.Scatter3d(
             x=emb[idx, 0], y=emb[idx, 1], z=emb[idx, 2],
@@ -283,27 +332,72 @@ def _make_animated_3d_figure(
             marker=dict(size=5, color=anim_color, opacity=0.90),
             text=[f'seq {animate_seq:02d}  scan {l:06d}' for l in local_shown],
             hovertemplate='%{text}<extra></extra>',
+            scene='scene',
         )
 
-    # Use every scan or stride to keep the HTML size reasonable (max 500 frames)
-    stride = max(1, n_anim // 500)
+    def _range_img(n_shown):
+        """go.Image trace for the range-view panel (subplot col 2)."""
+        if n_shown == 0 or not has_images:
+            h, w = images[0].shape[-2], images[0].shape[-1] if has_images else (64, 512)
+            rgb  = np.zeros((h, min(w, 640), 3), dtype=np.uint8)
+            label = 'Range view'
+        else:
+            rgb   = _to_rgb_image(images[n_shown - 1])
+            label = f'seq {animate_seq:02d}  scan {anim_local[n_shown - 1]:06d}'
+        return go.Image(
+            z=rgb,
+            name=label,
+            showlegend=False,
+            xaxis='x2',
+            yaxis='y2',
+            hovertemplate='%{text}<extra></extra>',
+            text=[[label] * rgb.shape[1]] * rgb.shape[0],
+        )
+
+    # ── frame stride (max 500 frames to keep HTML compact) ───────────────────
+    stride       = max(1, n_anim // 500)
     frame_counts = list(range(0, n_anim + 1, stride))
     if frame_counts[-1] != n_anim:
         frame_counts.append(n_anim)
 
-    plotly_frames = [
-        go.Frame(
-            data=bg_traces + [_anim_trace(k)],
-            name=str(k),
+    # ── assemble figure ───────────────────────────────────────────────────────
+    if has_images:
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{'type': 'scene'}, {'type': 'xy'}]],
+            column_widths=[0.58, 0.42],
+            subplot_titles=['Latent Space (3-D t-SNE)', 'Range View (depth channel)'],
+            horizontal_spacing=0.04,
         )
-        for k in frame_counts
-    ]
+        for t in bg_traces:
+            fig.add_trace(t, row=1, col=1)
+        fig.add_trace(_anim_scatter(0), row=1, col=1)
+        fig.add_trace(_range_img(0), row=1, col=2)
 
-    fig = go.Figure(
-        data=bg_traces + [_anim_trace(0)],
-        frames=plotly_frames,
-    )
+        # Only the two mutable traces are updated each frame
+        plotly_frames = [
+            go.Frame(
+                data=[_anim_scatter(k), _range_img(k)],
+                traces=[n_bg, n_bg + 1],
+                name=str(k),
+            )
+            for k in frame_counts
+        ]
+        fig_width = 1600
+    else:
+        fig = go.Figure(data=bg_traces + [_anim_scatter(0)])
+        plotly_frames = [
+            go.Frame(
+                data=bg_traces + [_anim_scatter(k)],
+                name=str(k),
+            )
+            for k in frame_counts
+        ]
+        fig_width = 1100
 
+    fig.frames = plotly_frames
+
+    # ── layout ────────────────────────────────────────────────────────────────
     sliders = [dict(
         active=0,
         steps=[dict(
@@ -315,7 +409,7 @@ def _make_animated_3d_figure(
         len=0.9, x=0.05, y=0.02,
     )]
 
-    fig.update_layout(
+    layout_kw = dict(
         title=dict(
             text=(
                 f'[{arch.upper()}] latent space — animated seq {animate_seq:02d}  '
@@ -331,8 +425,8 @@ def _make_animated_3d_figure(
             zaxis=dict(showticklabels=False),
         ),
         legend=dict(title='KITTI sequence', itemsizing='constant'),
-        margin=dict(l=0, r=0, t=80, b=80),
-        width=1100, height=850,
+        margin=dict(l=0, r=0, t=100, b=80),
+        width=fig_width, height=850,
         updatemenus=[dict(
             type='buttons', showactive=False, y=0.06, x=0.02, xanchor='left',
             buttons=[
@@ -348,6 +442,14 @@ def _make_animated_3d_figure(
         )],
         sliders=sliders,
     )
+    if has_images:
+        # y increases downward for image display; hide tick labels
+        layout_kw['yaxis2'] = dict(autorange='reversed', showticklabels=False,
+                                   showgrid=False, zeroline=False)
+        layout_kw['xaxis2'] = dict(showticklabels=False,
+                                   showgrid=False, zeroline=False)
+
+    fig.update_layout(**layout_kw)
     return fig
 
 
@@ -407,7 +509,7 @@ def main():
 
     for seq in range(10):
         print(f"\nSeq {seq:02d} …", end=' ', flush=True)
-        feats = extract_sequence_features(
+        feats, _ = extract_sequence_features(
             model, cfg, seq, args.n_frames_per_seq, args.batch_size, device
         )
         if feats is None:
@@ -463,11 +565,21 @@ def main():
         elif nc != 3:
             print("Animation is only supported for 3-D t-SNE (--n_components 3) — skipping.")
         else:
+            print(f"Loading range-view images for seq {args.animate_seq:02d} …")
+            _, images_anim = extract_sequence_features(
+                model, cfg, args.animate_seq,
+                args.n_frames_per_seq, args.batch_size, device,
+                return_images=True,
+            )
+            print(f"  {len(images_anim)} images loaded  "
+                  f"(shape {tuple(images_anim[0].shape)})")
+
             print(f"Building animated HTML for seq {args.animate_seq:02d} …")
             fig_anim = _make_animated_3d_figure(
                 emb, seqs, seq_ids_present,
                 animate_seq=args.animate_seq,
                 step_ckpt=step_ckpt, arch=args.arch, encoder_desc=encoder_desc,
+                images=images_anim,
             )
             anim_path = os.path.join(
                 args.output_dir,

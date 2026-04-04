@@ -90,14 +90,16 @@ class TrajDiT(nn.Module):
             raise ValueError("Input traj and cond tensors must have 3 dimensions.")
 
         # running on sequences traj
+        dtype = self.traj_in.weight.dtype
+        traj = traj.to(dtype)
         traj = self.traj_in(traj)
-        vec = self.time_in(timestep_embedding(timesteps, 256))
+        vec = self.time_in(timestep_embedding(timesteps, 256).to(dtype))
         if self.params.guidance_embed:
             if guidance is None:
                 raise ValueError("Didn't get guidance strength for guidance distilled model.")
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(dtype))
         # vec = vec + self.vector_in(y)
-        cond = self.cond_in(cond)
+        cond = self.cond_in(cond.to(dtype))
 
         ids = torch.cat((cond_ids, traj_ids), dim=1)
         pe = self.pe_embedder(ids)

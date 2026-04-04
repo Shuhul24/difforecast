@@ -29,6 +29,7 @@ from einops import rearrange
 from models.swin_rangeview import TULIPRangeEncoder, TULIPRangeDecoder, _init_weights
 from models.stt import SpatialTemporalTransformer
 from models.flux_dit import FluxParams, FluxDiT
+from models.traj_dit import TrajDiT, TrajParams
 from models.modules.tokenizer import poses_to_indices, yaws_to_indices
 from models.modules.sampling import prepare_ids, get_schedule
 from utils.preprocess import get_rel_pose
@@ -390,6 +391,26 @@ class RangeViewSwinDiT(nn.Module):
         self.register_buffer('latent_scale',
                              torch.tensor(float(getattr(args, 'latent_scale', 1.0))))
 
+        # ── PoseDiT (single-step relative-pose prediction) ───────────────────
+        # Predicts the next (x, y, yaw) relative to the last condition frame.
+        # Used during AR training to replace GT poses with model predictions.
+        self.traj_token_size = 3  # x, y, yaw
+        self.lambda_pose     = float(getattr(args, 'lambda_yaw_pose', 0.1))
+
+        self.pose_dit = TrajDiT(TrajParams(
+            in_channels=self.traj_token_size,
+            out_channels=self.traj_token_size,
+            context_in_dim=args.n_embd,
+            hidden_size=int(getattr(args, 'n_embd_dit_traj', 512)),
+            mlp_ratio=4.0,
+            num_heads=int(getattr(args, 'n_head_dit_traj', 8)),
+            depth=args.n_layer_traj[0],
+            depth_single_blocks=args.n_layer_traj[1],
+            axes_dim=list(getattr(args, 'axes_dim_dit_traj', [16, 16, 32])),
+            theta=10_000, qkv_bias=True, guidance_embed=False,
+        ))
+        self.pose_dit.cuda()
+
         # Auxiliary loss config
         self.log_range              = bool(getattr(args,  'log_range',              True))
         self.proj_img_mean          = list(getattr(args,  'proj_img_mean',          [0.0, 0.0]))
@@ -426,23 +447,45 @@ class RangeViewSwinDiT(nn.Module):
         self.img_ids, self.cond_ids, _ = prepare_ids(
             bs, self.h, self.w, self.total_token_size, 0, prefix_size=_pfx2
         )
+        # traj_ids for PoseDiT: traj_len=1, so shape [bs, 1, 3] = zeros
+        _, _, _pose_traj_ids = prepare_ids(
+            bs, self.h, self.w, self.total_token_size, 1, prefix_size=_pfx2
+        )
+        self.register_buffer('pose_traj_ids', _pose_traj_ids)
 
         if load_path is not None:
             self._load_ckpt(load_path)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def _normalize_pose(self, traj: torch.Tensor) -> torch.Tensor:
+        """Map (x_m, y_m, yaw_deg) to [-1, 1]. Works on any prefix shape."""
+        t = traj.clone().float()
+        t[..., 0] = 2.0 * t[..., 0] / self.pose_x_bound - 1.0
+        t[..., 1] = t[..., 1] / self.pose_y_bound
+        t[..., 2] = t[..., 2] / self.yaw_bound
+        return t
+
+    def _denormalize_pose(self, traj: torch.Tensor) -> torch.Tensor:
+        """Inverse of _normalize_pose."""
+        t = traj.clone().float()
+        t[..., 0] = (t[..., 0] + 1.0) * self.pose_x_bound / 2.0
+        t[..., 1] = t[..., 1] * self.pose_y_bound
+        t[..., 2] = t[..., 2] * self.yaw_bound
+        return t
+
     def _load_ckpt(self, path):
         sd = torch.load(path, map_location='cpu').get('model_state_dict', {})
-        for attr, prefixes in [('model', ['module.model.', 'model.']),
-                                ('dit',   ['module.dit.',   'dit.'])]:
+        for attr, prefixes in [('model',    ['module.model.',    'model.']),
+                                ('dit',      ['module.dit.',      'dit.']),
+                                ('pose_dit', ['module.pose_dit.', 'pose_dit.'])]:
             obj = getattr(self, attr)
             for pfx in prefixes:
                 obj_sd = {k: sd[pfx + k] for k in obj.state_dict() if pfx + k in sd}
                 if obj_sd:
                     obj.load_state_dict(obj_sd, strict=False)
                     break
-        print(f"[SwinDiT] STT+DiT loaded from {path}")
+        print(f"[SwinDiT] STT+DiT+PoseDiT loaded from {path}")
 
     @staticmethod
     def _uw(log_w, loss):
@@ -587,14 +630,47 @@ class RangeViewSwinDiT(nn.Module):
                 z_bev = self.bev_perceptual_fn(pd, gd, pd > 0.5, gd > 0.5) * t_sample.mean()
                 diff_loss = diff_loss + self._uw(self.log_w_bev, z_bev)
 
+        # ── PoseDiT: predict next single-step relative pose (x, y, yaw) ──────
+        # GT target: pose of the target frame relative to the last condition frame.
+        # rel_pose / rel_yaw have shape [B, CF+1, *]; index -1 is the target pose.
+        pose_target_xy  = rel_pose[:, -1:]           # [B, 1, 2]
+        pose_target_yaw = rel_yaw[:, -1:]            # [B, 1, 1]
+        pose_target     = torch.cat([pose_target_xy, pose_target_yaw], dim=-1)  # [B, 1, 3]
+        pose_target_norm = self._normalize_pose(pose_target).to(torch.bfloat16)
+
+        u_pose  = torch.randn((B, 1, 1), device=tgt_norm.device)
+        t_pose  = torch.sigmoid(u_pose)              # logit-normal timestep
+        pose_loss_terms = self.pose_dit.training_losses(
+            traj=pose_target_norm,
+            traj_ids=self.pose_traj_ids[:B],
+            cond=stt_last,
+            cond_ids=self.cond_ids[:B],
+            t=t_pose,
+            return_predict=True,                     # always needed for AR conditioning
+        )
+        raw_pose_loss = pose_loss_terms['loss'].mean()
+        pose_loss     = self.lambda_pose * raw_pose_loss
+
+        # Denormalise the predicted pose so callers can use it in physical units
+        predict_pose_norm = pose_loss_terms['predict']          # [B, 1, 3] (normalised)
+        predict_pose_raw  = self._denormalize_pose(predict_pose_norm)  # [B, 1, 3]
+        predict_pose_xy   = predict_pose_raw[:, :, :2]          # [B, 1, 2]
+        predict_pose_yaw  = predict_pose_raw[:, :, 2:3]         # [B, 1, 1]
+
+        loss_all = diff_loss + pose_loss
+
         return {
-            'loss_all':        diff_loss,
-            'loss_diff':       loss_terms['loss'].mean().detach(),
-            'loss_chamfer':    z_cd,
-            'loss_bev_percep': z_bev,
-            'predict':         predict_decoded,
-            'predict_latents': predict_lats,
+            'loss_all':         loss_all,
+            'loss_diff':        loss_terms['loss'].mean().detach(),
+            'loss_pose':        pose_loss.detach(),
+            'loss_chamfer':     z_cd,
+            'loss_bev_percep':  z_bev,
+            'predict':          predict_decoded,
+            'predict_latents':  predict_lats,
             'latents_cond_enc': lat_cond,
+            # Predicted pose for next AR step (physical units, detached in training loop)
+            'predict_pose_xy':  predict_pose_xy,
+            'predict_pose_yaw': predict_pose_yaw,
         }
 
     # ── Evaluation step ───────────────────────────────────────────────────────
