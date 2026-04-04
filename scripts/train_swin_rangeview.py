@@ -83,6 +83,10 @@ def parse_args():
     args = p.parse_args()
     cfg  = Config.fromfile(args.config)
     cfg.merge_from_dict(args.__dict__)
+    
+    if cfg.stage == '2' and not getattr(cfg, 'return_predict', False):
+        cfg.return_predict = True
+        
     return cfg
 
 
