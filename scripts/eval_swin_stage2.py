@@ -41,7 +41,7 @@ sys.path.append(root_path)
 
 from utils.config_utils import Config
 from models.swin_rae_rangeview import RangeViewSwinDiT
-from dataset.dataset_kitti_rangeview import KITTIRangeViewValDataset
+from dataset.dataset_kitti_rangeview import KITTIRangeViewValDataset, KITTIRangeViewTestDataset
 from dataset.projection import RangeProjection
 
 
@@ -53,7 +53,9 @@ def parse_args():
     p.add_argument('--ckpt',      required=True,  help='Path to swin_dit_step*.pkl')
     p.add_argument('--out',       default='outputs/eval_swin_s2')
     p.add_argument('--n_samples', default=200, type=int,
-                   help='Max val samples to evaluate (0 = all)')
+                   help='Max samples to evaluate (0 = all)')
+    p.add_argument('--split',     default='test', choices=['val', 'test'],
+                   help='Which split to evaluate (val=[6,7]  test=[8,9,10])')
     p.add_argument('--bev_range', default=None, type=float,
                    help='BEV half-extent in metres (default: from config or 50 m)')
     p.add_argument('--max_depth', default=80.0, type=float)
@@ -293,6 +295,14 @@ def main():
               f'(config says {cfg.n_layer[0]}) — patching cfg.n_layer[0]')
         cfg.n_layer = [ckpt_n_layer] + list(cfg.n_layer[1:])
 
+    # Auto-detect training batch_size from pose_traj_ids shape [bs*CF, 1, 3]
+    # so the model buffer is built with the same size as the checkpoint.
+    ckpt_pose_bs = ckpt['model_state_dict']['pose_traj_ids'].shape[0]
+    cfg.batch_size = ckpt_pose_bs // cfg.condition_frames
+    if cfg.batch_size != 1:
+        print(f'  [info] checkpoint trained with batch_size={cfg.batch_size} '
+              f'(pose_traj_ids={ckpt_pose_bs}) — patching cfg.batch_size for model init')
+
     cfg.swin_ckpt = None
     model = RangeViewSwinDiT(cfg, local_rank=0)
     model.load_state_dict(ckpt['model_state_dict'], strict=True)
@@ -302,9 +312,8 @@ def main():
     print(f'  Total params: {sum(p.numel() for p in model.parameters()) / 1e6:.1f} M')
     print(f'  Condition frames: {cfg.condition_frames}  |  Forecast horizons: {n_horizons}')
 
-    # ── Val dataset ───────────────────────────────────────────────────────────
-    val_ds = KITTIRangeViewValDataset(
-        sequences=cfg.val_sequences,
+    # ── Dataset (val or test) ─────────────────────────────────────────────────
+    ds_kwargs = dict(
         sequences_path=cfg.kitti_sequences_path,
         poses_path=cfg.kitti_poses_path,
         h=cfg.range_h, w=cfg.range_w,
@@ -317,14 +326,20 @@ def main():
         pc_reshape=tuple(cfg.pc_reshape),
         five_channel=getattr(cfg, 'five_channel', False),
         log_range=log_range,
+        depth_only=(int(getattr(cfg, 'range_channels', 2)) == 1),
         condition_frames=cfg.condition_frames,
         forward_iter=cfg.forward_iter,
     )
-    n_eval = len(val_ds) if args_cli.n_samples == 0 else min(args_cli.n_samples, len(val_ds))
-    print(f'Val dataset: {len(val_ds)} samples  →  evaluating {n_eval}')
+    if args_cli.split == 'test':
+        eval_ds = KITTIRangeViewTestDataset(sequences=cfg.test_sequences, **ds_kwargs)
+    else:
+        eval_ds = KITTIRangeViewValDataset(sequences=cfg.val_sequences, **ds_kwargs)
+
+    n_eval = len(eval_ds) if args_cli.n_samples == 0 else min(args_cli.n_samples, len(eval_ds))
+    print(f'{args_cli.split.capitalize()} dataset: {len(eval_ds)} samples  →  evaluating {n_eval}')
 
     loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=1, shuffle=False, num_workers=4, pin_memory=True,
+        eval_ds, batch_size=1, shuffle=False, num_workers=4, pin_memory=True,
     )
 
     # ── Eval loop ─────────────────────────────────────────────────────────────

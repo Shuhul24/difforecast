@@ -107,12 +107,13 @@ def make_dataset(args, train=True):
         five_channel=getattr(args, 'five_channel', False),
         log_range=getattr(args, 'log_range', True),
         depth_only=(int(getattr(args, 'range_channels', 2)) == 1),
+        mask_channel=getattr(args, 'mask_channel', False),
     )
     if args.stage == '1':
         return KITTIRangeViewDataset(
             sequences=args.train_sequences if train else args.val_sequences,
             condition_frames=0, forward_iter=1, is_train=train,
-            augmentation_config=args.augmentation_config if train else None,
+            augmentation_config=None,   # removed: per-frame aug breaks reconstruction
             **common,
         )
     else:
@@ -122,7 +123,7 @@ def make_dataset(args, train=True):
             condition_frames=args.condition_frames,
             forward_iter=args.forward_iter,
             is_train=train,
-            augmentation_config=args.augmentation_config if train else None,
+            augmentation_config=None,   # removed: independent per-frame aug contradicts GT poses
             **common,
         ) if train else KITTIRangeViewValDataset(
             sequences=seqs,
@@ -169,15 +170,19 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
 
             if step % 50 == 0 and global_rank == 0:
                 lr = model_engine.get_lr()[0]
+                loss_mask_val = out.get('loss_mask', torch.tensor(0.)).item()
                 msg = (f"[S1] epoch={epoch_frac:.2f} | step={step} | loss={loss.item():.4f} | "
-                       f"rec={out['loss_rec'].item():.4f} | bev={out['loss_bev'].item():.4f} | "
+                       f"rec={out['loss_rec'].item():.4f} | mask_bce={loss_mask_val:.4f} | "
+                       f"bev={out['loss_bev'].item():.4f} | "
                        f"lr={lr:.2e} | {elapsed:.2f}s/step")
                 logger.info(msg)
                 if hasattr(args, 'writer') and args.writer:
-                    args.writer.add_scalar('stage1/loss_all', loss.item(), step)
-                    args.writer.add_scalar('stage1/loss_rec', out['loss_rec'].item(), step)
+                    args.writer.add_scalar('stage1/loss_all',      loss.item(),           step)
+                    args.writer.add_scalar('stage1/loss_rec',      out['loss_rec'].item(), step)
+                    args.writer.add_scalar('stage1/loss_mask_bce', loss_mask_val,          step)
                 if not getattr(args, 'no_wandb', False) and global_rank == 0:
                     wandb.log({'s1/loss': loss.item(), 's1/rec': out['loss_rec'].item(),
+                               's1/mask_bce': loss_mask_val,
                                's1/bev': out['loss_bev'].item(), 'step': step, 'epoch': epoch_frac})
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0
@@ -241,7 +246,8 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
 
             # Cumulative losses over fw_iter steps (for logging)
             cumul_diff = cumul_pose = cumul_cd = cumul_bev = 0.0
-            last_out   = None   # keep for vis / logging
+            last_out        = None   # keep for vis / logging
+            all_predictions = []     # collect per-AR-step predictions for vis
 
             for j in range(fw_iter):
                 features_gt = range_views[:, j + CF:j + CF + 1]
@@ -277,6 +283,8 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 cumul_cd   += out.get('loss_chamfer',    torch.tensor(0.)).item()
                 cumul_bev  += out.get('loss_bev_percep', torch.tensor(0.)).item()
                 last_out    = out
+                if global_rank == 0 and out.get('predict') is not None:
+                    all_predictions.append(out['predict'].detach())
 
                 if j < fw_iter - 1:
                     # ── Obtain AR predictions for next-step conditioning ──────
@@ -408,10 +416,8 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                     })
 
             if (args.vis_steps > 0 and step % args.vis_steps == 0
-                    and global_rank == 0 and last_out is not None
-                    and last_out.get('predict') is not None):
-                _save_vis(step, args, features_cond, features_gt,
-                          last_out['predict'].detach())
+                    and global_rank == 0 and all_predictions):
+                _save_vis(step, args, range_views, all_predictions, CF, fw_iter)
 
             if step % args.eval_steps == 0 and global_rank == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
@@ -481,24 +487,58 @@ def _save_vis_stage1(step, args, x, x_rec):
         logger.warning(f"[S1] Visualisation failed at step {step}: {e}")
 
 
-def _save_vis(step, args, features_cond, features_gt, predict):
+def _save_vis(step, args, range_views, all_predictions, CF, fw_iter):
+    """Save a 3-row grid: condition frames (GT) | GT future | predicted future."""
     try:
         vis_dir = os.path.join(args.validation_path, 'vis')
         os.makedirs(vis_dir, exist_ok=True)
-        if getattr(args, 'log_range', True):
-            gt_depth   = (2.0 ** (features_gt[0, 0, 0].float().detach().cpu().numpy() * 6.0)) - 1.0
-            pred_depth = (2.0 ** (predict[0, 0].float().detach().cpu().numpy()         * 6.0)) - 1.0
-        else:
-            m0, s0 = args.proj_img_mean[0], args.proj_img_stds[0]
-            gt_depth   = features_gt[0, 0, 0].float().detach().cpu().numpy() * s0 + m0
-            pred_depth = predict[0, 0].float().detach().cpu().numpy()         * s0 + m0
-        mae = float(np.abs(pred_depth - gt_depth).mean())
-        render_rangeview_comparison(
-            gt_depth=gt_depth, pred_depth=pred_depth,
-            output_path=os.path.join(vis_dir, f'step_{step:07d}.png'),
-            frame_idx=step, metrics={'MAE_m': mae},
-            title_suffix=' — Stage 2 Swin prediction',
-        )
+        log_range = getattr(args, 'log_range', True)
+        m0, s0 = args.proj_img_mean[0], args.proj_img_stds[0]
+
+        def to_depth(t_bchw):
+            arr = t_bchw[0, 0].float().detach().cpu().numpy()
+            if log_range:
+                return np.clip((2.0 ** (arr * 6.0)) - 1.0, 0.0, 80.0)
+            return np.clip(arr * s0 + m0, 0.0, 80.0)
+
+        n_cols = max(CF, fw_iter)
+        fig, axes = plt.subplots(3, n_cols, figsize=(n_cols * 8, 6))
+        vmax = 80.0
+
+        # Row 0: conditioning frames (GT input)
+        for i in range(CF):
+            depth = to_depth(range_views[:, i])
+            axes[0, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[0, i].set_title(f't-{CF - 1 - i}', fontsize=8)
+            axes[0, i].axis('off')
+        for i in range(CF, n_cols):
+            axes[0, i].axis('off')
+
+        # Row 1: GT future frames
+        for i in range(fw_iter):
+            depth = to_depth(range_views[:, CF + i])
+            axes[1, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[1, i].set_title(f't+{i + 1}', fontsize=8)
+            axes[1, i].axis('off')
+        for i in range(fw_iter, n_cols):
+            axes[1, i].axis('off')
+
+        # Row 2: predicted future frames
+        for i, pred in enumerate(all_predictions):
+            depth = to_depth(pred)
+            axes[2, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[2, i].set_title(f't+{i + 1}', fontsize=8)
+            axes[2, i].axis('off')
+        for i in range(len(all_predictions), n_cols):
+            axes[2, i].axis('off')
+
+        for r, label in enumerate(['Condition (GT)', 'GT Future', 'Predicted']):
+            axes[r, 0].set_ylabel(label, fontsize=9)
+
+        fig.suptitle(f'Stage 2 — step {step:,}', fontsize=12)
+        plt.tight_layout()
+        plt.savefig(os.path.join(vis_dir, f'step_{step:07d}.png'), dpi=80, bbox_inches='tight')
+        plt.close(fig)
     except Exception as e:
         logger.warning(f"Visualisation failed at step {step}: {e}")
 

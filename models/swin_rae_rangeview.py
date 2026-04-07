@@ -30,7 +30,6 @@ from models.swin_rangeview import TULIPRangeEncoder, TULIPRangeDecoder, _init_we
 from models.stt import SpatialTemporalTransformer
 from models.flux_dit import FluxParams, FluxDiT
 from models.traj_dit import TrajDiT, TrajParams
-from models.modules.tokenizer import poses_to_indices, yaws_to_indices
 from models.modules.sampling import prepare_ids, get_schedule
 from utils.preprocess import get_rel_pose
 from utils.range_losses import (
@@ -95,9 +94,13 @@ class RangeViewSwinRAE(nn.Module):
         self.proj_img_mean = list(getattr(args, 'proj_img_mean', [0.0, 0.0]))
         self.proj_img_stds = list(getattr(args, 'proj_img_stds', [1.0, 1.0]))
 
-        # Per-channel loss weights: [range, intensity]
+        # Per-channel loss weights: [range, mask/intensity]
         ch_w = list(getattr(args, 'rae_ch_weights', [1., 1.]))
         self.register_buffer('ch_weights', torch.tensor(ch_w, dtype=torch.float32))
+
+        # When True, ch 1 is a binary valid-pixel mask (not intensity).
+        # Range loss is then restricted to valid pixels only.
+        self.mask_channel = bool(getattr(args, 'mask_channel', False))
 
         # Optional BEV perceptual loss
         self.bev_percep_weight = float(getattr(args, 'bev_perceptual_weight', 0.0))
@@ -133,15 +136,34 @@ class RangeViewSwinRAE(nn.Module):
         z, skips = self.encode(x)
         rec = self.decode(z, skips)
 
-        # MAE on range (ch 0), L1 on intensity (ch 1+)
-        loss_range = (rec[:, 0] - x[:, 0]).abs()
-        if x.shape[1] > 1:
-            loss_int = (rec[:, 1:] - x[:, 1:]).abs().mean(dim=1)
-        else:
-            loss_int = torch.zeros_like(loss_range)
-
         w = self.ch_weights
-        loss_rec = w[0] * loss_range.mean() + (w[1] * loss_int.mean() if x.shape[1] > 1 else 0.)
+        loss_mask = torch.zeros(1, device=x.device)
+        if self.mask_channel and x.shape[1] > 1:
+            # ch 1 is the binary valid-pixel mask (1=hit, 0=empty).
+            # Range loss: masked MAE — only penalise valid (hit) pixels so the
+            # model is not confused by empty-pixel depth values under log2 norm.
+            valid = x[:, 1]                                          # [B, H, W]
+            n_valid = valid.sum().clamp(min=1.)
+            loss_range = ((rec[:, 0] - x[:, 0]).abs() * valid).sum() / n_valid
+            # Mask loss: BCE with logits — decoder output ch 1 is treated as a
+            # logit for binary pixel-validity classification.  BCE is correct here
+            # because L1 does not push predictions toward 0/1 boundaries, while
+            # BCEWithLogitsLoss trains the mask head as a proper binary classifier
+            # with calibrated confidence.  Class imbalance (sparse LiDAR) is
+            # handled implicitly: the gradient magnitude is proportional to the
+            # prediction error, so confident correct predictions are cheap.
+            loss_mask = F.binary_cross_entropy_with_logits(
+                rec[:, 1].float(), x[:, 1].float()
+            )
+            loss_rec = w[0] * loss_range + w[1] * loss_mask
+        else:
+            # Legacy: MAE on range (ch 0), L1 on intensity (ch 1+)
+            loss_range = (rec[:, 0] - x[:, 0]).abs()
+            if x.shape[1] > 1:
+                loss_int = (rec[:, 1:] - x[:, 1:]).abs().mean(dim=1)
+            else:
+                loss_int = torch.zeros_like(loss_range)
+            loss_rec = w[0] * loss_range.mean() + (w[1] * loss_int.mean() if x.shape[1] > 1 else 0.)
         loss_all = loss_rec
         loss_bev = torch.zeros(1, device=x.device)
 
@@ -162,7 +184,7 @@ class RangeViewSwinRAE(nn.Module):
             loss_all = loss_all + torch.exp(-lw) * loss_bev + lw
 
         return {'loss_all': loss_all, 'loss_rec': loss_rec,
-                'loss_bev': loss_bev, 'x_rec': rec}
+                'loss_mask': loss_mask, 'loss_bev': loss_bev, 'x_rec': rec}
 
     def load_from_tulip(self, ckpt_path):
         """Load TULIP-KITTI pre-trained weights into the encoder and decoder.
@@ -458,6 +480,58 @@ class RangeViewSwinDiT(nn.Module):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def _normalize_pose_continuous(self, rel_pose, rel_yaw):
+        """Normalise raw (x, y, yaw) to [0, 1] without quantisation.
+
+        rel_pose: [B, T, 2]  x in [0, pose_x_bound] m, y in [±pose_y_bound] m
+        rel_yaw:  [B, T, 1]  yaw in [±yaw_bound] degrees
+
+        Returns pose_norm [B, T, 2], yaw_norm [B, T, 1] both in [0, 1].
+        """
+        pose_norm = torch.stack([
+            (rel_pose[..., 0].float() / self.pose_x_bound).clamp(0.0, 1.0),
+            ((rel_pose[..., 1].float() + self.pose_y_bound) / (2.0 * self.pose_y_bound)).clamp(0.0, 1.0),
+        ], dim=-1)
+        yaw_norm = ((rel_yaw.float() + self.yaw_bound) / (2.0 * self.yaw_bound)).clamp(0.0, 1.0)
+        return pose_norm, yaw_norm
+
+    def _apply_azimuth_warp(self, lat_cond_norm, rel_yaw):
+        """Warp conditioning latents by azimuth-shifting each frame to align
+        to the last conditioning frame's viewpoint.
+
+        Yaw rotation in the real world corresponds to a circular shift along
+        the azimuth (W) axis of the 2×32 bottleneck latent grid. Aligning all
+        conditioning frames to the same viewpoint before STT attention removes
+        the need for the STT to implicitly learn this geometric relationship.
+
+        lat_cond_norm: [B, CF, L, C]  normalised bottleneck latents (L = h*w = 64)
+        rel_yaw:       [B, ≥CF-1, 1]  relative yaw in degrees between consecutive frames
+
+        Returns: [B, CF, L, C] azimuth-aligned latents (same shape, in-graph).
+        """
+        B, CF, L, C = lat_cond_norm.shape
+        h, w = self.h, self.w  # 2, 32
+
+        # Cumulative yaw from each frame to frame CF-1 (the reference / last cond frame).
+        # rel_yaw[:, t, 0] = yaw from frame t to frame t+1 (degrees).
+        ry = rel_yaw[:, :CF - 1, 0].float()          # [B, CF-1]
+        cumul_yaw = torch.zeros(B, CF, device=lat_cond_norm.device, dtype=torch.float32)
+        for t in range(CF - 2, -1, -1):
+            cumul_yaw[:, t] = cumul_yaw[:, t + 1] + ry[:, t]
+        # cumul_yaw[:, CF-1] = 0 — reference frame, no shift
+
+        # Convert degrees → azimuth column shift  (32 columns / 360°)
+        col_shifts = (cumul_yaw * w / 360.0).round().long()  # [B, CF]
+
+        # Vectorised gather-based roll — avoids Python loops over batch
+        lat_grid = lat_cond_norm.view(B, CF, h, w, C)
+        w_idx     = torch.arange(w, device=lat_grid.device).view(1, 1, 1, w, 1).expand(B, CF, h, w, C)
+        shifts_exp = col_shifts[:, :, None, None, None].expand(B, CF, h, w, C)
+        gather_idx = (w_idx - shifts_exp) % w
+        warped = torch.gather(lat_grid, dim=3, index=gather_idx)
+
+        return warped.view(B, CF, L, C)
+
     def _normalize_pose(self, traj: torch.Tensor) -> torch.Tensor:
         """Map (x_m, y_m, yaw_deg) to [-1, 1]. Works on any prefix shape."""
         t = traj.clone().float()
@@ -562,12 +636,12 @@ class RangeViewSwinDiT(nn.Module):
                     rot_matrix[:, :(self.condition_frames + 1) * self.args.block_size]
                 )
 
-        pose_idx = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size,
-                                    x_range=float(self.pose_x_bound),
-                                    y_range=float(self.pose_y_bound * 2))
-        yaw_idx  = yaws_to_indices(rel_yaw, self.yaw_vocab_size)
+        # Option 1: continuous sinusoidal embedding — no quantisation loss
+        pose_idx, yaw_idx = self._normalize_pose_continuous(rel_pose, rel_yaw)
 
         lat_cond_norm = lat_cond / self.latent_scale
+        # Option 3: azimuth-warp conditioning latents to align to last frame's viewpoint
+        lat_cond_norm = self._apply_azimuth_warp(lat_cond_norm, rel_yaw)
         lat_target_norm = (lat_target / self.latent_scale).unsqueeze(1)          # [B,1,T,C]
         lat_all_norm  = torch.cat([lat_cond_norm, lat_target_norm], dim=1)       # [B,CF+1,T,C]
         logits        = self.model(lat_all_norm, pose_idx, yaw_idx,
@@ -609,24 +683,17 @@ class RangeViewSwinDiT(nn.Module):
         predict_pose_xy   = predict_pose_raw[:, :, :2]          # [B, 1, 2]
         predict_pose_yaw  = predict_pose_raw[:, :, 2:3]         # [B, 1, 1]
 
-        # Quantise predicted pose → vocab indices → re-embed for FluxDiT `y`.
+        # Normalise predicted pose → re-embed for FluxDiT `y` (no quantisation).
         # Detached: PoseDiT gradients do not flow through the FluxDiT forward pass,
         # keeping the two DiT losses independent (same as Flux/Stable Diffusion practice).
         with torch.no_grad():
-            pred_pose_idx = poses_to_indices(
+            pred_pose_norm, pred_yaw_norm = self._normalize_pose_continuous(
                 predict_pose_xy.detach().float(),
-                self.pose_x_vocab_size, self.pose_y_vocab_size,
-                x_range=float(self.pose_x_bound),
-                y_range=float(self.pose_y_bound * 2),
-            )   # [B, 1, 2]
-            pred_yaw_idx = yaws_to_indices(
                 predict_pose_yaw.detach().float(),
-                self.yaw_vocab_size,
-            )   # [B, 1, 1]
-            # get_pose_emb expects [B, T, 2] / [B, T, 1]; pass as-is ([B, 1, 2] / [B, 1, 1])
+            )   # [B, 1, 2], [B, 1, 1]
             y_pred = self.model.get_pose_emb(
-                pred_pose_idx,   # [B, 1, 2]
-                pred_yaw_idx,    # [B, 1, 1]
+                pred_pose_norm,   # [B, 1, 2]
+                pred_yaw_norm,    # [B, 1, 1]
             )   # [B, n_embd*3]  ← matches FluxDiT vec_in_dim
 
         # ── FluxDiT: predict next latent using predicted pose as `y` ─────────
@@ -716,12 +783,10 @@ class RangeViewSwinDiT(nn.Module):
         # Use last condition frame's skip features for the decoder
         last_cond_skips = [s[:, -1] for s in all_skips]
 
-        pose_idx = poses_to_indices(rel_pose, self.pose_x_vocab_size, self.pose_y_vocab_size,
-                                    x_range=float(self.pose_x_bound),
-                                    y_range=float(self.pose_y_bound * 2))
-        yaw_idx = yaws_to_indices(rel_yaw, self.yaw_vocab_size)
+        pose_idx, yaw_idx = self._normalize_pose_continuous(rel_pose, rel_yaw)
+        lat_norm = self._apply_azimuth_warp(lat / self.latent_scale, rel_yaw)
 
-        stt_feat, pose_emb = self.model.evaluate(lat / self.latent_scale, pose_idx, yaw_idx,
+        stt_feat, pose_emb = self.model.evaluate(lat_norm, pose_idx, yaw_idx,
                                                   sample_last=sample_last)
         B = stt_feat.shape[0]
         _pfx = self.total_token_size - self.img_token_size

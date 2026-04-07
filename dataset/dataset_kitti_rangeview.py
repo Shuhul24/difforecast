@@ -122,6 +122,7 @@ class KITTIRangeViewDataset(Dataset):
         five_channel=False,
         log_range=False,
         depth_only=False,
+        mask_channel=False,
     ):
         self.sequences_path  = sequences_path
         self.condition_frames = condition_frames
@@ -135,6 +136,7 @@ class KITTIRangeViewDataset(Dataset):
         self.five_channel    = five_channel   # return [range,x,y,z,intensity] if True
         self.log_range       = log_range      # use log2(r+1)/6 norm instead of mean/std
         self.depth_only      = depth_only     # return only the range channel [1, H, W]
+        self.mask_channel    = mask_channel   # return [range, valid_mask] instead of [range, intensity]
 
         # Range projection
         self.projection = RangeProjection(
@@ -237,6 +239,11 @@ class KITTIRangeViewDataset(Dataset):
             depth_norm  = (torch.log2(depth.clamp(min=0.) + 1.) / 6.).clamp(0., 1.)
             if self.depth_only:
                 return depth_norm.unsqueeze(0)                      # [1, H, W]
+            if self.mask_channel:
+                # Valid mask: 1 where the scanner returned a hit, 0 for empty pixels.
+                # proj_range is -1 for empty pixels and ≥ 1e-5 for valid hits.
+                valid_mask = (depth >= 0.).float()                  # [H, W]
+                return torch.stack([depth_norm, valid_mask], dim=0) # [2, H, W]
             intens_norm = intens.clamp(0., 1.)
             return torch.stack([depth_norm, intens_norm], dim=0)   # [2, H, W]
 
