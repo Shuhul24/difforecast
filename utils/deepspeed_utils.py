@@ -19,10 +19,6 @@ def get_deepspeed_config(args):
         # - Requires PyTorch >= 2.2 for the count_used_parameters_in_backward API.
         config_params["zero_optimization"] = {
             "stage": 2,
-            "offload_optimizer": {
-                "device": "cpu",
-                "pin_memory": True,
-            },
         }
         config_params['bf16'] = {
             "enabled": True,

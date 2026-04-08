@@ -37,7 +37,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import FusedAdam
 import deepspeed
 import wandb
 from utils.preprocess import get_rel_pose
@@ -599,9 +599,9 @@ def main():
     lr  = getattr(args, 'lr', None) or (blr * eff_batch / 256)
     ds_cfg = get_deepspeed_config(args)
 
-    optimizer = DeepSpeedCPUAdam(
+    optimizer = FusedAdam(
         [p for p in model.parameters() if p.requires_grad],
-        lr=lr, weight_decay=args.weight_decay, adamw_mode=True,
+        lr=lr, weight_decay=args.weight_decay, adam_w_mode=True,
     )
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.iter,
