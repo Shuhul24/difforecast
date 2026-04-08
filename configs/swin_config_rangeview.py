@@ -104,8 +104,8 @@ n_embd_dit_traj   = 512
 n_head_dit_traj   = 8
 axes_dim_dit_traj = [16, 16, 32]   # sum = 64 = pe_dim
 n_layer_traj      = [4, 4]         # [double_stream_blocks, single_stream_blocks]
-lambda_yaw_pose   = 0.1            # weight for pose diffusion loss
-return_predict_traj = True         # must be True — predictions used for AR conditioning
+lambda_yaw_pose        = 0.1    # weight for pose diffusion loss
+return_predict_traj    = True   # must be True — predictions used for AR conditioning
 
 # ── Pose encoding ─────────────────────────────────────────────────────────────
 pose_x_vocab_size = 128

@@ -753,17 +753,29 @@ class RangeViewSwinDiT(nn.Module):
 
         tgt_norm = lat_target / self.latent_scale
 
-        # ── PoseDiT FIRST: predict next relative pose (x, y, yaw) ───────────
-        # Running PoseDiT before FluxDiT lets us use the predicted pose as
-        # FluxDiT's vector conditioning `y`, achieving joint p(x, pose | history)
-        # rather than conditioning FluxDiT on the GT target pose (leakage).
-        pose_target_xy  = rel_pose[:, -1:]           # [B, 1, 2]
+        # ── Parallel DiT execution (mirrors model.py / train_deepspeed.py) ──────
+        # Both PoseDiT and FluxDiT take stt_last as context and run independently.
+        # FluxDiT is conditioned on the *last conditioning frame's* relative pose
+        # (rel_pose[:, -2:-1]) rather than the current PoseDiT prediction, breaking
+        # the sequential data dependency. rel_pose[:, -2:-1] is always the last
+        # conditioning transition — no target-frame leakage in either AR path:
+        #   j=0 (rel_pose_cond=None): rel_pose is [B, CF, 2] from GT; [-2] = (CF-2)→(CF-1)
+        #   j>0 (rel_pose_cond set):  rel_pose is [B, CF+1, 2]; [-2] = last predicted cond pose
+        last_cond_xy  = rel_pose[:, -2:-1].float()   # [B, 1, 2]
+        last_cond_yaw = rel_yaw[:, -2:-1].float()    # [B, 1, 1]
+        lc_pose_norm, lc_yaw_norm = self._normalize_pose_continuous(
+            last_cond_xy, last_cond_yaw,
+        )
+        y_flux = self.model.get_pose_emb(lc_pose_norm, lc_yaw_norm)  # [B, n_embd*3]
+
+        # ── PoseDiT: predict next relative pose, conditioned on stt_last ──────
+        pose_target_xy  = rel_pose[:, -1:]           # [B, 1, 2]  — GT target pose
         pose_target_yaw = rel_yaw[:, -1:]            # [B, 1, 1]
         pose_target     = torch.cat([pose_target_xy, pose_target_yaw], dim=-1)  # [B, 1, 3]
         pose_target_norm = self._normalize_pose(pose_target).to(torch.bfloat16)
 
         u_pose = torch.randn((B, 1, 1), device=tgt_norm.device)
-        t_pose = torch.sigmoid(u_pose)               # logit-normal timestep
+        t_pose = torch.sigmoid(u_pose)
         pose_loss_terms = self.pose_dit.training_losses(
             traj=pose_target_norm,
             traj_ids=self.pose_traj_ids[:B],
@@ -781,21 +793,9 @@ class RangeViewSwinDiT(nn.Module):
         predict_pose_xy   = predict_pose_raw[:, :, :2]          # [B, 1, 2]
         predict_pose_yaw  = predict_pose_raw[:, :, 2:3]         # [B, 1, 1]
 
-        # Normalise predicted pose → re-embed for FluxDiT `y` (no quantisation).
-        # Detached: PoseDiT gradients do not flow through the FluxDiT forward pass,
-        # keeping the two DiT losses independent (same as Flux/Stable Diffusion practice).
-        with torch.no_grad():
-            pred_pose_norm, pred_yaw_norm = self._normalize_pose_continuous(
-                predict_pose_xy.detach().float(),
-                predict_pose_yaw.detach().float(),
-            )   # [B, 1, 2], [B, 1, 1]
-            y_pred = self.model.get_pose_emb(
-                pred_pose_norm,   # [B, 1, 2]
-                pred_yaw_norm,    # [B, 1, 1]
-            )   # [B, n_embd*3]  ← matches FluxDiT vec_in_dim
-
-        # ── FluxDiT: predict next latent using predicted pose as `y` ─────────
-        # Logit-normal timestep sampling: concentrates mass around t≈0.5
+        # ── FluxDiT: predict next latent, conditioned on stt_last + y_flux ───
+        # Both losses backprop jointly through stt_last — STT features are
+        # optimised for both pose prediction and frame generation simultaneously.
         u = torch.randn((B, 1, 1), device=tgt_norm.device)
         t_sample = torch.sigmoid(u)
         guidance = torch.full((B,), float(getattr(self.args, 'cfg_scale', 3.5)),
@@ -803,7 +803,7 @@ class RangeViewSwinDiT(nn.Module):
         loss_terms = self.dit.training_losses(
             img=tgt_norm, img_ids=self.img_ids[:B],
             cond=stt_last, cond_ids=self.cond_ids[:B],
-            t=t_sample, y=y_pred, guidance=guidance,
+            t=t_sample, y=y_flux, guidance=guidance,
             return_predict=self.args.return_predict,
         )
         diff_loss    = loss_terms['loss'].mean()
