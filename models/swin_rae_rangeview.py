@@ -3,21 +3,23 @@ Swin-RAE Range View Models  (TULIP-inspired two-stage pipeline)
 
 Stage 1 – Reconstruction Autoencoder (RAE):
   TULIPRangeEncoder  →  TULIPRangeDecoder (with skip connections)
-  Input/output: [B, 2, 64, 2048]  (range log-normalised + intensity)
+  Input/output: [B, 1, 64, 2048]  (range log-normalised, 1-channel depth)
   Latent:       [B, 64, 768]      (2×32 Swin bottleneck, 4-stage TULIP design)
-  Loss: Berhu on range channel + L1 on intensity + optional BEV perceptual
+  Loss: distance-weighted Berhu on range channel, masked to valid (non-zero) pixels
 
 Stage 2 – Latent Diffusion Transformer (forecasting):
   Frozen TULIPRangeEncoder → STT (temporal) → FluxDiT (flow matching)
-  → Frozen TULIPRangeDecoder (with skip connections from last condition frame)
+  → Frozen TULIPRangeDecoder (with temporally aggregated skip connections)
   Latent space: [B, 64, 768] — TULIP 4-stage bottleneck.
 
 Key design:
   - 4-stage hierarchical Swin encoder/decoder matching TULIP-base
   - Skip connections in decoder (U-Net style, as in TULIP)
   - Berhu (inverse Huber) loss promotes sharp depth edges over plain L1
-  - For Stage 2 decoding, encoder skip features from the last condition
-    frame are fed into the frozen decoder as a structural scene prior
+  - Distance-weighted loss up-weights far pixels to improve high-fidelity detail
+  - Temporal skip aggregation: TemporalSkipAggregator cross-attends over all CF
+    conditioning frames' skip features instead of using only the last frame,
+    preventing copy-frame artefacts at t+2..t+5
 """
 
 import math
@@ -51,6 +53,63 @@ def berhu_loss(pred, target, threshold_frac=0.2):
     absdiff = (pred - target).abs()
     c = (threshold_frac * absdiff.detach().max()).clamp(min=1e-4)
     return torch.where(absdiff <= c, absdiff, (absdiff ** 2 + c ** 2) / (2 * c))
+
+
+# ── Temporal Skip Aggregator ─────────────────────────────────────────────────
+
+class TemporalSkipAggregator(nn.Module):
+    """Aggregate encoder skip features across CF conditioning frames via cross-attention.
+
+    For each of the 3 TULIP decoder skip levels, a learnable pool token
+    cross-attends over all CF conditioning frames' skip features to produce a
+    single aggregated skip tensor [B, N_i, D_i].
+
+    This replaces the static last-frame-only skip injection, which anchors the
+    decoder to the last conditioning frame's structure and causes copy-frame
+    artefacts at t+2..t+5.  By attending over the full temporal context, the
+    decoder can select persistent structure from earlier frames and adapt to
+    motion across the conditioning window.
+
+    Only the pool-token parameters and attention projection weights are trainable;
+    the encoder producing the skip features remains frozen.
+
+    Skip dims for TULIP 4-stage encoder on 64×2048:
+      level 0: [B, CF, 4096,  96]
+      level 1: [B, CF, 1024, 192]
+      level 2: [B, CF,  256, 384]
+    """
+
+    def __init__(self, skip_dims):
+        super().__init__()
+        self.cross_attn = nn.ModuleList()
+        self.norm       = nn.ModuleList()
+        self.pool_token = nn.ParameterList()
+        for d in skip_dims:
+            n_h = d // 32          # head_dim = 32 for all levels
+            self.cross_attn.append(
+                nn.MultiheadAttention(d, n_h, batch_first=True, dropout=0.0)
+            )
+            self.norm.append(nn.LayerNorm(d))
+            self.pool_token.append(nn.Parameter(torch.zeros(1, 1, d)))
+
+    def forward(self, all_skips):
+        """
+        all_skips : list of 3 tensors, each [B, CF, N_i, D_i]
+        Returns   : list of 3 tensors, each [B, N_i, D_i]
+        """
+        result = []
+        for skip, attn, norm, pt in zip(
+            all_skips, self.cross_attn, self.norm, self.pool_token
+        ):
+            B, CF, N, D = skip.shape
+            # [B*N, CF, D]: treat each spatial position as a sequence over time
+            kv = skip.permute(0, 2, 1, 3).reshape(B * N, CF, D)
+            # Pool token is the query; it aggregates information from all CF frames
+            q = pt.expand(B * N, -1, -1)          # [B*N, 1, D]
+            out, _ = attn(q, kv, kv)              # [B*N, 1, D]
+            pooled = norm(out.squeeze(1))          # [B*N, D]
+            result.append(pooled.reshape(B, N, D))
+        return result
 
 
 # ── Stage 1: RangeViewSwinRAE ─────────────────────────────────────────────────
@@ -101,6 +160,10 @@ class RangeViewSwinRAE(nn.Module):
         # When True, ch 1 is a binary valid-pixel mask (not intensity).
         # Range loss is then restricted to valid pixels only.
         self.mask_channel = bool(getattr(args, 'mask_channel', False))
+
+        # Distance-weighted loss: upweight far pixels by (1 + log-depth).
+        # Only active for the 1-channel path; ignored for multi-channel legacy.
+        self.dist_weighted_loss = bool(getattr(args, 'dist_weighted_loss', False))
 
         # Optional BEV perceptual loss
         self.bev_percep_weight = float(getattr(args, 'bev_perceptual_weight', 0.0))
@@ -156,14 +219,23 @@ class RangeViewSwinRAE(nn.Module):
                 rec[:, 1].float(), x[:, 1].float()
             )
             loss_rec = w[0] * loss_range + w[1] * loss_mask
+        elif x.shape[1] == 1:
+            # 1-channel range-only: Berhu + distance weighting + validity masking.
+            # Validity derived from depth: log2-normed empty pixels are ~0.
+            valid_mask = (x[:, 0].abs() > 1e-4).float()          # [B, H, W]
+            n_valid    = valid_mask.sum().clamp(min=1.)
+            loss_px    = berhu_loss(rec[:, 0].float(), x[:, 0].float())  # [B, H, W]
+            if self.dist_weighted_loss:
+                # log-depth in [0,1]: near→weight≈1, far→weight≈2 (linear ramp)
+                dist_w  = 1.0 + x[:, 0].detach().float().clamp(0., 1.)
+                loss_px = loss_px * dist_w
+            loss_rec = w[0] * (loss_px * valid_mask).sum() / n_valid
         else:
-            # Legacy: MAE on range (ch 0), L1 on intensity (ch 1+)
+            # Multi-channel legacy path: MAE on range, L1 on intensity
             loss_range = (rec[:, 0] - x[:, 0]).abs()
-            if x.shape[1] > 1:
-                loss_int = (rec[:, 1:] - x[:, 1:]).abs().mean(dim=1)
-            else:
-                loss_int = torch.zeros_like(loss_range)
-            loss_rec = w[0] * loss_range.mean() + (w[1] * loss_int.mean() if x.shape[1] > 1 else 0.)
+            loss_int   = (rec[:, 1:] - x[:, 1:]).abs().mean(dim=1) if x.shape[1] > 1 \
+                         else torch.zeros_like(loss_range)
+            loss_rec   = w[0] * loss_range.mean() + (w[1] * loss_int.mean() if x.shape[1] > 1 else 0.)
         loss_all = loss_rec
         loss_bev = torch.zeros(1, device=x.device)
 
@@ -375,6 +447,18 @@ class RangeViewSwinDiT(nn.Module):
         for p in self.decoder.parameters():
             p.requires_grad_(False)
 
+        # ── Temporal skip aggregator (trainable) ─────────────────────────────
+        # Cross-attends over all CF conditioning frames' skip features to produce
+        # a single temporally-aware skip per decoder level.  Only this module's
+        # parameters are trained; the frozen encoder produces the raw skips.
+        if getattr(args, 'temporal_skip_agg', False):
+            _ed = int(getattr(args, 'swin_embed_dim', 96))
+            self.skip_aggregator = TemporalSkipAggregator(
+                skip_dims=[_ed, _ed * 2, _ed * 4],  # [96, 192, 384]
+            )
+        else:
+            self.skip_aggregator = None
+
         # ── STT (vae_emb_dim=768 for TULIP bottleneck) ───────────────────────
         self.model = SpatialTemporalTransformer(
             block_size=self.condition_frames * self.total_token_size,
@@ -437,6 +521,7 @@ class RangeViewSwinDiT(nn.Module):
         self.log_range              = bool(getattr(args,  'log_range',              True))
         self.proj_img_mean          = list(getattr(args,  'proj_img_mean',          [0.0, 0.0]))
         self.proj_img_stds          = list(getattr(args,  'proj_img_stds',          [1.0, 1.0]))
+        self.range_view_loss_weight = float(getattr(args, 'range_view_loss_weight', 0.0))
         self.chamfer_loss_weight    = float(getattr(args, 'chamfer_loss_weight',    0.0))
         self.chamfer_max_pts        = int(getattr(args,   'chamfer_max_pts',        2048))
         self.chamfer_start          = int(getattr(args,   'chamfer_start',          0))
@@ -550,16 +635,21 @@ class RangeViewSwinDiT(nn.Module):
 
     def _load_ckpt(self, path):
         sd = torch.load(path, map_location='cpu').get('model_state_dict', {})
-        for attr, prefixes in [('model',    ['module.model.',    'model.']),
-                                ('dit',      ['module.dit.',      'dit.']),
-                                ('pose_dit', ['module.pose_dit.', 'pose_dit.'])]:
-            obj = getattr(self, attr)
+        for attr, prefixes in [
+            ('model',           ['module.model.',           'model.']),
+            ('dit',             ['module.dit.',             'dit.']),
+            ('pose_dit',        ['module.pose_dit.',        'pose_dit.']),
+            ('skip_aggregator', ['module.skip_aggregator.', 'skip_aggregator.']),
+        ]:
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
             for pfx in prefixes:
                 obj_sd = {k: sd[pfx + k] for k in obj.state_dict() if pfx + k in sd}
                 if obj_sd:
                     obj.load_state_dict(obj_sd, strict=False)
                     break
-        print(f"[SwinDiT] STT+DiT+PoseDiT loaded from {path}")
+        print(f"[SwinDiT] STT+DiT+PoseDiT+SkipAgg loaded from {path}")
 
     @staticmethod
     def _uw(log_w, loss):
@@ -613,12 +703,20 @@ class RangeViewSwinDiT(nn.Module):
             if latents_cond_precomputed is not None:
                 lat_gt, _ = self.encode_sequence(features_gt)
                 lat_all = torch.cat([latents_cond_precomputed, lat_gt], 1)
+                # Encode conditioning frames separately to get their skip features
+                _, raw_cond_skips = self.encode_sequence(features)
             else:
-                lat_all, _ = self.encode_sequence(features_all)
+                lat_all, all_skips_enc = self.encode_sequence(features_all)
+                # Conditioning skips: first CF frames from the joint encode
+                raw_cond_skips = [s[:, :self.condition_frames] for s in all_skips_enc]
+            # raw_cond_skips[i]: [B, CF, N_i, D_i]
 
-            # Skip features always come from the last condition frame
-            # (structural scene prior for the decoder of the predicted frame)
-            last_cond_skips = self.get_frame_skips(features[:, -1])
+        # Temporal skip aggregation (trainable; grads flow through aggregator params,
+        # not through the frozen encoder skip tensors)
+        if self.skip_aggregator is not None:
+            last_cond_skips = self.skip_aggregator(raw_cond_skips)
+        else:
+            last_cond_skips = [s[:, -1] for s in raw_cond_skips]
 
         lat_cond   = lat_all[:, :self.condition_frames]
         lat_target = lat_all[:,  self.condition_frames]
@@ -718,6 +816,17 @@ class RangeViewSwinDiT(nn.Module):
             predict_decoded = self.decode_latents(predict_lats, last_cond_skips)
             gt_img = features_gt[:, 0]
 
+            # ── Range-view Berhu loss ─────────────────────────────────────────
+            # Provides gradient to TemporalSkipAggregator (flows through the
+            # frozen decoder's forward pass into last_cond_skips → aggregator).
+            if self.range_view_loss_weight > 0:
+                valid = (gt_img[:, 0].abs() > 1e-4).float()
+                n_v   = valid.sum().clamp(min=1.)
+                rv_px = berhu_loss(predict_decoded[:, 0].float(), gt_img[:, 0].float())
+                dist_w = 1.0 + gt_img[:, 0].detach().float().clamp(0., 1.)
+                z_rv  = (rv_px * dist_w * valid).sum() / n_v
+                diff_loss = diff_loss + self.range_view_loss_weight * z_rv
+
             if self.log_range:
                 gt_unnorm = torch.exp2(gt_img[:, 0].float() * 6.) - 1.
             else:
@@ -756,6 +865,8 @@ class RangeViewSwinDiT(nn.Module):
             'loss_all':         loss_all,
             'loss_diff':        loss_terms['loss'].mean().detach(),
             'loss_pose':        pose_loss.detach(),
+            'loss_rv':          z_rv.detach() if predict_decoded is not None and self.range_view_loss_weight > 0
+                                else torch.zeros(1, device=tgt_norm.device),
             'loss_chamfer':     z_cd,
             'loss_bev_percep':  z_bev,
             'predict':          predict_decoded,
@@ -780,8 +891,11 @@ class RangeViewSwinDiT(nn.Module):
         """
         self.model.eval(); self.dit.eval()
         lat, all_skips = self.encode_sequence(features)
-        # Use last condition frame's skip features for the decoder
-        last_cond_skips = [s[:, -1] for s in all_skips]
+        # all_skips[i]: [B, CF, N_i, D_i] — temporal aggregation or last-frame fallback
+        if self.skip_aggregator is not None:
+            last_cond_skips = self.skip_aggregator(all_skips)
+        else:
+            last_cond_skips = [s[:, -1] for s in all_skips]
 
         pose_idx, yaw_idx = self._normalize_pose_continuous(rel_pose, rel_yaw)
         lat_norm = self._apply_azimuth_warp(lat / self.latent_scale, rel_yaw)

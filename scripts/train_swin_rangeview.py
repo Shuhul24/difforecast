@@ -25,6 +25,9 @@ Usage:
 """
 
 import os, sys, math, time, random, logging, argparse, glob
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_path)
@@ -245,7 +248,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
             ar_rot_window     = rot_matrix[:, :CF].clone()   # [B, CF, 4, 4]
 
             # Cumulative losses over fw_iter steps (for logging)
-            cumul_diff = cumul_pose = cumul_cd = cumul_bev = 0.0
+            cumul_diff = cumul_pose = cumul_rv = cumul_cd = cumul_bev = 0.0
             last_out        = None   # keep for vis / logging
             all_predictions = []     # collect per-AR-step predictions for vis
 
@@ -280,6 +283,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 # ── Accumulate losses for logging ────────────────────────────
                 cumul_diff += out['loss_diff'].item()
                 cumul_pose += out['loss_pose'].item()
+                cumul_rv   += out.get('loss_rv',         torch.tensor(0.)).item()
                 cumul_cd   += out.get('loss_chamfer',    torch.tensor(0.)).item()
                 cumul_bev  += out.get('loss_bev_percep', torch.tensor(0.)).item()
                 last_out    = out
@@ -368,11 +372,12 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
             # ── Logging (every 50 steps, rank 0 only) ────────────────────────
             if step % 50 == 0 and global_rank == 0:
                 lr       = model_engine.get_lr()[0]
-                avg_diff = cumul_diff / fw_iter
-                avg_pose = cumul_pose / fw_iter
-                avg_cd   = cumul_cd   / fw_iter
-                avg_bev  = cumul_bev  / fw_iter
-                avg_total= avg_diff + avg_pose + avg_cd + avg_bev
+                avg_diff  = cumul_diff / fw_iter
+                avg_pose  = cumul_pose / fw_iter
+                avg_rv    = cumul_rv   / fw_iter
+                avg_cd    = cumul_cd   / fw_iter
+                avg_bev   = cumul_bev  / fw_iter
+                avg_total = avg_diff + avg_pose + avg_rv + avg_cd + avg_bev
 
                 stt_norm = last_out.get('stt_last_norm', torch.tensor(0.)).item() \
                            if last_out else 0.
@@ -382,7 +387,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                 msg = (
                     f"[S2] step={step} | total={avg_total:.4f} | "
                     f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
-                    f"cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
+                    f"rv={avg_rv:.4f} | cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
                     f"stt_norm={stt_norm:.3f} | stt_std={stt_std:.3f} | "
                     f"lr={lr:.2e} | {elapsed:.2f}s/step"
                 )
@@ -392,6 +397,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                     args.writer.add_scalar('stage2/loss_total', avg_total, step)
                     args.writer.add_scalar('stage2/loss_diff',  avg_diff,  step)
                     args.writer.add_scalar('stage2/loss_pose',  avg_pose,  step)
+                    args.writer.add_scalar('stage2/loss_rv',    avg_rv,    step)
                     args.writer.add_scalar('stage2/loss_cd',    avg_cd,    step)
                     args.writer.add_scalar('stage2/loss_bev',   avg_bev,   step)
                     args.writer.add_scalar('debug/stt_last_norm', stt_norm, step)
@@ -403,6 +409,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                         's2/FluxDiT/loss_diff':    avg_diff,
                         's2/PoseDiT/loss_pose':    avg_pose,
                         # Auxiliary losses
+                        's2/aux/loss_rv':          avg_rv,
                         's2/aux/loss_chamfer':     avg_cd,
                         's2/aux/loss_bev':         avg_bev,
                         # Combined
@@ -508,7 +515,7 @@ def _save_vis(step, args, range_views, all_predictions, CF, fw_iter):
         # Row 0: conditioning frames (GT input)
         for i in range(CF):
             depth = to_depth(range_views[:, i])
-            axes[0, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[0, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
             axes[0, i].set_title(f't-{CF - 1 - i}', fontsize=8)
             axes[0, i].axis('off')
         for i in range(CF, n_cols):
@@ -517,7 +524,7 @@ def _save_vis(step, args, range_views, all_predictions, CF, fw_iter):
         # Row 1: GT future frames
         for i in range(fw_iter):
             depth = to_depth(range_views[:, CF + i])
-            axes[1, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[1, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
             axes[1, i].set_title(f't+{i + 1}', fontsize=8)
             axes[1, i].axis('off')
         for i in range(fw_iter, n_cols):
@@ -526,7 +533,7 @@ def _save_vis(step, args, range_views, all_predictions, CF, fw_iter):
         # Row 2: predicted future frames
         for i, pred in enumerate(all_predictions):
             depth = to_depth(pred)
-            axes[2, i].imshow(depth, cmap='plasma', vmin=0, vmax=vmax, aspect='auto')
+            axes[2, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
             axes[2, i].set_title(f't+{i + 1}', fontsize=8)
             axes[2, i].axis('off')
         for i in range(len(all_predictions), n_cols):

@@ -39,16 +39,15 @@ range_h   = 64
 range_w   = 2048
 image_size = (64, 2048)
 
-# 2-channel [range, valid_mask]; log2 normalisation on range channel.
-# mask_channel=True: ch 1 is a binary validity mask (1=valid hit, 0=empty pixel).
-# This disambiguates empty pixels (which also map to 0 under log2 norm) from
-# valid near returns, giving the encoder an explicit geometry boundary signal.
-range_channels = 2
+# 1-channel [range/depth]; log2 normalisation.
+# Validity mask is derived on-the-fly from depth (zero-depth = invalid pixel).
+# Mask is used only to restrict the reconstruction loss — not encoded into the latent.
+range_channels = 1
 five_channel   = False
 log_range      = True
-mask_channel   = True
-proj_img_mean  = [0.0, 0.0]
-proj_img_stds  = [1.0, 1.0]
+mask_channel   = False
+proj_img_mean  = [0.0]
+proj_img_stds  = [1.0]
 
 # ── Swin Transformer encoder / decoder ───────────────────────────────────────
 # Patch size (4, 8) on 64×2048 → initial grid (16, 256) = 4096 patches.
@@ -65,8 +64,9 @@ swin_drop_path   = 0.1                # stochastic depth max rate
 swin_v2          = True               # use SwinV2 attention (cosine + cpb_mlp)
 
 # ── Stage 1 RAE loss weights ──────────────────────────────────────────────────
-# ch 0 = range (MAE, masked to valid pixels); ch 1 = valid mask (L1).
-rae_ch_weights = [40., 1.]
+# ch 0 = range only; distance-weighted Berhu, masked to valid (non-zero) pixels.
+rae_ch_weights      = [1.]
+dist_weighted_loss  = True   # up-weight far pixels (2× at 80m) to improve fidelity
 
 # Stage 1 Swin-RAE checkpoint for Stage 2 init
 swin_ckpt = '/DATA2/shuhul/exp/swin_ckpt/swin-s1-ch1-b32/swin_rae_step222000.pkl'
@@ -121,6 +121,11 @@ num_sampling_steps   = 100
 return_predict       = False      # no aux losses active — skip decoder forward during training
 traj_len             = 1         # single future step for PoseDiT
 latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_latent_stats.py
+
+# ── Temporal skip aggregation (Stage 2) ──────────────────────────────────────
+# Replaces static last-frame skip injection with cross-attention pooling over
+# all CF conditioning frames, preventing t+2..t+5 copy-frame artefacts.
+temporal_skip_agg = True
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
 range_view_loss_weight = 1.0

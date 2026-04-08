@@ -19,7 +19,7 @@ Usage:
         --n_samples 0
 """
 
-import os, sys, json, argparse
+import os, sys, json, argparse, time
 import numpy as np
 import torch
 import matplotlib
@@ -185,16 +185,31 @@ def main():
     metrics_list = []
     sample_idx   = 0
 
+    # Warm-up: one forward pass so CUDA kernels are compiled before timing
+    with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            _dummy = torch.zeros(1, ckpt_n_ch, cfg.range_h, cfg.range_w, device='cuda')
+            _ = model(_dummy)
+    torch.cuda.synchronize()
+
     for frames, _ in loader:
         if sample_idx >= n_eval:
             break
 
         # Slice to the number of channels the model was trained with
         frames = frames[:, :ckpt_n_ch].cuda().to(torch.bfloat16)   # [B, C, H, W]
+        actual_batch = min(frames.shape[0], n_eval - sample_idx)
+
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             with torch.no_grad():
                 out = model(frames)
+
+        torch.cuda.synchronize()
+        batch_ms = (time.perf_counter() - t_start) * 1000.0   # ms for full batch
+        per_sample_ms = batch_ms / actual_batch
 
         x_rec = out['x_rec']   # [B, C, H, W]
 
@@ -216,7 +231,11 @@ def main():
             else:
                 mae = float('nan')
 
-            metrics_list.append({'sample': sample_idx, 'mae_m': mae})
+            metrics_list.append({
+                'sample':        sample_idx,
+                'mae_m':         mae,
+                'infer_ms':      round(per_sample_ms, 3),
+            })
 
             save_range_view_figure(
                 sample_idx, gt_depth, pred_depth, mae,
@@ -225,12 +244,18 @@ def main():
             )
 
             if sample_idx % 50 == 0 or sample_idx == n_eval - 1:
-                print(f'  [{sample_idx:5d}/{n_eval}]  MAE={mae:.4f} m')
+                print(f'  [{sample_idx:5d}/{n_eval}]  MAE={mae:.4f} m  '
+                      f'infer={per_sample_ms:.1f} ms/sample')
 
             sample_idx += 1
 
     # ── Aggregate statistics ──────────────────────────────────────────────────
-    maes = [m['mae_m'] for m in metrics_list if not np.isnan(m['mae_m'])]
+    maes   = [m['mae_m']    for m in metrics_list if not np.isnan(m['mae_m'])]
+    timings = [m['infer_ms'] for m in metrics_list]
+
+    mean_infer_ms   = float(np.mean(timings))
+    median_infer_ms = float(np.median(timings))
+    fps             = 1000.0 / mean_infer_ms if mean_infer_ms > 0 else None
 
     summary = {
         'checkpoint':            args_cli.ckpt,
@@ -238,8 +263,12 @@ def main():
         'split':                 args_cli.split,
         'n_samples':             len(metrics_list),
         'n_channels':            ckpt_n_ch,
-        'overall_mean_mae_m':    float(np.mean(maes))   if maes else None,
-        'overall_median_mae_m':  float(np.median(maes)) if maes else None,
+        'batch_size':            args_cli.batch_size,
+        'overall_mean_mae_m':    float(np.mean(maes))    if maes else None,
+        'overall_median_mae_m':  float(np.median(maes))  if maes else None,
+        'infer_mean_ms':         round(mean_infer_ms, 3),
+        'infer_median_ms':       round(median_infer_ms, 3),
+        'infer_fps':             round(fps, 2) if fps else None,
     }
 
     print('\n' + '=' * 60)
@@ -247,6 +276,9 @@ def main():
     print(f'  Samples        : {summary["n_samples"]}')
     print(f'  Mean   MAE     : {summary["overall_mean_mae_m"]:.4f} m')
     print(f'  Median MAE     : {summary["overall_median_mae_m"]:.4f} m')
+    print(f'  Infer (mean)   : {mean_infer_ms:.1f} ms/sample  '
+          f'({fps:.1f} FPS)')
+    print(f'  Infer (median) : {median_infer_ms:.1f} ms/sample')
     print('=' * 60)
 
     json_path = os.path.join(out_dir, 'metrics_summary.json')

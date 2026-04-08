@@ -28,7 +28,7 @@ Usage:
         --n_samples 200
 """
 
-import os, sys, json, argparse
+import os, sys, json, argparse, time
 import numpy as np
 import torch
 import matplotlib
@@ -59,6 +59,8 @@ def parse_args():
     p.add_argument('--bev_range', default=None, type=float,
                    help='BEV half-extent in metres (default: from config or 50 m)')
     p.add_argument('--max_depth', default=80.0, type=float)
+    p.add_argument('--no_vis', action='store_true',
+                   help='Skip saving range-view and BEV figures (metrics only)')
     return p.parse_args()
 
 
@@ -126,8 +128,8 @@ def save_range_view_figure(sample_idx, steps_data, out_path, max_depth=80.0):
         pred_clip = np.clip(pred_depth, 0.0, max_depth)
         abs_err   = np.abs(pred_clip - gt_clip)
 
-        im0 = axes[h, 0].imshow(gt_clip,   cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
-        im1 = axes[h, 1].imshow(pred_clip, cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        im0 = axes[h, 0].imshow(gt_clip,   cmap='turbo_r', vmin=0, vmax=max_depth, aspect='auto')
+        im1 = axes[h, 1].imshow(pred_clip, cmap='turbo_r', vmin=0, vmax=max_depth, aspect='auto')
         im2 = axes[h, 2].imshow(abs_err,   cmap='hot',    vmin=0,
                                  vmax=max(float(abs_err.max()), 1e-6), aspect='auto')
 
@@ -345,6 +347,20 @@ def main():
     # ── Eval loop ─────────────────────────────────────────────────────────────
     metrics_list = []
 
+    # Warm-up: one full AR rollout so CUDA kernels are compiled before timing
+    with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            _dummy_rv  = torch.zeros(1, cfg.condition_frames, cfg.range_channels,
+                                     cfg.range_h, cfg.range_w, device='cuda')
+            _dummy_rot = torch.eye(4, device='cuda', dtype=torch.float32
+                                   ).unsqueeze(0).unsqueeze(0).expand(
+                                       1, cfg.condition_frames + 1, -1, -1)
+            try:
+                _ = model(_dummy_rv, _dummy_rot)
+            except Exception:
+                pass
+    torch.cuda.synchronize()
+
     for sample_idx, (range_views, poses) in enumerate(loader):
         if sample_idx >= n_eval:
             break
@@ -355,17 +371,28 @@ def main():
         # Sliding condition window, initialised with the GT condition frames
         cond_window = range_views[:, :cfg.condition_frames].clone()  # [1, CF, C, H, W]
 
-        rv_steps  = []   # (gt_depth, pred_depth, range_l1) per horizon
-        bev_steps = []   # (pts_gt, pts_pred, chamfer) per horizon
-        chamfers  = []
-        range_l1s = []
+        rv_steps    = []   # (gt_depth, pred_depth, range_l1) per horizon
+        bev_steps   = []   # (pts_gt, pts_pred, chamfer) per horizon
+        chamfers    = []
+        range_l1s   = []
+        step_ms     = []   # per-step inference time (ms)
+
+        # Time the full AR rollout
+        torch.cuda.synchronize()
+        t_rollout_start = time.perf_counter()
 
         for h in range(n_horizons):
             # Pose slice for this step: CF condition poses + 1 target pose
             rot_slice_h = poses[:, h : h + cfg.condition_frames + 1]  # [1, CF+1, 4, 4]
 
+            torch.cuda.synchronize()
+            t_step_start = time.perf_counter()
+
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 pred_h = model(cond_window, rot_slice_h)   # [1, C, H, W]
+
+            torch.cuda.synchronize()
+            step_ms.append((time.perf_counter() - t_step_start) * 1000.0)
 
             gt_chw   = range_views[0, cfg.condition_frames + h].detach().float().cpu()
             pred_chw = pred_h[0].detach().float().cpu()
@@ -392,30 +419,35 @@ def main():
                 pred_h.unsqueeze(1).to(torch.bfloat16),         # [1,    1, C, H, W]
             ], dim=1)
 
+        rollout_ms = (time.perf_counter() - t_rollout_start) * 1000.0
+
         metrics_list.append({
-            'sample':   sample_idx,
-            'chamfer':  chamfers,
-            'range_l1': range_l1s,
+            'sample':      sample_idx,
+            'chamfer':     chamfers,
+            'range_l1':    range_l1s,
+            'rollout_ms':  round(rollout_ms, 3),
+            'step_ms':     [round(t, 3) for t in step_ms],
         })
 
-        # Save per-sample figures
-        save_range_view_figure(
-            sample_idx, rv_steps,
-            os.path.join(rv_dir,  f'range_{sample_idx:04d}.png'),
-            max_depth=max_depth,
-        )
-        save_bev_figure(
-            sample_idx, bev_steps,
-            os.path.join(bev_dir, f'bev_{sample_idx:04d}.png'),
-            bev_range=bev_range,
-        )
+        # Save per-sample figures (skipped when --no_vis)
+        if not args_cli.no_vis:
+            save_range_view_figure(
+                sample_idx, rv_steps,
+                os.path.join(rv_dir,  f'range_{sample_idx:04d}.png'),
+                max_depth=max_depth,
+            )
+            save_bev_figure(
+                sample_idx, bev_steps,
+                os.path.join(bev_dir, f'bev_{sample_idx:04d}.png'),
+                bev_range=bev_range,
+            )
 
         if sample_idx % 20 == 0 or sample_idx == n_eval - 1:
             per_h = '  '.join(
-                f't+{h+1}: cd={chamfers[h]:.3f} l1={range_l1s[h]:.4f}'
+                f't+{h+1}: cd={chamfers[h]:.3f} l1={range_l1s[h]:.4f} ({step_ms[h]:.0f}ms)'
                 for h in range(n_horizons)
             )
-            print(f'  [{sample_idx:4d}/{n_eval}]  {per_h}')
+            print(f'  [{sample_idx:4d}/{n_eval}]  rollout={rollout_ms:.0f}ms  {per_h}')
 
     # ── Aggregate per-horizon statistics ──────────────────────────────────────
     horizon_stats = []
@@ -433,30 +465,51 @@ def main():
     all_l1 = [v for h in range(n_horizons) for m in metrics_list
               if not np.isnan(v := m['range_l1'][h])]
 
+    rollout_times = [m['rollout_ms'] for m in metrics_list]
+    step_times_by_h = [
+        [m['step_ms'][h] for m in metrics_list]
+        for h in range(n_horizons)
+    ]
+    mean_rollout_ms   = float(np.mean(rollout_times))
+    median_rollout_ms = float(np.median(rollout_times))
+    mean_step_ms      = [float(np.mean(t)) for t in step_times_by_h]
+
+    # Add per-horizon timing into horizon_stats
+    for h, hs in enumerate(horizon_stats):
+        hs['mean_infer_ms'] = round(mean_step_ms[h], 3)
+
     summary = {
-        'checkpoint':            args_cli.ckpt,
-        'step':                  step_ckpt,
-        'n_samples':             len(metrics_list),
-        'condition_frames':      cfg.condition_frames,
-        'forecast_horizons':     n_horizons,
-        'overall_mean_chamfer':  float(np.mean(all_cd)) if all_cd else None,
-        'overall_mean_range_l1': float(np.mean(all_l1)) if all_l1 else None,
-        'per_horizon':           horizon_stats,
+        'checkpoint':              args_cli.ckpt,
+        'step':                    step_ckpt,
+        'n_samples':               len(metrics_list),
+        'condition_frames':        cfg.condition_frames,
+        'forecast_horizons':       n_horizons,
+        'overall_mean_chamfer':    float(np.mean(all_cd)) if all_cd else None,
+        'overall_mean_range_l1':   float(np.mean(all_l1)) if all_l1 else None,
+        'rollout_mean_ms':         round(mean_rollout_ms, 3),
+        'rollout_median_ms':       round(median_rollout_ms, 3),
+        'rollout_fps':             round(1000.0 / mean_rollout_ms, 2) if mean_rollout_ms > 0 else None,
+        'per_step_mean_ms':        [round(t, 3) for t in mean_step_ms],
+        'per_horizon':             horizon_stats,
     }
 
-    print('\n' + '=' * 70)
+    print('\n' + '=' * 80)
     print(f'  Samples evaluated : {summary["n_samples"]}')
-    print(f'  {"Horizon":<10} {"Mean Chamfer":>16} {"Mean Range L1 (m)":>20}')
-    print('  ' + '-' * 48)
+    print(f'  {"Horizon":<10} {"Mean Chamfer":>16} {"Mean L1 (m)":>16} {"Infer (ms)":>12}')
+    print('  ' + '-' * 56)
     for hs in horizon_stats:
         cd  = f'{hs["mean_chamfer"]:.4f}'    if hs['mean_chamfer']    is not None else 'N/A'
         l1  = f'{hs["mean_range_l1_m"]:.4f}' if hs['mean_range_l1_m'] is not None else 'N/A'
-        print(f'  t+{hs["horizon"]:<8} {cd:>16} {l1:>20}')
-    print('  ' + '-' * 48)
+        ms  = f'{hs["mean_infer_ms"]:.1f}'
+        print(f'  t+{hs["horizon"]:<8} {cd:>16} {l1:>16} {ms:>12}')
+    print('  ' + '-' * 56)
     print(f'  {"Overall":<10} '
           f'{summary["overall_mean_chamfer"]:.4f if summary["overall_mean_chamfer"] else "N/A":>16} '
-          f'{summary["overall_mean_range_l1"]:.4f if summary["overall_mean_range_l1"] else "N/A":>20}')
-    print('=' * 70)
+          f'{summary["overall_mean_range_l1"]:.4f if summary["overall_mean_range_l1"] else "N/A":>16}')
+    print(f'\n  AR rollout  —  mean: {mean_rollout_ms:.1f} ms  '
+          f'median: {median_rollout_ms:.1f} ms  '
+          f'({summary["rollout_fps"]:.2f} rollouts/s)')
+    print('=' * 80)
 
     json_path = os.path.join(out_dir, 'metrics_summary.json')
     with open(json_path, 'w') as f:

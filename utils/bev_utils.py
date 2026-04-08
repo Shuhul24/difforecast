@@ -340,14 +340,14 @@ def render_rangeview_comparison(
     fig, axes = plt.subplots(1, 3, figsize=(24, 5))
 
     panels = [
-        (gt_clipped,   'plasma', f'Ground Truth depth  (max {max_depth:.0f} m)'),
-        (pred_clipped, 'plasma', 'Predicted depth'),
-        (abs_error,    'hot',    'Absolute Error  |pred − gt|'),
+        (gt_clipped,   'turbo_r', f'Ground Truth depth  (max {max_depth:.0f} m)'),
+        (pred_clipped, 'turbo_r', 'Predicted depth'),
+        (abs_error,    'hot',     'Absolute Error  |pred − gt|'),
     ]
 
     for ax, (img, cmap, subtitle) in zip(axes, panels):
         im = ax.imshow(img, cmap=cmap, vmin=0.0,
-                       vmax=max_depth if cmap == 'plasma' else abs_error.max() + 1e-6,
+                       vmax=max_depth if cmap == 'turbo_r' else abs_error.max() + 1e-6,
                        aspect='auto', interpolation='nearest')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='metres')
         ax.set_title(subtitle, fontsize=11)
@@ -394,12 +394,12 @@ def render_rangeview_sequence(
         gt_clip   = np.clip(gt_depths[i],   0.0, max_depth)
         pred_clip = np.clip(pred_depths[i], 0.0, max_depth)
 
-        axes[0, i].imshow(gt_clip,   cmap='plasma', vmin=0.0, vmax=max_depth,
+        axes[0, i].imshow(gt_clip,   cmap='turbo_r', vmin=0.0, vmax=max_depth,
                           aspect='auto', interpolation='nearest')
         axes[0, i].set_title(f'GT — step {i + 1}', fontsize=10)
         axes[0, i].axis('off')
 
-        axes[1, i].imshow(pred_clip, cmap='plasma', vmin=0.0, vmax=max_depth,
+        axes[1, i].imshow(pred_clip, cmap='turbo_r', vmin=0.0, vmax=max_depth,
                           aspect='auto', interpolation='nearest')
         axes[1, i].set_title(f'Pred — step {i + 1}', fontsize=10)
         axes[1, i].axis('off')

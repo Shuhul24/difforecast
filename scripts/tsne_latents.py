@@ -34,6 +34,7 @@ Usage:
     python scripts/tsne_latents.py --arch swin ... --n_components 2
 """
 
+import io
 import os
 import sys
 import argparse
@@ -56,9 +57,48 @@ from dataset.dataset_kitti_rangeview import KITTIRangeViewDataset
 
 def _load_dino_model(cfg, ckpt_path, device):
     from models.dino_rae_rangeview import RangeViewRAE
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    sd   = ckpt['model_state_dict']
+
+    # Infer channel count from the conv_stem weight in the checkpoint so the
+    # model is built correctly regardless of what the config says.
+    ckpt_n_ch = sd['encoder.conv_stem.conv_block.0.conv1.weight'].shape[1]
+    cfg_n_ch  = 5 if getattr(cfg, 'five_channel', False) else getattr(cfg, 'range_channels', 2)
+    if ckpt_n_ch != cfg_n_ch:
+        print(f"  [info] checkpoint uses {ckpt_n_ch} input channels "
+              f"(config says {cfg_n_ch}) — patching cfg")
+        cfg.range_channels = ckpt_n_ch
+        cfg.five_channel   = (ckpt_n_ch == 5)
+        if 'ch_weights' in sd:
+            cfg.rae_ch_weights = list(sd['ch_weights'].cpu().float().numpy())
+        # five_channel=True is only respected by the dataset when log_range=False
+        # (the log_range branch always returns [range, intensity] = 2 ch).
+        # A 5-ch checkpoint must have been trained with log_range=False.
+        if cfg.five_channel and getattr(cfg, 'log_range', False):
+            print("  [info] five_channel=True requires log_range=False — patching cfg")
+            cfg.log_range = False
+
+    # Ensure proj_img_mean/stds length matches the actual channel count so the
+    # dataset's normalisation tensors (self.mean / self.std) are sized correctly.
+    n_ch = getattr(cfg, 'range_channels', 2)
+    mean = list(getattr(cfg, 'proj_img_mean', []))
+    stds = list(getattr(cfg, 'proj_img_stds', []))
+    if len(mean) != n_ch:
+        cfg.proj_img_mean = (mean + [0.0] * n_ch)[:n_ch]
+        print(f"  [info] patched proj_img_mean → {cfg.proj_img_mean}")
+    if len(stds) != n_ch:
+        cfg.proj_img_stds = (stds + [1.0] * n_ch)[:n_ch]
+        print(f"  [info] patched proj_img_stds → {cfg.proj_img_stds}")
+
     model = RangeViewRAE(cfg, local_rank=-1)
-    ckpt  = torch.load(ckpt_path, map_location='cpu')
-    model.load_state_dict(ckpt['model_state_dict'], strict=True)
+    # strict=False: tolerate keys present in the checkpoint but absent in the
+    # current model definition (e.g. decoder.refine added/removed across versions).
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    missing_real = [k for k in missing if not k.startswith('decoder.refine')]
+    if missing_real:
+        print(f"  [warn] missing keys after load: {missing_real}")
+    if unexpected:
+        print(f"  [warn] unexpected keys in checkpoint: {unexpected}")
     model.eval().to(device)
     step = ckpt.get('step', '?')
     return model, step, 'ConvStem + frozen DINOv2 ViT-S/14'
@@ -147,13 +187,21 @@ def extract_sequence_features(
     feats     = []
     imgs_out  = [] if return_images else None
 
+    # How many channels the model was built with (cfg may have been patched by
+    # _load_swin_model to match the checkpoint).  The dataset returns 2 channels
+    # by default (range + intensity); slice to what the model expects.
+    n_model_ch = getattr(cfg, 'range_channels', None)
+
     for s in range(0, len(indices), batch_sz):
         batch_idx = indices[s: s + batch_sz]
         raw = torch.stack([ds[int(i)][0][0] for i in batch_idx])   # [B, C, H, W]
+        if n_model_ch is not None and raw.shape[1] > n_model_ch:
+            raw = raw[:, :n_model_ch]               # drop extra channels (e.g. intensity)
         if return_images:
             imgs_out.extend(raw.unbind(0))          # list of cpu [C, H, W] tensors
         imgs = raw.to(device, dtype=torch.float32)
-        z, _ = model.encode(imgs)                   # z: [B, tokens, D]
+        enc_out = model.encode(imgs)                # Swin: (z, skips); DINOv2: z
+        z = enc_out[0] if isinstance(enc_out, (tuple, list)) else enc_out
         feats.append(z.mean(dim=1).cpu())           # mean over tokens → [B, D]
 
     return torch.cat(feats, dim=0), imgs_out        # ([N, D], list|None)
@@ -453,6 +501,170 @@ def _make_animated_3d_figure(
     return fig
 
 
+# ── GIF: scan-by-scan reveal for one sequence ─────────────────────────────────
+
+def _make_sequence_gif(
+    emb,
+    seqs,
+    seq_ids_present,
+    gif_seq        : int,
+    step_ckpt,
+    arch           : str,
+    encoder_desc   : str,
+    images,                     # list of [C,H,W] cpu tensors, same order as emb rows
+    output_path    : str,
+    fps            : int  = 10,
+    dpi            : int  = 100,
+    max_frames     : int  = 300,
+    elev           : float = 20,
+    azim           : float = 45,
+):
+    """Render a GIF that reveals one KITTI sequence scan-by-scan in 3-D t-SNE
+    space alongside the corresponding range-view image.
+
+    All other sequences are shown as faded background dots (fixed).
+    The animated sequence grows cumulatively point-by-point.
+    """
+    try:
+        import imageio
+    except ImportError:
+        raise ImportError(
+            "imageio is required for GIF output.  Install with:\n"
+            "  pip install imageio"
+        )
+
+    import matplotlib
+    matplotlib.use('Agg')           # headless — must be before pyplot import
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D   # noqa: F401 — registers 3d projection
+
+    assert emb.shape[1] == 3, "GIF output requires 3-D t-SNE (--n_components 3)"
+
+    # ── index helpers ─────────────────────────────────────────────────────────
+    counters     = {sid: 0 for sid in seq_ids_present}
+    seq_scan_idx = {}
+    for gi in range(len(seqs)):
+        sid = int(seqs[gi])
+        seq_scan_idx[gi] = counters[sid]
+        counters[sid] += 1
+
+    anim_mask  = seqs == gif_seq
+    anim_gi    = np.where(anim_mask)[0]
+    n_anim     = len(anim_gi)
+    anim_local = [seq_scan_idx[g] for g in anim_gi]
+    anim_color = TAB10[gif_seq % len(TAB10)]
+    has_images = images is not None and len(images) > 0
+
+    # ── axis limits (fixed across all frames) ─────────────────────────────────
+    def _expand(lo, hi, p=0.05):
+        r = hi - lo
+        return lo - r * p, hi + r * p
+
+    xlim = _expand(emb[:, 0].min(), emb[:, 0].max())
+    ylim = _expand(emb[:, 1].min(), emb[:, 1].max())
+    zlim = _expand(emb[:, 2].min(), emb[:, 2].max())
+
+    # ── frame stride ──────────────────────────────────────────────────────────
+    stride       = max(1, n_anim // max_frames)
+    frame_counts = list(range(0, n_anim + 1, stride))
+    if frame_counts[-1] != n_anim:
+        frame_counts.append(n_anim)
+
+    # ── pre-build background scatter arrays (constant across frames) ──────────
+    bg_data = []   # list of (x, y, z, color)
+    for sid in seq_ids_present:
+        if sid == gif_seq:
+            continue
+        mask  = seqs == sid
+        color = TAB10[sid % len(TAB10)]
+        bg_data.append((
+            emb[mask, 0], emb[mask, 1], emb[mask, 2],
+            color, f'seq {sid:02d}',
+        ))
+
+    # ── render each frame ─────────────────────────────────────────────────────
+    fig_w = 16 if has_images else 9
+    gif_frames = []
+
+    print(f"Rendering {len(frame_counts)} GIF frames "
+          f"(seq {gif_seq:02d}, {n_anim} scans, stride={stride}) …")
+
+    for fi, k in enumerate(frame_counts):
+
+        fig = plt.figure(figsize=(fig_w, 5.5), dpi=dpi)
+
+        if has_images:
+            ax3d  = fig.add_subplot(1, 2, 1, projection='3d')
+            ax_im = fig.add_subplot(1, 2, 2)
+        else:
+            ax3d  = fig.add_subplot(1, 1, 1, projection='3d')
+            ax_im = None
+
+        # background
+        for (bx, by, bz, bc, _blabel) in bg_data:
+            ax3d.scatter(bx, by, bz, c=bc, s=3, alpha=0.15, linewidths=0)
+
+        # animated sequence (cumulative up to k)
+        if k > 0:
+            idx = anim_gi[:k]
+            ax3d.scatter(
+                emb[idx, 0], emb[idx, 1], emb[idx, 2],
+                c=anim_color, s=10, alpha=0.90, linewidths=0, zorder=5,
+            )
+
+        ax3d.set_xlim(xlim)
+        ax3d.set_ylim(ylim)
+        ax3d.set_zlim(zlim)
+        ax3d.view_init(elev=elev, azim=azim)
+        ax3d.set_xticklabels([])
+        ax3d.set_yticklabels([])
+        ax3d.set_zticklabels([])
+        ax3d.set_xlabel('t-SNE 1', labelpad=-12, fontsize=8)
+        ax3d.set_ylabel('t-SNE 2', labelpad=-12, fontsize=8)
+        ax3d.set_zlabel('t-SNE 3', labelpad=-12, fontsize=8)
+
+        scan_label = (f'scan {anim_local[k - 1]:06d}'
+                      if k > 0 else 'no scans yet')
+        ax3d.set_title(
+            f'[{arch.upper()}]  seq {gif_seq:02d}  —  {k}/{n_anim} scans  '
+            f'({scan_label})\n'
+            f'step {step_ckpt}  |  {encoder_desc}',
+            fontsize=7.5, pad=6,
+        )
+
+        # range-view image panel
+        if ax_im is not None:
+            if k > 0 and has_images:
+                rgb = _to_rgb_image(images[k - 1])
+                ax_im.imshow(rgb, aspect='auto')
+                ax_im.set_title(
+                    f'Range view  |  seq {gif_seq:02d}  scan {anim_local[k - 1]:06d}',
+                    fontsize=8,
+                )
+            else:
+                h = images[0].shape[-2] if has_images else 64
+                w = min(images[0].shape[-1] if has_images else 512, 640)
+                ax_im.imshow(np.zeros((h, w, 3), dtype=np.uint8), aspect='auto')
+                ax_im.set_title('Range view', fontsize=8)
+            ax_im.axis('off')
+
+        fig.tight_layout(pad=1.2)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        gif_frames.append(imageio.v2.imread(buf))
+        buf.close()
+
+        if (fi + 1) % 50 == 0 or fi == len(frame_counts) - 1:
+            print(f"  {fi + 1}/{len(frame_counts)} frames rendered")
+
+    print(f"Writing GIF → {output_path}  ({len(gif_frames)} frames @ {fps} fps) …")
+    imageio.mimsave(output_path, gif_frames, fps=fps, loop=0)
+    print(f"Saved → {output_path}")
+
+
 # ── CLI + main ────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -478,6 +690,21 @@ def parse_args():
     p.add_argument('--device',       default='cuda')
     p.add_argument('--animate_seq',  type=int, default=-1,
                    help='If >= 0, also save an animated HTML revealing this sequence scan-by-scan')
+
+    # GIF output options
+    p.add_argument('--gif_seq', type=int, default=-1,
+                   help='If >= 0, save a GIF revealing this sequence scan-by-scan '
+                        '(e.g. 8 for seq 08).  Requires --n_components 3.')
+    p.add_argument('--gif_fps',        type=int,   default=10,
+                   help='GIF frame rate (default 10)')
+    p.add_argument('--gif_dpi',        type=int,   default=100,
+                   help='DPI for each GIF frame (default 100)')
+    p.add_argument('--gif_max_frames', type=int,   default=300,
+                   help='Max number of frames in the GIF (stride is auto-computed, default 300)')
+    p.add_argument('--gif_elev',       type=float, default=20,
+                   help='3-D viewpoint elevation in degrees (default 20)')
+    p.add_argument('--gif_azim',       type=float, default=45,
+                   help='3-D viewpoint azimuth in degrees (default 45)')
     return p.parse_args()
 
 
@@ -587,6 +814,41 @@ def main():
             )
             fig_anim.write_html(anim_path, include_plotlyjs='cdn')
             print(f"Saved → {anim_path}")
+
+    # ── GIF output ────────────────────────────────────────────────────────────
+    if args.gif_seq >= 0:
+        if args.gif_seq not in seq_ids_present:
+            print(f"Warning: seq {args.gif_seq} not in loaded sequences — skipping GIF.")
+        elif nc != 3:
+            print("GIF output requires 3-D t-SNE (--n_components 3) — skipping.")
+        else:
+            print(f"\nLoading range-view images for GIF (seq {args.gif_seq:02d}) …")
+            _, images_gif = extract_sequence_features(
+                model, cfg, args.gif_seq,
+                args.n_frames_per_seq, args.batch_size, device,
+                return_images=True,
+            )
+            print(f"  {len(images_gif)} images loaded  "
+                  f"(shape {tuple(images_gif[0].shape)})")
+
+            gif_path = os.path.join(
+                args.output_dir,
+                f'{args.arch}_tsne_3d_step{step_ckpt}_seq{args.gif_seq:02d}.gif',
+            )
+            _make_sequence_gif(
+                emb, seqs, seq_ids_present,
+                gif_seq      = args.gif_seq,
+                step_ckpt    = step_ckpt,
+                arch         = args.arch,
+                encoder_desc = encoder_desc,
+                images       = images_gif,
+                output_path  = gif_path,
+                fps          = args.gif_fps,
+                dpi          = args.gif_dpi,
+                max_frames   = args.gif_max_frames,
+                elev         = args.gif_elev,
+                azim         = args.gif_azim,
+            )
 
 
 if __name__ == '__main__':
