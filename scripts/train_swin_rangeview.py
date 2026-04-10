@@ -156,7 +156,7 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
             x = data.cuda(non_blocking=True).to(torch.bfloat16)
 
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                out = model_engine(x)
+                out = model_engine(x, step=step)
 
             loss = out['loss_all']
             if not math.isfinite(loss.item()):
@@ -174,17 +174,24 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
             if step % 50 == 0 and global_rank == 0:
                 lr = model_engine.get_lr()[0]
                 loss_mask_val = out.get('loss_mask', torch.tensor(0.)).item()
+                loss_kl_val   = out.get('loss_kl',   torch.tensor(0.)).item()
+                beta = getattr(args, 'kl_weight', 1e-4) * min(
+                    1.0, float(step) / max(getattr(args, 'kl_warmup_steps', 10000), 1))
                 msg = (f"[S1] epoch={epoch_frac:.2f} | step={step} | loss={loss.item():.4f} | "
-                       f"rec={out['loss_rec'].item():.4f} | mask_bce={loss_mask_val:.4f} | "
+                       f"rec={out['loss_rec'].item():.4f} | kl={loss_kl_val:.4f} | "
+                       f"beta={beta:.2e} | mask_bce={loss_mask_val:.4f} | "
                        f"bev={out['loss_bev'].item():.4f} | "
                        f"lr={lr:.2e} | {elapsed:.2f}s/step")
                 logger.info(msg)
                 if hasattr(args, 'writer') and args.writer:
                     args.writer.add_scalar('stage1/loss_all',      loss.item(),           step)
                     args.writer.add_scalar('stage1/loss_rec',      out['loss_rec'].item(), step)
+                    args.writer.add_scalar('stage1/loss_kl',       loss_kl_val,           step)
+                    args.writer.add_scalar('stage1/kl_beta',       beta,                  step)
                     args.writer.add_scalar('stage1/loss_mask_bce', loss_mask_val,          step)
                 if not getattr(args, 'no_wandb', False) and global_rank == 0:
                     wandb.log({'s1/loss': loss.item(), 's1/rec': out['loss_rec'].item(),
+                               's1/kl': loss_kl_val, 's1/kl_beta': beta,
                                's1/mask_bce': loss_mask_val,
                                's1/bev': out['loss_bev'].item(), 'step': step, 'epoch': epoch_frac})
 
@@ -587,6 +594,15 @@ def main():
     # Build model
     if args.stage == '1':
         model = RangeViewSwinRAE(args, local_rank=global_rank)
+        # Allow warm-starting Stage 1 from a pre-trained checkpoint (e.g. a
+        # checkpoint trained without KL).  New keys (mu_proj, logvar_proj) will
+        # be missing in old checkpoints and are kept at their default init.
+        if getattr(args, 'resume_path', None):
+            sd = torch.load(args.resume_path, map_location='cpu').get('model_state_dict', {})
+            miss, unex = model.load_state_dict(sd, strict=False)
+            logger.info(f"[S1] Loaded checkpoint from {args.resume_path} "
+                        f"| missing={len(miss)} (expected: mu/logvar_proj if pre-KL) "
+                        f"| unexpected={len(unex)}")
     else:
         ckpt = getattr(args, 'resume_path', None)
         model = RangeViewSwinDiT(args, local_rank=global_rank, load_path=ckpt)

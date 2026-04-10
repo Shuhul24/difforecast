@@ -474,8 +474,21 @@ class TULIPRangeEncoder(nn.Module):
 
         self.norm = nn.LayerNorm(dims[3])
 
-    def forward(self, x):
-        """[B, C, 64, 2048] → (z [B, 64, 768], skips: list of 3)"""
+        # VAE bottleneck: project deterministic features to mean + log-variance.
+        # Keeping the same dim (768) preserves Stage 2 STT/DiT compatibility.
+        # logvar init to zero → posterior starts as N(0, 1), matching the prior.
+        self.mu_proj     = nn.Linear(dims[3], dims[3], bias=True)
+        self.logvar_proj = nn.Linear(dims[3], dims[3], bias=True)
+        nn.init.zeros_(self.logvar_proj.weight)
+        nn.init.zeros_(self.logvar_proj.bias)
+
+    def forward(self, x, sample=True):
+        """[B, C, 64, 2048] → (z [B,64,768], mu [B,64,768], logvar [B,64,768], skips)
+
+        sample=True  : reparameterised sample during Stage 1 training.
+        sample=False : returns mu only — used by the frozen encoder in Stage 2
+                       so that diffusion operates on a deterministic, normalised code.
+        """
         x = self.pos_drop(self.patch_embed(x))
 
         H, W = 16, 256
@@ -488,7 +501,14 @@ class TULIPRangeEncoder(nn.Module):
                 x = self.merges[s](x, H, W)
                 H, W = H // 2, W // 2
 
-        return self.norm(x), skips
+        h      = self.norm(x)                              # [B, 64, 768]
+        mu     = self.mu_proj(h)
+        logvar = self.logvar_proj(h).clamp(-30., 20.)      # numerical stability
+        if sample and self.training:
+            z = mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+        else:
+            z = mu                                         # deterministic at eval / Stage 2
+        return z, mu, logvar, skips
 
 
 # ── Decoder ───────────────────────────────────────────────────────────────────

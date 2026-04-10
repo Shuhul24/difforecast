@@ -129,6 +129,13 @@ temporal_skip_agg = True
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
 range_view_loss_weight = 1.0
+# ── VAE KL regularisation (Stage 1) ──────────────────────────────────────────
+# β warmup: KL weight ramps from 0 → kl_weight over kl_warmup_steps so that
+# reconstruction quality stabilises before KL pressure kicks in.
+# Free bits (0.5 nats/dim) prevents posterior collapse on sparse LiDAR latents.
+kl_weight       = 1e-4   # final β; raise to 1e-3 if latents remain unnormalised
+kl_warmup_steps = 10000  # ramp duration in Stage 1 training steps
+
 chamfer_loss_weight    = 0.0     # enable after model stabilises
 chamfer_max_pts        = 2048
 chamfer_start          = 0

@@ -186,17 +186,21 @@ class RangeViewSwinRAE(nn.Module):
             self.bev_fn = None
             self.log_w_bev = None
 
-    def encode(self, x):
-        """[B, C, H, W] → (z [B, 64, 768], skips: list of 3)"""
-        return self.encoder(x)
+        # KL regularisation (VAE bottleneck)
+        self.kl_weight       = float(getattr(args, 'kl_weight',       1e-4))
+        self.kl_warmup_steps = int(getattr(args,   'kl_warmup_steps', 10000))
+
+    def encode(self, x, sample=True):
+        """[B, C, H, W] → (z, mu, logvar [B, 64, 768], skips)"""
+        return self.encoder(x, sample=sample)
 
     def decode(self, z, skips=None):
         """(z [B, 64, 768], skips) → [B, C, H, W]"""
         return self.decoder(z, skips)
 
-    def forward(self, x):
+    def forward(self, x, step=0):
         """x: [B, C, 64, 2048] → loss dict."""
-        z, skips = self.encode(x)
+        z, mu, logvar, skips = self.encode(x, sample=True)
         rec = self.decode(z, skips)
 
         w = self.ch_weights
@@ -255,7 +259,18 @@ class RangeViewSwinRAE(nn.Module):
             lw = self.log_w_bev.clamp(min=0.)
             loss_all = loss_all + torch.exp(-lw) * loss_bev + lw
 
-        return {'loss_all': loss_all, 'loss_rec': loss_rec,
+        # ── KL regularisation (VAE bottleneck) ───────────────────────────────
+        # Free bits (λ=0.5 nats/dim) prevents posterior collapse by only
+        # penalising dimensions whose KL exceeds the free-bit floor.
+        # Linear β warmup from 0 → kl_weight over kl_warmup_steps so that
+        # reconstruction quality stabilises before KL pressure kicks in.
+        free_bits  = 0.5
+        kl_per_dim = -0.5 * (1. + logvar - mu.pow(2) - logvar.exp())   # [B, 64, 768]
+        loss_kl    = kl_per_dim.clamp(min=free_bits).mean()
+        beta       = self.kl_weight * min(1.0, float(step) / max(self.kl_warmup_steps, 1))
+        loss_all   = loss_all + beta * loss_kl
+
+        return {'loss_all': loss_all, 'loss_rec': loss_rec, 'loss_kl': loss_kl,
                 'loss_mask': loss_mask, 'loss_bev': loss_bev, 'x_rec': rec}
 
     def load_from_tulip(self, ckpt_path):
@@ -439,9 +454,14 @@ class RangeViewSwinDiT(nn.Module):
             sd = torch.load(swin_ckpt, map_location='cpu').get('model_state_dict', {})
             enc_sd = {k[len('encoder.'):]: v for k, v in sd.items() if k.startswith('encoder.')}
             dec_sd = {k[len('decoder.'):]: v for k, v in sd.items() if k.startswith('decoder.')}
-            missing_enc = self.swin_encoder.load_state_dict(enc_sd, strict=True)
-            missing_dec = self.decoder.load_state_dict(dec_sd, strict=True)
-            print(f"[SwinDiT] Encoder+Decoder loaded from {swin_ckpt}")
+            # strict=False: tolerate mu_proj/logvar_proj missing in old checkpoints
+            # (pre-KL) or extra keys if the checkpoint is newer.
+            miss_e, unex_e = self.swin_encoder.load_state_dict(enc_sd, strict=False)
+            miss_d, unex_d = self.decoder.load_state_dict(dec_sd, strict=False)
+            print(f"[SwinDiT] Encoder loaded from {swin_ckpt} "
+                  f"(missing={len(miss_e)}, unexpected={len(unex_e)})")
+            print(f"[SwinDiT] Decoder loaded from {swin_ckpt} "
+                  f"(missing={len(miss_d)}, unexpected={len(unex_d)})")
         else:
             print("[SwinDiT] No swin_ckpt — encoder+decoder randomly initialised. Run Stage 1 first.")
         for p in self.decoder.parameters():
@@ -666,7 +686,10 @@ class RangeViewSwinDiT(nn.Module):
           skips_per_frame[2]: [B, T, 256,  384]
         """
         B, T, C, H, W = x.shape
-        z, sk = self.swin_encoder(rearrange(x, 'b t c h w -> (b t) c h w'))
+        # sample=False: use mu only — deterministic, KL-normalised latent for Stage 2
+        z, _mu, _logvar, sk = self.swin_encoder(
+            rearrange(x, 'b t c h w -> (b t) c h w'), sample=False
+        )
         latents = rearrange(z, '(b t) n d -> b t n d', b=B, t=T)
         all_skips = []
         for s in sk:
@@ -681,7 +704,7 @@ class RangeViewSwinDiT(nn.Module):
         x_frame: [B, C, H, W]
         Returns: list of 3 tensors — skips[i] shape [B, N_i, D_i]
         """
-        _, skips = self.swin_encoder(x_frame)
+        _, _mu, _logvar, skips = self.swin_encoder(x_frame, sample=False)
         return skips
 
     def decode_latents(self, z, skips=None):
