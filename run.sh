@@ -55,8 +55,8 @@ torchrun --nproc_per_node=1 scripts/train_rangeview.py --batch_size 13 --lr 3e-4
 # SWIN Stage 1 training from checkpoint:
 # torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 1 --batch_size 4 --exp_name "swin_stage_1" --config configs/swin_config_rangeview.py --eval_steps 2000 --load_from_deepspeed "/scratch/p24cs0005/exp/ckpt/swin_stage_1/<step>" --resume_step <step> --no_log_file
 
-# SWIN Stage 1 sanity check (forward/backward pass + mini-training loop):
-# python scripts/test_swin_stage1.py --config configs/swin_config_rangeview.py --steps 50
+# SWIN Stage 1 evaluation (range-view reconstruction metrics + figures):
+# python scripts/eval_swin_stage1.py --config configs/swin_config_rangeview.py --ckpt /DATA2/shuhul/exp/swin_ckpt/swin-s1-ch1-b32/swin_rae_step<step>.pkl --out outputs/eval_swin_s1_step<step> --split test --n_samples 0
 
 # SWIN Stage 2 training (STT + FluxDiT in Swin bottleneck latent space; set swin_ckpt in config first):
 # torchrun --nproc_per_node=1 scripts/train_swin_rangeview.py --stage 2 --batch_size 2 --exp_name "swin_stage_2" --config configs/swin_config_rangeview.py --eval_steps 2000 --no_log_file

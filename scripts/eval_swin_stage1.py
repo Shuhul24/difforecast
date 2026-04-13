@@ -50,6 +50,8 @@ def parse_args():
     p.add_argument('--batch_size', default=8, type=int,
                    help='Inference batch size')
     p.add_argument('--num_workers', default=4, type=int)
+    p.add_argument('--no_vis', action='store_true',
+                   help='Skip saving per-sample range-view figures (faster, saves disk)')
     return p.parse_args()
 
 
@@ -237,11 +239,12 @@ def main():
                 'infer_ms':      round(per_sample_ms, 3),
             })
 
-            save_range_view_figure(
-                sample_idx, gt_depth, pred_depth, mae,
-                os.path.join(rv_dir, f'range_{sample_idx:04d}.png'),
-                max_depth=max_depth,
-            )
+            if not args_cli.no_vis:
+                save_range_view_figure(
+                    sample_idx, gt_depth, pred_depth, mae,
+                    os.path.join(rv_dir, f'range_{sample_idx:04d}.png'),
+                    max_depth=max_depth,
+                )
 
             if sample_idx % 50 == 0 or sample_idx == n_eval - 1:
                 print(f'  [{sample_idx:5d}/{n_eval}]  MAE={mae:.4f} m  '
