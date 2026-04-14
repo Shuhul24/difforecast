@@ -23,6 +23,7 @@ import contextlib
 import torch
 import torch.nn as nn
 import random
+from torch.utils.checkpoint import checkpoint as grad_ckpt
 from einops import rearrange
 from utils.preprocess import get_rel_pose
 from models.stt import SpatialTemporalTransformer
@@ -650,7 +651,14 @@ class RangeViewDiT(nn.Module):
             # space (divided by latent_scale); the VAE decoder expects the original
             # scale.  Multiply back before passing to decode_from_z.
             predict_for_decode = predict * self.latent_scale.to(predict.dtype)
-            predict_decoded = self.vae_tokenizer.decode_from_z(predict_for_decode, self.h, self.w)
+            # Gradient checkpointing: recomputes decoder activations during
+            # backward instead of storing them — halves decoder activation
+            # memory at the cost of one extra decoder forward pass.
+            predict_decoded = grad_ckpt(
+                self.vae_tokenizer.decode_from_z,
+                predict_for_decode, self.h, self.w,
+                use_reentrant=False,
+            )
 
             # Chamfer is gated by chamfer_start — only compute once the model
             # has learned basic depth structure via range L1 supervision.

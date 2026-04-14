@@ -17,6 +17,8 @@ are adjusted accordingly.
 """
 
 import os
+# Reduce CUDA allocator fragmentation — set before any torch import
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import sys
 import math
 import time
@@ -664,8 +666,11 @@ def train(local_rank, args):
         batch_size=args.batch_size,
         num_workers=args.num_workers if hasattr(args, 'num_workers') else 8,
         pin_memory=True,
+        pin_memory_device='cuda',
         drop_last=True,
-        sampler=sampler
+        sampler=sampler,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
 
     print(f'Training dataloader length: {len(train_data)}')
