@@ -27,6 +27,7 @@ from einops import rearrange
 from utils.preprocess import get_rel_pose
 from models.stt import SpatialTemporalTransformer
 from models.flux_dit import FluxParams, FluxDiT
+from models.traj_dit import TrajDiT, TrajParams
 from models.modules.tokenizer import (
     RangeViewVAETokenizer,
     poses_to_indices,
@@ -263,6 +264,28 @@ class RangeViewDiT(nn.Module):
         self.dit.cuda()
 
         # ------------------------------------------------------------------ #
+        # PoseDiT — predicts next relative (x, y, yaw) conditioned on STT ctx
+        # ------------------------------------------------------------------ #
+        self.traj_token_size = 3   # (x, y, yaw)
+        self.lambda_pose     = float(getattr(args, 'lambda_pose', 0.1))
+        self.pose_dit = TrajDiT(TrajParams(
+            in_channels=self.traj_token_size,
+            out_channels=self.traj_token_size,
+            context_in_dim=args.n_embd,
+            hidden_size=int(getattr(args, 'n_embd_dit_traj', 512)),
+            mlp_ratio=4.0,
+            num_heads=int(getattr(args, 'n_head_dit_traj', 8)),
+            depth=getattr(args, 'n_layer_traj', [2, 2])[0],
+            depth_single_blocks=getattr(args, 'n_layer_traj', [2, 2])[1],
+            axes_dim=list(getattr(args, 'axes_dim_dit_traj', [16, 16, 32])),
+            theta=10_000, qkv_bias=True, guidance_embed=False,
+        ))
+        self.pose_dit.cuda()
+
+        # Depth-only supervision: skip intensity channel in auxiliary L1 loss.
+        self.depth_only = bool(getattr(args, 'depth_only', False))
+
+        # ------------------------------------------------------------------ #
         # Latent scale normalisation
         # ------------------------------------------------------------------ #
         # VAE latents can have variance >> 1 (especially with kl_weight=1e-6
@@ -295,6 +318,11 @@ class RangeViewDiT(nn.Module):
         self.img_ids, self.cond_ids, _ = prepare_ids(
             bs, self.h, self.w, self.total_token_size, 0, prefix_size=_cond_prefix
         )
+        # pose_traj_ids: 1 trajectory token (the predicted pose step)
+        _, _, _pose_traj_ids = prepare_ids(
+            bs, self.h, self.w, self.total_token_size, 1, prefix_size=_cond_prefix
+        )
+        self.register_buffer('pose_traj_ids', _pose_traj_ids)
 
         # ------------------------------------------------------------------ #
         # Auxiliary loss configuration
@@ -464,6 +492,26 @@ class RangeViewDiT(nn.Module):
             print(f"Successfully loaded STT + DiT from {load_path}")
 
     # ---------------------------------------------------------------------- #
+    # Pose normalisation helpers
+    # ---------------------------------------------------------------------- #
+
+    def _normalize_pose(self, traj: torch.Tensor) -> torch.Tensor:
+        """Map (x_m, y_m, yaw_deg) → [-1, 1] for PoseDiT input."""
+        t = traj.clone().float()
+        t[..., 0] = 2.0 * t[..., 0] / self.pose_x_bound - 1.0
+        t[..., 1] = t[..., 1] / self.pose_y_bound
+        t[..., 2] = t[..., 2] / self.yaw_bound
+        return t
+
+    def _denormalize_pose(self, traj: torch.Tensor) -> torch.Tensor:
+        """Inverse of _normalize_pose → physical units (m, m, deg)."""
+        t = traj.clone().float()
+        t[..., 0] = (t[..., 0] + 1.0) * self.pose_x_bound / 2.0
+        t[..., 1] = t[..., 1] * self.pose_y_bound
+        t[..., 2] = t[..., 2] * self.yaw_bound
+        return t
+
+    # ---------------------------------------------------------------------- #
     # Core forward pass (training)
     # ---------------------------------------------------------------------- #
 
@@ -539,6 +587,31 @@ class RangeViewDiT(nn.Module):
         CF     = self.condition_frames
         stt_last = rearrange(stt_features, '(b cf) s e -> b cf s e', b=B_pred)[:, -1]  # [B, S, E]
         pose_last = rearrange(pose_emb,    '(b cf) d   -> b cf d',   b=B_pred)[:, -1]  # [B, D]
+
+        # ── PoseDiT: predict next relative pose from STT context ─────────────
+        pose_target_xy  = rel_pose_total[:, -1:].float()    # [B, 1, 2]
+        pose_target_yaw = rel_yaw_total[:, -1:].float()     # [B, 1, 1]
+        pose_target_norm = self._normalize_pose(
+            torch.cat([pose_target_xy, pose_target_yaw], dim=-1)
+        ).to(latent_targets.dtype)                           # [B, 1, 3]
+
+        u_pose  = torch.randn((B_pred, 1, 1), device=latent_targets.device)
+        t_pose  = torch.sigmoid(u_pose)
+        pose_loss_terms = self.pose_dit.training_losses(
+            traj=pose_target_norm,
+            traj_ids=self.pose_traj_ids[:B_pred],
+            cond=stt_last,
+            cond_ids=self.cond_ids[:B_pred],
+            t=t_pose,
+            return_predict=True,
+        )
+        pose_loss = self.lambda_pose * pose_loss_terms['loss'].mean()
+
+        # Denormalise predicted pose for AR conditioning (physical units)
+        _pred_norm = pose_loss_terms['predict']                         # [B, 1, 3]
+        _pred_raw  = self._denormalize_pose(_pred_norm.float())
+        predict_pose_xy  = _pred_raw[:, :, :2]                         # [B, 1, 2]
+        predict_pose_yaw = _pred_raw[:, :, 2:3]                        # [B, 1, 1]
 
         # Flow-matching loss (DiT) — single frame, full context.
         # t_sample is kept as a named variable so auxiliary losses can be
@@ -622,7 +695,8 @@ class RangeViewDiT(nn.Module):
                     # unsupervised, giving the decoder no gradient signal on it.
                     # Weight 0.25 keeps intensity contribution smaller than range
                     # (intensity_weight / range_weight = 10/40 = 0.25 in ELBO).
-                    if predict_decoded.shape[1] > 1 and gt_range_img.shape[1] > 1:
+                    # Depth-only: skip intensity supervision (channel 1).
+                    if not self.depth_only and predict_decoded.shape[1] > 1 and gt_range_img.shape[1] > 1:
                         l1_intensity = torch.abs(predict_decoded[:, 1] - gt_range_img[:, 1])
                         l1_map = l1_range + 0.25 * l1_intensity
                     else:
@@ -678,22 +752,23 @@ class RangeViewDiT(nn.Module):
             _uw(self.log_w_bev, bev_percep_loss)
             if self.log_w_bev is not None else bev_percep_loss.new_zeros(())
         )
-        total_loss = diff_loss + aux_l1 + aux_cd + aux_bev
+        total_loss = diff_loss + aux_l1 + aux_cd + aux_bev + pose_loss
 
         return {
-            "loss_all":       total_loss,
-            "loss_diff":      diff_loss,
-            "loss_range_l1":  range_l1_loss,
-            "loss_chamfer":   chamfer_loss_val,
+            "loss_all":        total_loss,
+            "loss_diff":       diff_loss,
+            "loss_pose":       pose_loss,
+            "loss_range_l1":   range_l1_loss,
+            "loss_chamfer":    chamfer_loss_val,
             "loss_bev_percep": bev_percep_loss,
             # predict_decoded: [B, C, H, W] or None — decoded pixel image (for vis / L1)
             "predict": predict_decoded,
             # predict_latents: [B, L, latent_C] or None — DiT x_0 estimate in
-            # NORMALISED latent space (divided by latent_scale).  Used for the
-            # AR sliding-window: the next step receives this as
-            # latents_cond_precomputed and skips the divide (it's already scaled).
-            # To decode manually: vae.decode(predict_latents * latent_scale).
+            # NORMALISED latent space (divided by latent_scale).
             "predict_latents": predict,
+            # Predicted pose for next AR step (physical units, metres + degrees)
+            "predict_pose_xy":  predict_pose_xy,
+            "predict_pose_yaw": predict_pose_yaw,
         }
 
     # ---------------------------------------------------------------------- #

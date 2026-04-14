@@ -46,6 +46,7 @@ sys.path.append(root_path)
 from utils.config_utils import Config
 from utils.deepspeed_utils import get_deepspeed_config
 from utils.utils import *
+from utils.preprocess import get_rel_pose
 from models.model_rangeview import RangeViewDiT, RangeViewVAE
 from dataset.dataset_kitti_rangeview import (
     KITTIRangeViewTrainDataset,
@@ -66,6 +67,32 @@ from models.modules.range_discriminator import (
 )
 
 logger = logging.getLogger('base')
+
+
+def _compose_predicted_rot(base_rot, pred_xy, pred_yaw_deg):
+    """Compose predicted absolute 4×4 pose from previous absolute pose + predicted
+    relative (dx, dy, yaw_deg).  Mirrors train_swin_rangeview._compose_predicted_rot.
+
+    base_rot    : [B, 4, 4]  last conditioning frame absolute pose
+    pred_xy     : [B, 2]     predicted (dx, dy) in body frame (metres)
+    pred_yaw_deg: [B, 1]     predicted relative yaw (degrees)
+    Returns     : [B, 4, 4]  predicted absolute pose of the next frame
+    """
+    B     = base_rot.shape[0]
+    yaw   = pred_yaw_deg[:, 0] * (math.pi / 180.)
+    cos_y = torch.cos(yaw)
+    sin_y = torch.sin(yaw)
+    dx    = pred_xy[:, 0]
+    dy    = pred_xy[:, 1]
+    z     = torch.zeros(B, device=base_rot.device, dtype=base_rot.dtype)
+    o     = torch.ones_like(z)
+    T_rel = torch.stack([
+        cos_y, -sin_y, z, dx,
+        sin_y,  cos_y, z, dy,
+        z,      z,     o, z,
+        z,      z,     z, o,
+    ], dim=1).view(B, 4, 4)
+    return base_rot @ T_rel
 
 
 def add_arguments():
@@ -823,6 +850,10 @@ def train(local_rank, args):
                 # keeps latents_cond in latent space throughout the chain).
                 # None → model encodes features_cond normally (first step only).
                 latents_cond_next = None
+                # AR rotation window: tracks predicted absolute poses for the CF
+                # conditioning frames so rel_pose_cond is derived from PoseDiT
+                # predictions rather than GT after j=0.
+                ar_rot_window = rot_matrix[:, :cf].clone()   # [B, CF, 4, 4]
 
                 # Forward iterations
                 fw_iter = 1
@@ -883,6 +914,28 @@ def train(local_rank, args):
 
                     # Prepare for next autoregressive iteration (sliding window).
                     if j < fw_iter - 1:
+                        # ── Slide AR rotation window + update pose conditioning ──
+                        # Compose predicted absolute rotation for the new frame,
+                        # slide ar_rot_window forward, then derive all conditioning
+                        # relative poses from accumulated predicted rotations.
+                        pred_pose_xy  = loss_final.get('predict_pose_xy')   # [B, 1, 2]
+                        pred_pose_yaw = loss_final.get('predict_pose_yaw')  # [B, 1, 1]
+                        if pred_pose_xy is not None and pred_pose_yaw is not None:
+                            with torch.no_grad():
+                                pred_abs_rot = _compose_predicted_rot(
+                                    ar_rot_window[:, -1],
+                                    pred_pose_xy[:, 0].float(),
+                                    pred_pose_yaw[:, 0].float(),
+                                )   # [B, 4, 4]
+                                ar_rot_window = torch.cat(
+                                    [ar_rot_window[:, 1:],
+                                     pred_abs_rot.unsqueeze(1)], dim=1
+                                )   # [B, CF, 4, 4]
+                                with torch.cuda.amp.autocast(enabled=False):
+                                    rel_pose_cond, rel_yaw_cond = get_rel_pose(
+                                        ar_rot_window.float()
+                                    )   # [B, CF, 2], [B, CF, 1]
+
                         if args.return_predict and loss_final.get("predict_latents") is not None:
                             # -------------------------------------------------- #
                             # Chain-of-forwarding sliding-window update.
@@ -990,8 +1043,9 @@ def train(local_rank, args):
                     except NameError:
                         _g_loss_val = _d_loss_val = 0.0
                 else:
-                    loss_all_val = loss_final["loss_all"].item()
+                    loss_all_val  = loss_final["loss_all"].item()
                     loss_diff_val = get_loss_val("loss_diff")
+                    loss_pose_val = get_loss_val("loss_pose")
                     loss_rl1_val  = get_loss_val("loss_range_l1")
                     loss_cd_val   = get_loss_val("loss_chamfer")
                     loss_elbo_val = get_loss_val("loss_elbo")
@@ -1019,6 +1073,7 @@ def train(local_rank, args):
                         f'lr:{current_lr:.4e} '
                         f'loss_avg:{loss_all_val:.4e} '
                         f'diff_loss:{loss_diff_val:.4e} '
+                        f'pose_loss:{loss_pose_val:.4e} '
                         f'range_l1:{loss_rl1_val:.4e} '
                         f'chamfer:{loss_cd_val:.4e} '
                         f'elbo:{loss_elbo_val:.4e} '
@@ -1031,6 +1086,7 @@ def train(local_rank, args):
                     writer.add_scalar('learning_rate/lr',    current_lr,    step)
                     writer.add_scalar('loss/loss_all',       loss_all_val,  step)
                     writer.add_scalar('loss/loss_diff',      loss_diff_val, step)
+                    writer.add_scalar('loss/loss_pose',      loss_pose_val, step)
                     writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,  step)
                     writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
                     writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
@@ -1048,6 +1104,7 @@ def train(local_rank, args):
                         wb_log = {
                             'loss/loss_all':       loss_all_val,
                             'loss/loss_diff':      loss_diff_val,
+                            'loss/loss_pose':      loss_pose_val,
                             'loss/loss_range_l1':  loss_rl1_val,
                             'loss/loss_chamfer':   loss_cd_val,
                             'loss/loss_elbo':      loss_elbo_val,

@@ -139,11 +139,12 @@ def make_dataset(args, train=True):
 
 # ── Stage 1 training loop ─────────────────────────────────────────────────────
 
-def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
+def train_stage1(args, model_engine, scheduler, loader, val_loader, global_rank, step):
     """Train Swin RAE: Berhu (range) + L1 (intensity) + optional BEV perceptual."""
     model_engine.train()
     time_stamp = time.time()
     steps_per_epoch = len(loader)
+    best_val_loss = float('inf')
 
     for epoch in range(99999):
         for batch in loader:
@@ -199,18 +200,24 @@ def train_stage1(args, model_engine, scheduler, loader, global_rank, step):
                     and global_rank == 0 and out.get('x_rec') is not None):
                 _save_vis_stage1(step, args, x, out['x_rec'])
 
-            if step % args.eval_steps == 0 and global_rank == 0:
+            if step % args.eval_steps == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
-                raw.save_model(args.save_model_path, step, rank=global_rank)
-                logger.info(f"[S1] Saved checkpoint at step {step}")
-                _delete_old_checkpoints(args.save_model_path, step, prefix='swin_rae_step')
+                if global_rank == 0:
+                    raw.save_model(args.save_model_path, step, rank=global_rank)
+                    logger.info(f"[S1] Saved checkpoint at step {step}")
+                    _delete_old_checkpoints(args.save_model_path, step, prefix='swin_rae_step')
+                val_loss = _validate_stage1(args, model_engine, val_loader, step, global_rank)
+                if global_rank == 0 and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    _save_best_ckpt(raw, args.save_model_path, step, prefix='swin_rae')
+                    logger.info(f"[S1] New best val_rec={val_loss:.4f} at step {step}")
 
     return step
 
 
 # ── Stage 2 training loop ─────────────────────────────────────────────────────
 
-def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
+def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank, step):
     """Train STT + FluxDiT + PoseDiT with chain-of-forward autoregressive training.
 
     AR loop (fw_iter steps per batch):
@@ -231,6 +238,7 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
     fw_iter = args.forward_iter
     CF      = args.condition_frames
     ar_eval = getattr(args, 'ar_eval_rollout', False)
+    best_val_loss = float('inf')
 
     for epoch in range(99999):
         for batch in loader:
@@ -433,11 +441,17 @@ def train_stage2(args, model_engine, scheduler, loader, global_rank, step):
                     and global_rank == 0 and all_predictions):
                 _save_vis(step, args, range_views, all_predictions, CF, fw_iter)
 
-            if step % args.eval_steps == 0 and global_rank == 0:
+            if step % args.eval_steps == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
-                raw.save_model(args.save_model_path, step, rank=global_rank)
-                logger.info(f"[S2] Saved checkpoint at step {step}")
-                _delete_old_checkpoints(args.save_model_path, step, prefix='swin_dit_step')
+                if global_rank == 0:
+                    raw.save_model(args.save_model_path, step, rank=global_rank)
+                    logger.info(f"[S2] Saved checkpoint at step {step}")
+                    _delete_old_checkpoints(args.save_model_path, step, prefix='swin_dit_step')
+                val_loss = _validate_stage2(args, model_engine, val_loader, step, global_rank)
+                if global_rank == 0 and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    _save_best_ckpt(raw, args.save_model_path, step, prefix='swin_dit')
+                    logger.info(f"[S2] New best val_diff={val_loss:.4f} at step {step}")
 
     return step
 
@@ -470,6 +484,74 @@ def _compose_predicted_rot(base_rot, pred_xy, pred_yaw_deg):
         z,      z,     z, o,
     ], dim=1).view(B, 4, 4)
     return base_rot @ T_rel
+
+
+def _save_best_ckpt(raw_model, path, step, prefix):
+    """Save model as best checkpoint (fixed name — overwrites previous best)."""
+    best_path = os.path.join(path, f'{prefix}_best.pkl')
+    torch.save({'model_state_dict': raw_model.state_dict(), 'step': step}, best_path)
+
+
+def _validate_stage1(args, model_engine, val_loader, step, global_rank):
+    """Compute avg reconstruction loss on val set (all ranks, then all_reduce)."""
+    raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
+    raw.eval()
+    total = torch.tensor(0.0, device='cuda')
+    n     = torch.tensor(0,   device='cuda')
+    with torch.no_grad():
+        for batch in val_loader:
+            data, _ = batch
+            if data.dim() == 5:
+                data = data[:, 0]
+            x = data.cuda(non_blocking=True).to(torch.bfloat16)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                out = raw(x)
+            total += out['loss_rec'].detach().float()
+            n     += 1
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    dist.all_reduce(n,     op=dist.ReduceOp.SUM)
+    raw.train()
+    val_loss = (total / n.clamp(min=1)).item()
+    if global_rank == 0:
+        logger.info(f"[S1 Val] step={step} | val_rec={val_loss:.4f}")
+        if hasattr(args, 'writer') and args.writer:
+            args.writer.add_scalar('stage1/val_rec', val_loss, step)
+        if not getattr(args, 'no_wandb', False):
+            wandb.log({'s1/val_rec': val_loss, 'step': step})
+    return val_loss
+
+
+def _validate_stage2(args, model_engine, val_loader, step, global_rank):
+    """Compute avg diffusion loss on val set — single AR step (j=0) for speed."""
+    CF = args.condition_frames
+    raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
+    raw.eval()
+    total = torch.tensor(0.0, device='cuda')
+    n     = torch.tensor(0,   device='cuda')
+    with torch.no_grad():
+        for batch in val_loader:
+            range_views, poses = batch
+            range_views = range_views.cuda(non_blocking=True).to(torch.bfloat16)
+            poses       = poses.cuda(non_blocking=True).float()
+            features_cond = range_views[:, :CF]
+            features_gt   = range_views[:, CF:CF + 1]
+            rot_slice     = poses[:, :CF + 1]
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                out = raw(features_cond, rot_slice, features_gt, step=step)
+            total += out['loss_diff'].detach().float()
+            n     += 1
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    dist.all_reduce(n,     op=dist.ReduceOp.SUM)
+    raw.eval()   # keep eval until caller returns; train_stage2 handles .train()
+    raw.train()
+    val_loss = (total / n.clamp(min=1)).item()
+    if global_rank == 0:
+        logger.info(f"[S2 Val] step={step} | val_diff={val_loss:.4f}")
+        if hasattr(args, 'writer') and args.writer:
+            args.writer.add_scalar('stage2/val_diff', val_loss, step)
+        if not getattr(args, 'no_wandb', False):
+            wandb.log({'s2/val_diff': val_loss, 'step': step})
+    return val_loss
 
 
 def _delete_old_checkpoints(save_dir, current_step, prefix='swin_rae_step'):
@@ -636,14 +718,21 @@ def main():
                           sampler=sampler, num_workers=args.num_workers,
                           pin_memory=True, drop_last=True)
 
-    logger.info(f"Training Stage {args.stage}: {len(train_ds)} samples, "
+    val_ds      = make_dataset(args, train=False)
+    val_sampler = DistributedSampler(val_ds, num_replicas=world_size,
+                                     rank=global_rank, shuffle=False)
+    val_loader  = DataLoader(val_ds, batch_size=args.batch_size,
+                             sampler=val_sampler, num_workers=args.num_workers,
+                             pin_memory=True, drop_last=False)
+
+    logger.info(f"Training Stage {args.stage}: {len(train_ds)} train / {len(val_ds)} val samples, "
                 f"lr={lr:.2e}, eff_batch={eff_batch}")
 
     step = int(getattr(args, 'resume_step', 0))
     if args.stage == '1':
-        train_stage1(args, model_engine, scheduler, loader, global_rank, step)
+        train_stage1(args, model_engine, scheduler, loader, val_loader, global_rank, step)
     else:
-        train_stage2(args, model_engine, scheduler, loader, global_rank, step)
+        train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank, step)
 
 
 if __name__ == '__main__':
