@@ -424,18 +424,13 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
         return
 
     os.makedirs(vis_dir, exist_ok=True)
-    log_range  = getattr(args, 'log_range', False)
     range_mean = args.proj_img_mean[0]
     range_std  = args.proj_img_stds[0]
     max_depth  = 80.0
     bev_range  = float(getattr(args, 'bev_range', 50.0))
 
     def to_depth(chw):
-        d = chw[0].float().cpu().numpy()
-        if log_range:
-            # Inverse of log2(depth+1)/6: depth = 2^(d*6) - 1
-            return np.clip(np.power(2.0, d * 6.0) - 1.0, 0.0, max_depth)
-        return np.clip(d * range_std + range_mean, 0.0, max_depth)
+        return np.clip(chw[0].float().cpu().numpy() * range_std + range_mean, 0, max_depth)
 
     def make_bev(depth_hw):
         """Return (occupancy_grid [H,W], point_cloud [N,3])."""
