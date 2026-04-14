@@ -950,8 +950,18 @@ def train(local_rank, args):
 
                     # Collect this step's prediction for multi-step visualization.
                     # predict is [B, C, H, W] — one frame per AR step.
-                    if collect_chain_vis and loss_final["predict"] is not None:
-                        chain_pred_frames.append(loss_final["predict"].detach())  # [B, C, H, W]
+                    # In stage 2 all aux losses are disabled so predict_decoded is None,
+                    # but predict_latents (DiT x_0 estimate) is still returned.
+                    # Decode locally on vis steps so visualizations are always saved.
+                    _vis_pred = loss_final["predict"]
+                    if collect_chain_vis and _vis_pred is None and loss_final.get("predict_latents") is not None:
+                        with torch.no_grad():
+                            _raw_m = model.module if hasattr(model, 'module') else model
+                            _pred_lat = loss_final["predict_latents"].detach()
+                            _pred_lat = _pred_lat * _raw_m.latent_scale.to(_pred_lat.dtype)
+                            _vis_pred = _raw_m.vae_tokenizer.decode_from_z(_pred_lat, _raw_m.h, _raw_m.w)
+                    if collect_chain_vis and _vis_pred is not None:
+                        chain_pred_frames.append(_vis_pred.detach())  # [B, C, H, W]
                         chain_gt_frames.append(features_gt[:, 0, ...].detach())
                     if collect_chain_vis and loss_final.get("predict_latents") is not None:
                         chain_pred_latents.append(loss_final["predict_latents"].detach())  # [B, L, C]
