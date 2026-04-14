@@ -325,7 +325,8 @@ def save_training_visualization(
             axes = [axes]
         for t, ax in enumerate(axes):
             depth_t = to_depth(cond_np[t])
-            im = ax.imshow(np.clip(depth_t, 0, max_depth), cmap='plasma',
+            im = ax.imshow(np.clip(depth_t, 0, max_depth),
+                           cmap=matplotlib.colormaps['turbo_r'],
                            vmin=0, vmax=max_depth, aspect='auto')
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
             # t=0 is oldest frame, t=CF-1 is most recent (t=0 in absolute time)
@@ -495,8 +496,9 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
 
     for fi in range(n):
         err = np.abs(pred_depths[fi] - gt_depths[fi])
-        axes_rv[fi, 0].imshow(gt_depths[fi],  cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
-        axes_rv[fi, 1].imshow(pred_depths[fi], cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        _cmap_rv = matplotlib.colormaps['turbo_r']
+        axes_rv[fi, 0].imshow(gt_depths[fi],  cmap=_cmap_rv, vmin=0, vmax=max_depth, aspect='auto')
+        axes_rv[fi, 1].imshow(pred_depths[fi], cmap=_cmap_rv, vmin=0, vmax=max_depth, aspect='auto')
         im_err = axes_rv[fi, 2].imshow(err,    cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
         mae_str = f'{maes[fi]:.3f} m' if not np.isnan(maes[fi]) else 'n/a'
         axes_rv[fi, 0].set_ylabel(f't+{fi+1}\nMAE={mae_str}', fontsize=8, fontweight='bold')

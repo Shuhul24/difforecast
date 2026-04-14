@@ -647,24 +647,31 @@ class RangeViewDiT(nn.Module):
         predict_decoded  = None
 
         if predict is not None:
-            # Denormalise before decoding: the DiT operates in normalised latent
-            # space (divided by latent_scale); the VAE decoder expects the original
-            # scale.  Multiply back before passing to decode_from_z.
-            predict_for_decode = predict * self.latent_scale.to(predict.dtype)
-            # Gradient checkpointing: recomputes decoder activations during
-            # backward instead of storing them — halves decoder activation
-            # memory at the cost of one extra decoder forward pass.
-            predict_decoded = grad_ckpt(
-                self.vae_tokenizer.decode_from_z,
-                predict_for_decode, self.h, self.w,
-                use_reentrant=False,
-            )
-
             # Chamfer is gated by chamfer_start — only compute once the model
             # has learned basic depth structure via range L1 supervision.
             chamfer_active = self.chamfer_loss_weight > 0 and step >= self.chamfer_start
 
-            if self.range_view_loss_weight > 0 or chamfer_active or self.bev_perceptual_weight > 0:
+            needs_decode = (
+                self.range_view_loss_weight > 0
+                or chamfer_active
+                or self.bev_perceptual_weight > 0
+            )
+
+            if needs_decode:
+                # Denormalise before decoding: the DiT operates in normalised
+                # latent space (divided by latent_scale); the VAE decoder expects
+                # the original scale.  Multiply back before passing to decode_from_z.
+                predict_for_decode = predict * self.latent_scale.to(predict.dtype)
+                # Gradient checkpointing: recomputes decoder activations during
+                # backward instead of storing them — halves decoder activation
+                # memory at the cost of one extra decoder forward pass.
+                predict_decoded = grad_ckpt(
+                    self.vae_tokenizer.decode_from_z,
+                    predict_for_decode, self.h, self.w,
+                    use_reentrant=False,
+                )
+
+            if needs_decode:
                 range_mean = self.proj_img_mean[0]
                 range_std  = self.proj_img_stds[0]
 
