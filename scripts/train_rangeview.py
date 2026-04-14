@@ -401,9 +401,11 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
 
     1. ``_multistep_rv.png``  — range-view grid:
        rows = future frames (+1 … +N), cols = [GT depth | Pred depth | |Error|]
+       Row labels include per-step MAE (metres, over valid pixels).
 
     2. ``_multistep_bev.png`` — BEV grid:
        rows = future frames (+1 … +N), cols = [GT BEV | Pred BEV | Overlay (G=GT, R=Pred)]
+       Row labels include per-step symmetric Chamfer distance (metres).
 
     Args:
         step:        Training step.
@@ -422,15 +424,21 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
         return
 
     os.makedirs(vis_dir, exist_ok=True)
+    log_range  = getattr(args, 'log_range', False)
     range_mean = args.proj_img_mean[0]
     range_std  = args.proj_img_stds[0]
     max_depth  = 80.0
     bev_range  = float(getattr(args, 'bev_range', 50.0))
 
     def to_depth(chw):
-        return np.clip(chw[0].float().cpu().numpy() * range_std + range_mean, 0, max_depth)
+        d = chw[0].float().cpu().numpy()
+        if log_range:
+            # Inverse of log2(depth+1)/6: depth = 2^(d*6) - 1
+            return np.clip(np.power(2.0, d * 6.0) - 1.0, 0.0, max_depth)
+        return np.clip(d * range_std + range_mean, 0.0, max_depth)
 
     def make_bev(depth_hw):
+        """Return (occupancy_grid [H,W], point_cloud [N,3])."""
         try:
             pts = projector.back_project_range(depth_hw)
             res  = 0.2
@@ -440,17 +448,45 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
             yi = ((pts[:, 1] + bev_range) / res).astype(int)
             mask = (xi >= 0) & (xi < grid) & (yi >= 0) & (yi < grid)
             img[yi[mask], xi[mask]] = 1.0
-            return img
+            return img, pts
         except Exception:
-            return np.zeros((100, 100), dtype=np.float32)
+            return np.zeros((100, 100), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
 
-    # Pre-compute depths and BEVs for all frames
-    gt_depths, pred_depths, gt_bevs, pred_bevs = [], [], [], []
+    def chamfer_dist_3d(pts_a, pts_b):
+        """Symmetric mean Chamfer distance in metres (via scipy cKDTree)."""
+        try:
+            from scipy.spatial import cKDTree
+            if len(pts_a) == 0 or len(pts_b) == 0:
+                return float('nan')
+            d_ab = cKDTree(pts_b).query(pts_a, k=1, workers=1)[0]
+            d_ba = cKDTree(pts_a).query(pts_b, k=1, workers=1)[0]
+            return float(np.mean(d_ab) + np.mean(d_ba))
+        except Exception:
+            return float('nan')
+
+    # Pre-compute depths, BEVs, and per-step metrics for all frames
+    gt_depths, pred_depths = [], []
+    gt_bevs,   pred_bevs   = [], []
+    maes,      chamfers    = [], []
+
     for fi in range(n):
         gd = to_depth(gt_frames[fi][0])
         pd = to_depth(pred_frames[fi][0])
-        gt_depths.append(gd);   pred_depths.append(pd)
-        gt_bevs.append(make_bev(gd)); pred_bevs.append(make_bev(pd))
+        gt_depths.append(gd)
+        pred_depths.append(pd)
+
+        gb, g_pts = make_bev(gd)
+        pb, p_pts = make_bev(pd)
+        gt_bevs.append(gb)
+        pred_bevs.append(pb)
+
+        # MAE over valid pixels (GT depth > 0.5 m)
+        valid = gd > 0.5
+        mae = float(np.abs(pd - gd)[valid].mean()) if valid.any() else float('nan')
+        maes.append(mae)
+
+        # Symmetric Chamfer distance in 3-D (metres)
+        chamfers.append(chamfer_dist_3d(g_pts, p_pts))
 
     # ------------------------------------------------------------------ #
     # Image 1: Range-view — rows=frames, cols=[GT | Pred | |Error|]
@@ -464,10 +500,11 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
 
     for fi in range(n):
         err = np.abs(pred_depths[fi] - gt_depths[fi])
-        axes_rv[fi, 0].imshow(gt_depths[fi],   cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
-        axes_rv[fi, 1].imshow(pred_depths[fi],  cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
-        im_err = axes_rv[fi, 2].imshow(err,     cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
-        axes_rv[fi, 0].set_ylabel(f't+{fi+1}', fontsize=9, fontweight='bold')
+        axes_rv[fi, 0].imshow(gt_depths[fi],  cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        axes_rv[fi, 1].imshow(pred_depths[fi], cmap='plasma', vmin=0, vmax=max_depth, aspect='auto')
+        im_err = axes_rv[fi, 2].imshow(err,    cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
+        mae_str = f'{maes[fi]:.3f} m' if not np.isnan(maes[fi]) else 'n/a'
+        axes_rv[fi, 0].set_ylabel(f't+{fi+1}\nMAE={mae_str}', fontsize=8, fontweight='bold')
         plt.colorbar(im_err, ax=axes_rv[fi, 2], fraction=0.015, pad=0.02, label='m')
         for ax in axes_rv[fi]:
             ax.set_xticks([]); ax.set_yticks([])
@@ -497,7 +534,8 @@ def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, 
         axes_bev[fi, 0].imshow(gb,      cmap='gray', aspect='equal', origin='lower')
         axes_bev[fi, 1].imshow(pb,      cmap='gray', aspect='equal', origin='lower')
         axes_bev[fi, 2].imshow(overlay,              aspect='equal', origin='lower')
-        axes_bev[fi, 0].set_ylabel(f't+{fi+1}', fontsize=9, fontweight='bold')
+        cd_str = f'{chamfers[fi]:.3f} m' if not np.isnan(chamfers[fi]) else 'n/a'
+        axes_bev[fi, 0].set_ylabel(f't+{fi+1}\nCD={cd_str}', fontsize=8, fontweight='bold')
         for ax in axes_bev[fi]:
             ax.set_xticks([]); ax.set_yticks([])
 
@@ -865,7 +903,7 @@ def train(local_rank, args):
                 # Collect chain predictions for multi-step visualization (rank 0, vis steps only).
                 vis_steps = getattr(args, 'vis_steps', 500)
                 collect_chain_vis = (
-                    vis_steps > 0 and step % vis_steps == 0 and rank == 0 and fw_iter > 1
+                    vis_steps > 0 and step % vis_steps == 0 and rank == 0
                 )
                 chain_pred_frames  = []   # [B, C, H, W] per chain step
                 chain_gt_frames    = []   # [B, C, H, W] per chain step
@@ -1124,47 +1162,30 @@ def train(local_rank, args):
                         wandb.log(wb_log, step=step)
 
             # Training visualizations (rank 0 only)
+            # Stage 2/all: multi-step visualization is handled inside the AR loop above.
+            # Stage 1: single-frame VAE reconstruction visualization saved here.
             vis_steps = getattr(args, 'vis_steps', 500)
-            if vis_steps > 0 and step % vis_steps == 0 and rank == 0:
+            if stage == '1' and vis_steps > 0 and step % vis_steps == 0 and rank == 0:
                 predict_vis = loss_final.get("predict")
-                
-                # Prepare conditioning frames for visualization
-                if stage == '1':
-                    features_cond_vis = None
-                else:
-                    # Stage 2: Always use the ground-truth initial frames, not the autoregressive loop variable
-                    features_cond_vis = range_views[:, :cf, ...].detach()
-                
-                # For Stage 1, we defer prediction to here to avoid overhead in training step
-                if stage == '1' and predict_vis is None:
+
+                if predict_vis is None:
                     with torch.no_grad():
-                        # Unwrap model if DDP/DeepSpeed wrapped
                         raw_model = model.module if hasattr(model, 'module') else model
                         if hasattr(raw_model, 'vae_tokenizer'):
-                            # The VAE tokenizer's encode/decode methods expect sequences.
-                            # In stage 1, features_gt is a batch of single images [B, C, H, W].
-                            # We add a temporal dimension of size 1 to match the expected input shape.
                             features_gt_seq = features_gt.unsqueeze(1)  # [B, 1, C, H, W]
-
-                            # Encode to latent tokens
                             z_seq = raw_model.vae_tokenizer.encode_to_z(features_gt_seq)  # [B, 1, L, C]
-
-                            # Flatten for decoding, as decode_from_z expects [B*T, L, C]
                             z_flat = rearrange(z_seq, 'b t l c -> (b t) l c')
-
-                            # Calculate latent grid dimensions for the decoder
                             patch_h = int(getattr(args, 'patch_size_h', args.patch_size))
                             patch_w = int(getattr(args, 'patch_size_w', args.patch_size))
                             h_lat = args.range_h // (args.downsample_size * patch_h)
                             w_lat = args.range_w // (args.downsample_size * patch_w)
-
                             predict_vis = raw_model.vae_tokenizer.decode_from_z(z_flat, h_lat, w_lat)
-                
+
                 with torch.no_grad():
                     save_training_visualization(
                         step=step,
                         args=args,
-                        features_cond=features_cond_vis,
+                        features_cond=None,
                         features_gt=features_gt.detach(),
                         predict_decoded=predict_vis.detach() if predict_vis is not None else None,
                         projector=vis_projector,
