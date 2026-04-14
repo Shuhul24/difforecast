@@ -197,7 +197,7 @@ yaw_bound = 12  # Bound for yaw angle (degrees)
 #
 # Start with 1.0 (no normalisation).  Once the VAE has trained for a few
 # thousand steps, measure std(latents) and update this value.
-latent_scale = 1.0
+latent_scale = 3.0
 
 vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
