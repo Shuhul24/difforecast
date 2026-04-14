@@ -99,10 +99,10 @@ augmentation_config = {
 
 # ===== Model Configuration =====
 # Spatial-Temporal Transformer
-# With patch_size_h=2, patch_size_w=32, vae_embed_dim=4:
-#   latent_C = 4*2*32 = 256  (DiT in_channels; img_in projects 256 → n_embd_dit)
-#   L        = 8*16   = 128  (img_token_size; 8 elevation × 16 azimuth tokens)
-#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 512 // 8 = 64
+# With patch_size_h=2, patch_size_w=16, vae_embed_dim=4:
+#   latent_C = 4*2*16 = 128  (DiT in_channels; img_in projects 128 → n_embd_dit)
+#   L        = 8*32   = 256  (img_token_size; 8 elevation × 32 azimuth tokens)
+#   axes_dim_dit must sum to n_embd_dit // n_head_dit = 768 // 12 = 64
 # n_layer = [STT causal blocks, DiT double-stream blocks, DiT single-stream blocks]
 #
 # Scaling guide (48 GB GPU, batch_size=6):
@@ -202,9 +202,9 @@ latent_scale = 1.0
 vae_ckpt = None  # set to path of pre-trained RangeLDM checkpoint if available
 vae_embed_dim = 4        # RangeLDM z_channels
 patch_size   = 8         # legacy square fallback (used when patch_size_h/w absent)
-patch_size_h = 2         # elevation patch size  → h_tok = 16 // 2 = 8  (was 4, doubled elevation resolution)
-patch_size_w = 32        # azimuth  patch size   → w_tok = 512 // 32 = 16
-# Derived: L = 8×16 = 128,  latent_C = 4×2×32 = 256  (same token count, same in_channels, better elevation)
+patch_size_h = 2         # elevation patch size  → h_tok = 16 // 2 = 8
+patch_size_w = 16        # azimuth  patch size   → w_tok = 512 // 16 = 32  (was 32 → 16: doubles azimuth tokens)
+# Derived: L = 8×32 = 256,  latent_C = 4×2×16 = 128  (2× tokens, halved latent_C, more azimuth detail)
 add_decoder_temporal = False  # unused for RangeView path (DCAE-only)
 temporal_patch_size = 1       # unused for RangeView path (DCAE-only)
 
