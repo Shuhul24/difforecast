@@ -1052,34 +1052,36 @@ def train(local_rank, args):
                     loss_elbo_val = get_loss_val("loss_elbo")
                     loss_bev_val  = get_loss_val("loss_bev_percep")
 
-                # Log to console every step
-                if stage == '1':
-                    disc_suffix = (
-                        f' g_loss:{_g_loss_val:.4e} d_loss:{_d_loss_val:.4e}'
-                        if disc is not None else ''
-                    )
-                    logger.info(
-                        f'stage:{stage} step:{step} '
-                        f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
-                        f'lr:{current_lr:.4e} '
-                        f'loss_avg:{loss_all_val:.4e} '
-                        f'elbo:{loss_elbo_val:.4e} '
-                        f'bev:{loss_bev_val:.4e}'
-                        + disc_suffix
-                    )
-                else:
-                    logger.info(
-                        f'stage:{stage} step:{step} '
-                        f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
-                        f'lr:{current_lr:.4e} '
-                        f'loss_avg:{loss_all_val:.4e} '
-                        f'diff_loss:{loss_diff_val:.4e} '
-                        f'pose_loss:{loss_pose_val:.4e} '
-                        f'range_l1:{loss_rl1_val:.4e} '
-                        f'chamfer:{loss_cd_val:.4e} '
-                        f'elbo:{loss_elbo_val:.4e} '
-                        f'bev:{loss_bev_val:.4e}'
-                    )
+                # Log to console every 50 steps
+                epoch = step // len(train_data) + 1
+                if step % 50 == 0:
+                    if stage == '1':
+                        disc_suffix = (
+                            f' g_loss:{_g_loss_val:.4e} d_loss:{_d_loss_val:.4e}'
+                            if disc is not None else ''
+                        )
+                        logger.info(
+                            f'stage:{stage} epoch:{epoch} step:{step} '
+                            f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
+                            f'lr:{current_lr:.4e} '
+                            f'loss_avg:{loss_all_val:.4e} '
+                            f'elbo:{loss_elbo_val:.4e} '
+                            f'bev:{loss_bev_val:.4e}'
+                            + disc_suffix
+                        )
+                    else:
+                        logger.info(
+                            f'stage:{stage} epoch:{epoch} step:{step} '
+                            f'time:{data_time_interval:.2f}+{train_time_interval:.2f} '
+                            f'lr:{current_lr:.4e} '
+                            f'loss_avg:{loss_all_val:.4e} '
+                            f'diff_loss:{loss_diff_val:.4e} '
+                            f'pose_loss:{loss_pose_val:.4e} '
+                            f'range_l1:{loss_rl1_val:.4e} '
+                            f'chamfer:{loss_cd_val:.4e} '
+                            f'elbo:{loss_elbo_val:.4e} '
+                            f'bev:{loss_bev_val:.4e}'
+                        )
 
                 # Log to TensorBoard/W&B less frequently
                 if step % 100 == 1:
