@@ -905,6 +905,9 @@ def train(local_rank, args):
                 chain_pred_frames  = []   # [B, C, H, W] per chain step
                 chain_gt_frames    = []   # [B, C, H, W] per chain step
                 chain_pred_latents = []   # [B, L, C]    per chain step (normalised)
+                # Cumulative losses over fw_iter AR steps (averaged for logging only;
+                # backward still fires individually per j, matching train_deepspeed.py).
+                cumul_diff = cumul_pose = 0.0
 
                 # Number of rotation matrices needed per forward pass:
                 # (condition_frames + 1) * block_size
@@ -940,6 +943,10 @@ def train(local_rank, args):
                     # Backward and optimize
                     model.backward(loss_value)
                     model.step()
+
+                    # Accumulate for averaged logging (no effect on gradients).
+                    cumul_diff += loss_final["loss_diff"].item()
+                    cumul_pose += loss_final["loss_pose"].item()
 
                     # Collect this step's prediction for multi-step visualization.
                     # predict is [B, C, H, W] — one frame per AR step.
@@ -1080,9 +1087,9 @@ def train(local_rank, args):
                     except NameError:
                         _g_loss_val = _d_loss_val = 0.0
                 else:
-                    loss_all_val  = loss_final["loss_all"].item()
-                    loss_diff_val = get_loss_val("loss_diff")
-                    loss_pose_val = get_loss_val("loss_pose")
+                    loss_diff_val = cumul_diff / fw_iter
+                    loss_pose_val = cumul_pose / fw_iter
+                    loss_all_val  = loss_diff_val + loss_pose_val
                     loss_rl1_val  = get_loss_val("loss_range_l1")
                     loss_cd_val   = get_loss_val("loss_chamfer")
                     loss_elbo_val = get_loss_val("loss_elbo")
