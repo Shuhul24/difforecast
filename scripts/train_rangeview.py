@@ -29,7 +29,7 @@ import argparse
 import shutil
 from einops import rearrange
 import numpy as np
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import FusedAdam
 import torch.distributed as dist
 import torch.utils
 from torch.utils.data import DataLoader, Subset, DistributedSampler
@@ -626,11 +626,7 @@ def train(local_rank, args):
 
     # Create optimizer
     param_groups = add_weight_decay(model, args.weight_decay)
-    # DeepSpeedCPUAdam is required for ZeRO Stage 2 + CPU offload:
-    # it applies the Adam update directly from bf16 gradients without
-    # materialising a full fp32 gradient tensor (~10 GB for 2.53B params),
-    # preventing CPU RAM OOM during the optimizer step.
-    optimizer = DeepSpeedCPUAdam(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    optimizer = FusedAdam(param_groups, lr=args.lr, betas=(0.9, 0.95), adam_w_mode=True)
     print(f"Optimizer: {optimizer}")
 
     # Learning rate schedule
