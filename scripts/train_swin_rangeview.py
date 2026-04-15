@@ -530,7 +530,7 @@ def _validate_stage2(args, model_engine, val_loader, step, global_rank):
     """Compute avg diffusion loss on val set — single AR step (j=0) for speed."""
     CF = args.condition_frames
     raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
-    raw.eval()
+    raw.train()  # keep in train mode so forward() routes to step_train (loss dict)
     total = torch.tensor(0.0, device='cuda')
     n     = torch.tensor(0,   device='cuda')
     with torch.no_grad():
@@ -543,12 +543,11 @@ def _validate_stage2(args, model_engine, val_loader, step, global_rank):
             rot_slice     = poses[:, :CF + 1]
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 out = raw(features_cond, rot_slice, features_gt, step=step)
-            total += out['loss_diff'].detach().float()
+            total += out['loss_diff'].detach().float().mean()
             n     += 1
     dist.all_reduce(total, op=dist.ReduceOp.SUM)
     dist.all_reduce(n,     op=dist.ReduceOp.SUM)
-    raw.eval()   # keep eval until caller returns; train_stage2 handles .train()
-    raw.train()
+    # model stays in train() mode; train_stage2 manages mode as needed
     val_loss = (total / n.clamp(min=1)).item()
     if global_rank == 0:
         logger.info(f"[S2 Val] step={step} | val_diff={val_loss:.4f}")
