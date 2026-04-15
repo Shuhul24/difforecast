@@ -866,7 +866,8 @@ class RangeViewSwinDiT(nn.Module):
             # the DiT denoises (x_0 = tgt_norm).  Cosine similarity is scale-invariant
             # so this is equivalent to using lat_target, but more principled.
             teacher  = tgt_norm.detach().float()         # [B, 64, 768], no grad
-            proj     = self.repa_proj(dit_h)             # [B, 64, 768]
+            # repa_proj weights are bfloat16 under DeepSpeed; cast input to match.
+            proj     = self.repa_proj(dit_h.to(self.repa_proj.weight.dtype)).float()  # [B, 64, 768]
             # Token-wise cosine similarity averaged over spatial tokens and batch
             z_repa   = -torch.nn.functional.cosine_similarity(
                 proj, teacher, dim=-1
