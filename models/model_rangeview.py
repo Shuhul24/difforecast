@@ -454,6 +454,27 @@ class RangeViewDiT(nn.Module):
         else:
             self.bev_perceptual_fn = None
 
+        # ── REPA (Representation Alignment) ────────────────────────────────
+        # Aligns FluxDiT double_blocks[repa_layer] hidden state with the frozen
+        # VAE encoder's clean GT target latents (lat_target).
+        # Teacher = latent_targets [B, L, vae_emb_dim] — already computed in
+        #           step_train, so there is zero extra encoder forward-pass cost.
+        # Student = img-stream hidden state after double_blocks[repa_layer_idx],
+        #           shape [B, L, n_embd_dit].
+        # A linear projection maps student → teacher space before cosine alignment.
+        self.repa_weight = float(getattr(args, 'repa_weight',     0.0))
+        self.repa_layer  = int(getattr(args,   'repa_layer_idx',  args.n_layer[1] // 2))
+        self.repa_start  = int(getattr(args,   'repa_start_step', 0))
+        if self.repa_weight > 0:
+            # Project DiT hidden (n_embd_dit) → latent space (vae_emb_dim).
+            # When dims match, eye init gives identity at step 0; otherwise
+            # use default kaiming_uniform so it still starts near a pass-through.
+            self.repa_proj = nn.Linear(args.n_embd_dit, self.vae_emb_dim, bias=False)
+            if args.n_embd_dit == self.vae_emb_dim:
+                nn.init.eye_(self.repa_proj.weight)
+        else:
+            self.repa_proj = None
+
         # ------------------------------------------------------------------ #
         # Optional checkpoint loading (STT + DiT only; tokenizer is separate)
         # ------------------------------------------------------------------ #
@@ -635,6 +656,8 @@ class RangeViewDiT(nn.Module):
         # losses by t inverts that scaling — giving max gradient at t≈1
         # (clean-data regime, reliable predictions) and ~zero at t≈0 (noise).
         t_sample = torch.rand((B_pred, 1, 1), device=latent_targets.device)
+        _use_repa = (self.repa_weight > 0 and step >= self.repa_start
+                     and self.repa_proj is not None)
         loss_terms = self.dit.training_losses(
             img=latent_targets,
             img_ids=self.img_ids[:B_pred],
@@ -643,6 +666,8 @@ class RangeViewDiT(nn.Module):
             t=t_sample,
             y=y_dit,
             return_predict=self.args.return_predict,
+            return_hidden=_use_repa,
+            hidden_after_block=self.repa_layer,
         )
         diff_loss = loss_terms['loss']
         predict   = loss_terms['predict']   # [B, L, latent_C] or None
@@ -762,6 +787,22 @@ class RangeViewDiT(nn.Module):
                         pred_depth, gt_depth, pred_valid, gt_valid
                     ) * t_sample.mean()
 
+        # ---- REPA loss (DiT hidden → clean latent cosine alignment) --------- #
+        # Teacher: latent_targets (clean GT, already normalised by latent_scale).
+        # Student: img-stream hidden state after double_blocks[repa_layer].
+        # Maximise token-wise cosine similarity → pull DiT intermediate
+        # representations towards the domain encoder's semantic space.
+        repa_loss_val = torch.zeros(1, device=latent_targets.device, dtype=latent_targets.dtype)
+        if _use_repa and loss_terms.get('hidden') is not None:
+            dit_h   = loss_terms['hidden']                         # [B, L, n_embd_dit], float32
+            teacher = latent_targets.detach().float()              # [B, L, vae_emb_dim], no grad
+            proj    = self.repa_proj(
+                dit_h.to(self.repa_proj.weight.dtype)
+            ).float()                                              # [B, L, vae_emb_dim]
+            repa_loss_val = -torch.nn.functional.cosine_similarity(
+                proj, teacher, dim=-1
+            ).mean()
+
         # Uncertainty-weighted auxiliary losses: exp(-log_w)*L + log_w
         # log_w is clamped to >= 0 so the effective weight never exceeds exp(0)=1.0,
         # preventing any aux loss from sending gradients larger than the raw loss
@@ -782,7 +823,8 @@ class RangeViewDiT(nn.Module):
             _uw(self.log_w_bev, bev_percep_loss)
             if self.log_w_bev is not None else bev_percep_loss.new_zeros(())
         )
-        total_loss = diff_loss + aux_l1 + aux_cd + aux_bev + pose_loss
+        total_loss = (diff_loss + pose_loss + aux_l1 + aux_cd + aux_bev
+                      + self.repa_weight * repa_loss_val)
 
         return {
             "loss_all":        total_loss,
@@ -790,6 +832,7 @@ class RangeViewDiT(nn.Module):
             "loss_pose":       pose_loss,
             "loss_range_l1":   range_l1_loss,
             "loss_chamfer":    chamfer_loss_val,
+            "loss_repa":       repa_loss_val,
             "loss_bev_percep": bev_percep_loss,
             # predict_decoded: [B, C, H, W] or None — decoded pixel image (for vis / L1)
             "predict": predict_decoded,

@@ -140,8 +140,12 @@ def add_arguments():
     if getattr(cfg, 'stage', 'all') == '2':
         cfg.elbo_weight = 0.0
         cfg.bev_perceptual_weight = 0.0
-        cfg.chamfer_loss_weight = 0.0
+        # chamfer_loss_weight and repa_weight are intentionally preserved from
+        # the config so Stage 2 can supervise the DiT with geometry-aware losses.
         cfg.range_view_loss_weight = 0.0
+        # Stage 2 needs return_predict=True for Chamfer (DiT x_0 estimate) and
+        # return_hidden=True for REPA (intermediate hidden states).
+        cfg.return_predict = True
     elif getattr(cfg, 'stage', 'all') == '1':
         # Config default is 0.0 (for stage 2); force it on for stage 1 VAE training.
         cfg.elbo_weight = 1.0
@@ -907,7 +911,7 @@ def train(local_rank, args):
                 chain_pred_latents = []   # [B, L, C]    per chain step (normalised)
                 # Cumulative losses over fw_iter AR steps (averaged for logging only;
                 # backward still fires individually per j, matching train_deepspeed.py).
-                cumul_diff = cumul_pose = 0.0
+                cumul_diff = cumul_pose = cumul_cd = cumul_repa = 0.0
 
                 # Number of rotation matrices needed per forward pass:
                 # (condition_frames + 1) * block_size
@@ -945,8 +949,10 @@ def train(local_rank, args):
                     model.step()
 
                     # Accumulate for averaged logging (no effect on gradients).
-                    cumul_diff += loss_final["loss_diff"].item()
-                    cumul_pose += loss_final["loss_pose"].item()
+                    cumul_diff  += loss_final["loss_diff"].item()
+                    cumul_pose  += loss_final["loss_pose"].item()
+                    cumul_cd    += loss_final.get("loss_chamfer", torch.tensor(0.)).item()
+                    cumul_repa  += loss_final.get("loss_repa",    torch.tensor(0.)).item()
 
                     # Collect this step's prediction for multi-step visualization.
                     # predict is [B, C, H, W] — one frame per AR step.
@@ -1088,7 +1094,7 @@ def train(local_rank, args):
                     loss_all_val  = loss_final["loss_all"].item()
                     loss_elbo_val = get_loss_val("loss_elbo")
                     loss_bev_val  = get_loss_val("loss_bev_percep")
-                    loss_diff_val = loss_rl1_val = loss_cd_val = 0.0
+                    loss_diff_val = loss_pose_val = loss_rl1_val = loss_cd_val = loss_repa_val = 0.0
                     # discriminator losses (defined in Stage 1 block above,
                     # default to 0.0 if disc is not yet active)
                     try:
@@ -1097,13 +1103,14 @@ def train(local_rank, args):
                     except NameError:
                         _g_loss_val = _d_loss_val = 0.0
                 else:
-                    loss_diff_val = cumul_diff / fw_iter
-                    loss_pose_val = cumul_pose / fw_iter
-                    loss_all_val  = loss_diff_val + loss_pose_val
-                    loss_rl1_val  = get_loss_val("loss_range_l1")
-                    loss_cd_val   = get_loss_val("loss_chamfer")
-                    loss_elbo_val = get_loss_val("loss_elbo")
-                    loss_bev_val  = get_loss_val("loss_bev_percep")
+                    loss_diff_val  = cumul_diff  / fw_iter
+                    loss_pose_val  = cumul_pose  / fw_iter
+                    loss_cd_val    = cumul_cd    / fw_iter
+                    loss_repa_val  = cumul_repa  / fw_iter
+                    loss_all_val   = loss_diff_val + loss_pose_val + loss_cd_val + loss_repa_val
+                    loss_rl1_val   = get_loss_val("loss_range_l1")
+                    loss_elbo_val  = get_loss_val("loss_elbo")
+                    loss_bev_val   = get_loss_val("loss_bev_percep")
 
                 # Log to console every 50 steps
                 epoch = step // len(train_data) + 1
@@ -1132,6 +1139,7 @@ def train(local_rank, args):
                             f'pose_loss:{loss_pose_val:.4e} '
                             f'range_l1:{loss_rl1_val:.4e} '
                             f'chamfer:{loss_cd_val:.4e} '
+                            f'repa:{loss_repa_val:.4e} '
                             f'elbo:{loss_elbo_val:.4e} '
                             f'bev:{loss_bev_val:.4e}'
                         )
@@ -1139,14 +1147,15 @@ def train(local_rank, args):
                 # Log to TensorBoard/W&B less frequently
                 if step % 100 == 1:
                     # TensorBoard
-                    writer.add_scalar('learning_rate/lr',    current_lr,    step)
-                    writer.add_scalar('loss/loss_all',       loss_all_val,  step)
-                    writer.add_scalar('loss/loss_diff',      loss_diff_val, step)
-                    writer.add_scalar('loss/loss_pose',      loss_pose_val, step)
-                    writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,  step)
-                    writer.add_scalar('loss/loss_chamfer',   loss_cd_val,   step)
-                    writer.add_scalar('loss/loss_elbo',      loss_elbo_val, step)
-                    writer.add_scalar('loss/loss_bev_percep', loss_bev_val, step)
+                    writer.add_scalar('learning_rate/lr',    current_lr,     step)
+                    writer.add_scalar('loss/loss_all',       loss_all_val,   step)
+                    writer.add_scalar('loss/loss_diff',      loss_diff_val,  step)
+                    writer.add_scalar('loss/loss_pose',      loss_pose_val,  step)
+                    writer.add_scalar('loss/loss_range_l1',  loss_rl1_val,   step)
+                    writer.add_scalar('loss/loss_chamfer',   loss_cd_val,    step)
+                    writer.add_scalar('loss/loss_repa',      loss_repa_val,  step)
+                    writer.add_scalar('loss/loss_elbo',      loss_elbo_val,  step)
+                    writer.add_scalar('loss/loss_bev_percep', loss_bev_val,  step)
                     if stage == '1' and disc is not None:
                         try:
                             writer.add_scalar('loss/g_loss', _g_loss_val, step)
@@ -1158,14 +1167,15 @@ def train(local_rank, args):
                     # Weights & Biases
                     if not getattr(args, 'no_wandb', False) and wandb.run is not None:
                         wb_log = {
-                            'loss/loss_all':       loss_all_val,
-                            'loss/loss_diff':      loss_diff_val,
-                            'loss/loss_pose':      loss_pose_val,
-                            'loss/loss_range_l1':  loss_rl1_val,
-                            'loss/loss_chamfer':   loss_cd_val,
-                            'loss/loss_elbo':      loss_elbo_val,
+                            'loss/loss_all':        loss_all_val,
+                            'loss/loss_diff':       loss_diff_val,
+                            'loss/loss_pose':       loss_pose_val,
+                            'loss/loss_range_l1':   loss_rl1_val,
+                            'loss/loss_chamfer':    loss_cd_val,
+                            'loss/loss_repa':       loss_repa_val,
+                            'loss/loss_elbo':       loss_elbo_val,
                             'loss/loss_bev_percep': loss_bev_val,
-                            'learning_rate/lr':    current_lr,
+                            'learning_rate/lr':     current_lr,
                         }
                         if stage == '1' and disc is not None:
                             try:

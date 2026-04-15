@@ -282,9 +282,18 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 # Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
-range_view_loss_weight = 1.0  # pixel-space depth L1 supervision through frozen decoder
-chamfer_loss_weight    = 0.0   # disabled — set > 0 to re-enable Chamfer geometry loss
-chamfer_max_pts        = 2048  # max points used in Chamfer subsampling (if Chamfer re-enabled)
+range_view_loss_weight = 0.0   # disabled in Stage 2 (range_view_loss_weight forced to 0 by train script)
+chamfer_loss_weight    = 0.1   # λ_chamfer — 3-D geometry supervision through frozen decoder
+chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
+chamfer_start          = 500   # activate after this many steps (let flow loss stabilise first)
+
+# ── REPA (Representation Alignment) ──────────────────────────────────────────
+# Aligns FluxDiT double_blocks[repa_layer_idx] hidden state with the frozen
+# VAE encoder's clean GT target latents — zero extra encoder forward-pass cost.
+# repa_weight ∈ [0.05, 0.5]; start small and increase if loss_diff stalls.
+repa_weight      = 0.1    # λ_repa
+repa_layer_idx   = 4      # middle of depth=8 double blocks (0-indexed)
+repa_start_step  = 0      # enable from step 0; set >0 to delay until flow loss stabilises
 
 # ===== BEV Perceptual Loss =====
 # Converts depth maps → BEV occupancy grids → VGG16 multi-scale featudre distance.
