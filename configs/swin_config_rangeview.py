@@ -22,7 +22,7 @@ kitti_root           = '/DATA2/shuhul/kitti'
 kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'
 kitti_poses_path     = '/DATA2/shuhul/kitti/poses'
 
-train_sequences = [0, 1, 2, 3, 4, 5]
+train_sequences = [0, 1] #[0, 1, 2, 3, 4, 5]
 val_sequences   = [6, 7]
 test_sequences  = [8, 9, 10]
 
@@ -136,10 +136,20 @@ range_view_loss_weight = 1.0
 kl_weight       = 1e-4   # final β; raise to 1e-3 if latents remain unnormalised
 kl_warmup_steps = 10000  # ramp duration in Stage 1 training steps
 
-chamfer_loss_weight    = 0.0     # enable after model stabilises
+chamfer_loss_weight    = 0.1     # λ_chamfer — explicit weight (no uncertainty weighting)
 chamfer_max_pts        = 2048
-chamfer_start          = 0
-bev_perceptual_weight  = 0.0     # disabled for Stage 1; re-enable (e.g. 0.1) for Stage 2 if desired
+chamfer_start          = 1000    # delay until flow matching has warmed up
+
+# ── REPA (Representation Alignment) ──────────────────────────────────────────
+# Aligns FluxDiT double_blocks[repa_layer_idx] hidden state with the frozen
+# Swin encoder's output for the clean GT target frame (lat_target).
+# Zero extra encoder forward pass — lat_target already computed in step_train.
+# Tune repa_weight ∈ [0.05, 0.5]; start small and increase if loss_diff stalls.
+repa_weight      = 0.1           # λ_repa
+repa_layer_idx   = 4             # middle of depth=8 double blocks (0-indexed)
+repa_start_step  = 500           # begin after flow-matching loss has stabilised
+
+bev_perceptual_weight  = 0.0     # disabled; re-enable (e.g. 0.1) if BEV quality matters
 bev_h, bev_w           = 256, 256
 bev_x_range            = 25.6
 bev_y_range            = 25.6

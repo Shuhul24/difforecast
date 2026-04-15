@@ -117,6 +117,8 @@ class FluxDiT(nn.Module):
         timesteps: Tensor,
         y: Tensor,
         guidance: Tensor | None = None,
+        return_hidden: bool = False,
+        hidden_after_block: int = -1,
     ) -> Tensor:
         if img.ndim != 3 or cond.ndim != 3:
             raise ValueError("Input img and cond tensors must have 3 dimensions.")
@@ -142,8 +144,13 @@ class FluxDiT(nn.Module):
         ids = torch.cat((cond_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
-        for block in self.double_blocks:
+        hidden = None
+        for i, block in enumerate(self.double_blocks):
             img, cond = block(img=img, cond=cond, vec=vec, pe=pe)
+            if return_hidden and i == hidden_after_block:
+                # Capture img stream after this double block for REPA alignment.
+                # Stored in float32 so the REPA cosine-sim is numerically stable.
+                hidden = img.float()
 
         img = torch.cat((cond, img), 1)
         for block in self.single_blocks:
@@ -151,9 +158,11 @@ class FluxDiT(nn.Module):
         img = img[:, cond.shape[1] :, ...]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        if return_hidden:
+            return img, hidden
         return img
     
-    def training_losses(self, 
+    def training_losses(self,
                         img: Tensor,     # (B, L, C)
                         img_ids: Tensor,
                         cond: Tensor,
@@ -162,15 +171,30 @@ class FluxDiT(nn.Module):
                         y: Tensor,
                         guidance: Tensor | None = None,
                         noise: Tensor | None = None,
-                        return_predict=False, 
-                    ) -> Tensor:
+                        return_predict: bool = False,
+                        return_hidden: bool = False,
+                        hidden_after_block: int = -1,
+                    ) -> dict:
         if noise is None:
             noise = torch.randn_like(img)
         terms = {}
-        
+
         x_t = t * img + (1. - t) * noise
         target = img - noise
-        pred = self(img=x_t, img_ids=img_ids, cond=cond, cond_ids=cond_ids, timesteps=t.reshape(-1), y=y, guidance=guidance)
+
+        if return_hidden:
+            pred, hidden = self(
+                img=x_t, img_ids=img_ids, cond=cond, cond_ids=cond_ids,
+                timesteps=t.reshape(-1), y=y, guidance=guidance,
+                return_hidden=True, hidden_after_block=hidden_after_block,
+            )
+        else:
+            pred = self(
+                img=x_t, img_ids=img_ids, cond=cond, cond_ids=cond_ids,
+                timesteps=t.reshape(-1), y=y, guidance=guidance,
+            )
+            hidden = None
+
         assert pred.shape == target.shape == img.shape
         target = target.to(pred.dtype)
         x_t = x_t.to(pred.dtype)
@@ -185,10 +209,9 @@ class FluxDiT(nn.Module):
         snr = (t_flat ** 2) / ((1. - t_flat) ** 2 + 1e-8)
         min_snr_weight = torch.clamp(snr, max=gamma) / (snr + 1e-8)  # (B,)
         terms["loss"] = (terms["mse"] * min_snr_weight).mean()
-        if return_predict:
-            terms["predict"] = predict
-        else:
-            terms["predict"] = None
+        terms["predict"] = predict if return_predict else None
+        # Intermediate hidden state for REPA alignment (None when return_hidden=False)
+        terms["hidden"] = hidden
         return terms
         
     def sample(self,

@@ -550,8 +550,24 @@ class RangeViewSwinDiT(nn.Module):
         def _log_w(w):
             return nn.Parameter(torch.tensor(math.log(1.0 / w))) if w > 0 else None
 
-        self.log_w_chamfer = _log_w(self.chamfer_loss_weight)
-        self.log_w_bev     = _log_w(self.bev_perceptual_weight)
+        # BEV perceptual keeps uncertainty weighting; Chamfer uses explicit λ.
+        self.log_w_bev = _log_w(self.bev_perceptual_weight)
+
+        # ── REPA: align FluxDiT intermediate features with frozen Swin encoder ──
+        # Teacher = lat_target (frozen encoder output for the clean GT frame).
+        # Already computed inside step_train — zero extra forward-pass cost.
+        # Student = img-stream hidden state after double_blocks[repa_layer].
+        # Both are [B, 64, 768] — no spatial pooling or dim projection needed.
+        self.repa_weight = float(getattr(args, 'repa_weight',     0.0))
+        self.repa_layer  = int(getattr(args,   'repa_layer_idx',  args.n_layer[1] // 2))
+        self.repa_start  = int(getattr(args,   'repa_start_step', 0))
+        if self.repa_weight > 0:
+            # hidden_size == latent_dim == 768 → square projection.
+            # Eye init: identity at step 0, learns alignment gradually.
+            self.repa_proj = nn.Linear(args.n_embd_dit, self.latent_dim, bias=False)
+            nn.init.eye_(self.repa_proj.weight)
+        else:
+            self.repa_proj = None
 
         self.range_projector = RangeViewProjection(
             fov_up=float(getattr(args, 'fov_up', 3.0)),
@@ -660,6 +676,7 @@ class RangeViewSwinDiT(nn.Module):
             ('dit',             ['module.dit.',             'dit.']),
             ('pose_dit',        ['module.pose_dit.',        'pose_dit.']),
             ('skip_aggregator', ['module.skip_aggregator.', 'skip_aggregator.']),
+            ('repa_proj',       ['module.repa_proj.',       'repa_proj.']),
         ]:
             obj = getattr(self, attr, None)
             if obj is None:
@@ -823,14 +840,34 @@ class RangeViewSwinDiT(nn.Module):
         t_sample = torch.sigmoid(u)
         guidance = torch.full((B,), float(getattr(self.args, 'cfg_scale', 3.5)),
                               device=tgt_norm.device, dtype=tgt_norm.dtype)
+        _use_repa = (self.repa_weight > 0 and step >= self.repa_start
+                     and self.repa_proj is not None)
         loss_terms = self.dit.training_losses(
             img=tgt_norm, img_ids=self.img_ids[:B],
             cond=stt_last, cond_ids=self.cond_ids[:B],
             t=t_sample, y=y_flux, guidance=guidance,
             return_predict=self.args.return_predict,
+            return_hidden=_use_repa,
+            hidden_after_block=self.repa_layer,
         )
         diff_loss    = loss_terms['loss'].mean()
         predict_lats = loss_terms.get('predict')
+
+        # ── REPA loss ─────────────────────────────────────────────────────────
+        # Teacher: lat_target [B, 64, 768] — frozen Swin encoder on clean GT
+        #          frame, already computed above at no extra cost.
+        # Student: img-stream after double_blocks[repa_layer], same shape.
+        # Maximise token-wise cosine similarity → align DiT intermediate
+        # representations with the domain encoder's semantic space.
+        z_repa = torch.zeros(1, device=tgt_norm.device, dtype=torch.float32)
+        if _use_repa and loss_terms.get('hidden') is not None:
+            dit_h    = loss_terms['hidden']              # [B, 64, hidden_size=768], float32
+            teacher  = lat_target.detach().float()       # [B, 64, 768], no grad
+            proj     = self.repa_proj(dit_h)             # [B, 64, 768]
+            # Token-wise cosine similarity averaged over spatial tokens and batch
+            z_repa   = -torch.nn.functional.cosine_similarity(
+                proj, teacher, dim=-1
+            ).mean()
 
         z_cd = z_bev = torch.zeros(1, device=tgt_norm.device, dtype=tgt_norm.dtype)
         predict_decoded = None
@@ -856,17 +893,18 @@ class RangeViewSwinDiT(nn.Module):
                 m0, s0 = self.proj_img_mean[0], self.proj_img_stds[0]
                 gt_unnorm = gt_img[:, 0].float() * s0 + m0
 
-            if self.log_w_chamfer is not None and step >= self.chamfer_start:
+            if self.chamfer_loss_weight > 0 and step >= self.chamfer_start:
                 if self.log_range:
                     pd = (torch.exp2(predict_decoded[:, 0].float() * 6.) - 1.).reshape(B, -1)
                 else:
                     pd = (predict_decoded[:, 0].float() * s0 + m0).reshape(B, -1)
                 gd = gt_unnorm.reshape(B, -1)
+                # Scale by mean timestep: high-noise steps produce noisy decoded
+                # predictions, so down-weight their Chamfer contribution.
                 z_cd = batch_chamfer_distance(
                     pd, gd, pd > 0.5, gd > 0.5,
                     self.range_projector, self.chamfer_max_pts
                 ) * t_sample.mean()
-                diff_loss = diff_loss + self._uw(self.log_w_chamfer, z_cd)
 
             if self.log_w_bev is not None and self.bev_perceptual_fn is not None:
                 if self.log_range:
@@ -877,7 +915,15 @@ class RangeViewSwinDiT(nn.Module):
                 z_bev = self.bev_perceptual_fn(pd, gd, pd > 0.5, gd > 0.5) * t_sample.mean()
                 diff_loss = diff_loss + self._uw(self.log_w_bev, z_bev)
 
-        loss_all = diff_loss + pose_loss
+        # ── Combined loss (all terms explicit, individually tunable) ─────────
+        # loss_diff  : flow-matching MSE (min-SNR weighted) + range-view Berhu
+        # loss_pose  : PoseDiT rectified-flow loss (λ_pose = lambda_yaw_pose)
+        # loss_chamfer: 3-D Chamfer distance (λ = chamfer_loss_weight)
+        # loss_repa  : REPA cosine-alignment (λ = repa_weight)
+        loss_all = (diff_loss
+                    + pose_loss
+                    + self.chamfer_loss_weight * z_cd
+                    + self.repa_weight * z_repa)
 
         # STT conditioning diagnostics (detached scalars — no memory overhead)
         stt_last_f = stt_last.float()
@@ -890,7 +936,8 @@ class RangeViewSwinDiT(nn.Module):
             'loss_pose':        pose_loss.detach(),
             'loss_rv':          z_rv.detach() if predict_decoded is not None and self.range_view_loss_weight > 0
                                 else torch.zeros(1, device=tgt_norm.device),
-            'loss_chamfer':     z_cd,
+            'loss_chamfer':     z_cd.detach(),
+            'loss_repa':        z_repa.detach(),
             'loss_bev_percep':  z_bev,
             'predict':          predict_decoded,
             'predict_latents':  predict_lats,

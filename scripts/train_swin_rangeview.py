@@ -263,7 +263,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
             ar_rot_window     = rot_matrix[:, :CF].clone()   # [B, CF, 4, 4]
 
             # Cumulative losses over fw_iter steps (for logging)
-            cumul_diff = cumul_pose = cumul_rv = cumul_cd = cumul_bev = 0.0
+            cumul_diff = cumul_pose = cumul_rv = cumul_cd = cumul_bev = cumul_repa = 0.0
             last_out        = None   # keep for vis / logging
             all_predictions = []     # collect per-AR-step predictions for vis
 
@@ -301,6 +301,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 cumul_rv   += out.get('loss_rv',         torch.tensor(0.)).item()
                 cumul_cd   += out.get('loss_chamfer',    torch.tensor(0.)).item()
                 cumul_bev  += out.get('loss_bev_percep', torch.tensor(0.)).item()
+                cumul_repa += out.get('loss_repa',       torch.tensor(0.)).item()
                 last_out    = out
                 if global_rank == 0 and out.get('predict') is not None:
                     all_predictions.append(out['predict'].detach())
@@ -392,7 +393,8 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 avg_rv    = cumul_rv   / fw_iter
                 avg_cd    = cumul_cd   / fw_iter
                 avg_bev   = cumul_bev  / fw_iter
-                avg_total = avg_diff + avg_pose + avg_rv + avg_cd + avg_bev
+                avg_repa  = cumul_repa / fw_iter
+                avg_total = avg_diff + avg_pose + avg_rv + avg_cd + avg_bev + avg_repa
 
                 stt_norm = last_out.get('stt_last_norm', torch.tensor(0.)).item() \
                            if last_out else 0.
@@ -403,6 +405,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                     f"[S2] step={step} | total={avg_total:.4f} | "
                     f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
                     f"rv={avg_rv:.4f} | cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
+                    f"repa={avg_repa:.4f} | "
                     f"stt_norm={stt_norm:.3f} | stt_std={stt_std:.3f} | "
                     f"lr={lr:.2e} | {elapsed:.2f}s/step"
                 )
@@ -415,6 +418,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                     args.writer.add_scalar('stage2/loss_rv',    avg_rv,    step)
                     args.writer.add_scalar('stage2/loss_cd',    avg_cd,    step)
                     args.writer.add_scalar('stage2/loss_bev',   avg_bev,   step)
+                    args.writer.add_scalar('stage2/loss_repa',  avg_repa,  step)
                     args.writer.add_scalar('debug/stt_last_norm', stt_norm, step)
                     args.writer.add_scalar('debug/stt_last_std',  stt_std,  step)
 
@@ -427,6 +431,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                         's2/aux/loss_rv':          avg_rv,
                         's2/aux/loss_chamfer':     avg_cd,
                         's2/aux/loss_bev':         avg_bev,
+                        's2/aux/loss_repa':        avg_repa,
                         # Combined
                         's2/loss_total':           avg_total,
                         # STT conditioning diagnostics
