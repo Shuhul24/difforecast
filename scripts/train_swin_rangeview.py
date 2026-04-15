@@ -405,7 +405,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                     f"[S2] step={step} | total={avg_total:.4f} | "
                     f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
                     f"rv={avg_rv:.4f} | cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
-                    f"repa={avg_repa:.4f} | "
+                    f"repa={avg_repa:.2e} | "
                     f"stt_norm={stt_norm:.3f} | stt_std={stt_std:.3f} | "
                     f"lr={lr:.2e} | {elapsed:.2f}s/step"
                 )

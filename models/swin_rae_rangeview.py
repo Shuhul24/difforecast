@@ -854,15 +854,18 @@ class RangeViewSwinDiT(nn.Module):
         predict_lats = loss_terms.get('predict')
 
         # ── REPA loss ─────────────────────────────────────────────────────────
-        # Teacher: lat_target [B, 64, 768] — frozen Swin encoder on clean GT
-        #          frame, already computed above at no extra cost.
-        # Student: img-stream after double_blocks[repa_layer], same shape.
+        # Teacher: tgt_norm [B, 64, 768] — frozen Swin encoder output normalised
+        #          by latent_scale (same representation the DiT processes as x_0).
+        # Student: img-stream hidden state after double_blocks[repa_layer], float32.
         # Maximise token-wise cosine similarity → align DiT intermediate
         # representations with the domain encoder's semantic space.
         z_repa = torch.zeros(1, device=tgt_norm.device, dtype=torch.float32)
         if _use_repa and loss_terms.get('hidden') is not None:
             dit_h    = loss_terms['hidden']              # [B, 64, hidden_size=768], float32
-            teacher  = lat_target.detach().float()       # [B, 64, 768], no grad
+            # Use the *normalised* clean latent as teacher — identical domain to what
+            # the DiT denoises (x_0 = tgt_norm).  Cosine similarity is scale-invariant
+            # so this is equivalent to using lat_target, but more principled.
+            teacher  = tgt_norm.detach().float()         # [B, 64, 768], no grad
             proj     = self.repa_proj(dit_h)             # [B, 64, 768]
             # Token-wise cosine similarity averaged over spatial tokens and batch
             z_repa   = -torch.nn.functional.cosine_similarity(

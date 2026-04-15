@@ -128,7 +128,7 @@ latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_l
 temporal_skip_agg = True
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
-range_view_loss_weight = 1.0
+range_view_loss_weight = 0.0    # disabled: decoder is frozen in Stage 2; TemporalSkipAggregator supervised via Chamfer instead
 # ── VAE KL regularisation (Stage 1) ──────────────────────────────────────────
 # β warmup: KL weight ramps from 0 → kl_weight over kl_warmup_steps so that
 # reconstruction quality stabilises before KL pressure kicks in.
@@ -138,7 +138,7 @@ kl_warmup_steps = 10000  # ramp duration in Stage 1 training steps
 
 chamfer_loss_weight    = 0.1     # λ_chamfer — explicit weight (no uncertainty weighting)
 chamfer_max_pts        = 2048
-chamfer_start          = 1000    # delay until flow matching has warmed up
+chamfer_start          = 200     # earlier start so TemporalSkipAggregator gets supervision (rv_loss removed)
 
 # ── REPA (Representation Alignment) ──────────────────────────────────────────
 # Aligns FluxDiT double_blocks[repa_layer_idx] hidden state with the frozen
@@ -147,7 +147,7 @@ chamfer_start          = 1000    # delay until flow matching has warmed up
 # Tune repa_weight ∈ [0.05, 0.5]; start small and increase if loss_diff stalls.
 repa_weight      = 0.1           # λ_repa
 repa_layer_idx   = 4             # middle of depth=8 double blocks (0-indexed)
-repa_start_step  = 500           # begin after flow-matching loss has stabilised
+repa_start_step  = 0             # enable from step 0; set >0 to delay until flow loss stabilises
 
 bev_perceptual_weight  = 0.0     # disabled; re-enable (e.g. 0.1) if BEV quality matters
 bev_h, bev_w           = 256, 256
