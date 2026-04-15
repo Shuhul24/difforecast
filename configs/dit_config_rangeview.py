@@ -15,7 +15,7 @@ kitti_poses_path = '/DATA2/shuhul/kitti/poses'  # Path to ground truth poses
 # KITTI sequence splits (following KITTI Odometry format)
 train_sequences = [0, 1] #[0, 1, 2, 3, 4, 5]  # Training sequences
 val_sequences = [6, 7]  # Validation sequences
-test_sequences = [8, 9, 10]  # Test sequences
+test_sequences = [8] #[8, 9, 10]  # Test sequences
 
 # Point cloud file settings for KITTI
 pc_extension = '.bin'  # Point cloud file extension

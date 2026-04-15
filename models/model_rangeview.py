@@ -614,6 +614,21 @@ class RangeViewDiT(nn.Module):
         predict_pose_xy  = _pred_raw[:, :, :2]                         # [B, 1, 2]
         predict_pose_yaw = _pred_raw[:, :, 2:3]                        # [B, 1, 1]
 
+        # Vector conditioning for DiT: use the last CONDITIONING frame's pose
+        # transition, not the target frame's pose.
+        #
+        # pose_indices_total has shape [B, CF+1, 2]: CF conditioning poses +
+        # 1 target pose.  Index -2 is the (CF-1)→CF conditioning transition —
+        # the last step the model actually observed — which is what is available
+        # at inference time.  Using index -1 (the target frame's pose) causes a
+        # train/inference mismatch: the DiT learns to rely on GT target pose
+        # during training but only ever receives conditioning pose at inference.
+        # This mirrors train_swin_rangeview.py which explicitly uses
+        # rel_pose[:, -2:-1] as the DiT vector condition.
+        last_cond_pose_idx = pose_indices_total[:, -2:-1, :]   # [B, 1, 2]
+        last_cond_yaw_idx  = yaw_indices_total[:, -2:-1, :]    # [B, 1, 1]
+        y_dit = self.model.get_pose_emb(last_cond_pose_idx, last_cond_yaw_idx)  # [B, n_embd*3]
+
         # Flow-matching loss (DiT) — single frame, full context.
         # t_sample is kept as a named variable so auxiliary losses can be
         # weighted by it: d(predict)/d(pred) = (1-t), so weighting auxiliary
@@ -626,7 +641,7 @@ class RangeViewDiT(nn.Module):
             cond=stt_last,
             cond_ids=self.cond_ids[:B_pred],
             t=t_sample,
-            y=pose_last,
+            y=y_dit,
             return_predict=self.args.return_predict,
         )
         diff_loss = loss_terms['loss']
