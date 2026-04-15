@@ -39,8 +39,25 @@ _chamfer_fn = None
 _CHAMFER_AVAILABLE: bool | None = None   # None = not yet attempted
 
 
+class _ChamferDistancePyTorch:
+    """Pure-PyTorch fallback for ChamferDistance.
+
+    Matches the interface of pyTorchChamferDistance:
+      inputs : pc1 [1, N, 3], pc2 [1, M, 3]  (float32)
+      returns: (dist1 [1, N], dist2 [1, M])   squared Euclidean distances
+    """
+    def __call__(self, pc1: torch.Tensor, pc2: torch.Tensor):
+        d  = torch.cdist(pc1, pc2)          # [1, N, M]  Euclidean distances
+        d2 = d * d                           # squared
+        return d2.min(dim=2).values, d2.min(dim=1).values
+
+
 def _get_chamfer_fn():
-    """Return a lazily-initialised ChamferDistance instance (singleton)."""
+    """Return a lazily-initialised ChamferDistance instance (singleton).
+
+    Tries the CUDA-accelerated pyTorchChamferDistance kernel first; falls back
+    to a pure-PyTorch implementation if the extension is unavailable.
+    """
     global _chamfer_fn, _CHAMFER_AVAILABLE
     if _CHAMFER_AVAILABLE is None:
         # Make the submodule importable by ensuring the repo root is on sys.path
@@ -51,16 +68,16 @@ def _get_chamfer_fn():
             _chamfer_fn        = ChamferDistance()
             _CHAMFER_AVAILABLE = True
         except Exception as e:
-            _CHAMFER_AVAILABLE = False
-            _get_chamfer_fn._last_err = str(e)
-    if not _CHAMFER_AVAILABLE:
-        err = getattr(_get_chamfer_fn, '_last_err', '')
-        raise RuntimeError(
-            "pyTorchChamferDistance failed to load"
-            + (f" ({err})" if err else "") + ".\n"
-            "Run:  git submodule update --init\n"
-            "Then ensure nvcc is available for CUDA JIT compilation."
-        )
+            import warnings
+            warnings.warn(
+                f"pyTorchChamferDistance CUDA extension unavailable ({e}). "
+                "Falling back to pure-PyTorch Chamfer (slower, same gradients). "
+                "Run: git submodule update --init && pip install -e pyTorchChamferDistance "
+                "to use the fast CUDA kernel.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _chamfer_fn        = _ChamferDistancePyTorch()
+            _CHAMFER_AVAILABLE = True   # fallback counts as available
     return _chamfer_fn
 
 
