@@ -23,7 +23,7 @@ kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'
 kitti_poses_path     = '/DATA2/shuhul/kitti/poses'
 
 train_sequences = [0, 1] #[0, 1, 2, 3, 4, 5]
-val_sequences   = [6, 7]
+val_sequences   = [6] #[6, 7]
 test_sequences  = [8, 9, 10]
 
 pc_extension = '.bin'
