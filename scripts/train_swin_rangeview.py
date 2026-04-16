@@ -52,6 +52,7 @@ from utils.running import (
 )
 from utils.bev_utils import render_bev_comparison, render_rangeview_comparison
 from models.swin_rae_rangeview import RangeViewSwinRAE, RangeViewSwinDiT
+from dataset.projection import RangeProjection
 from dataset.dataset_kitti_rangeview import (
     KITTIRangeViewDataset,
     KITTIRangeViewTrainDataset,
@@ -265,7 +266,10 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
             # Cumulative losses over fw_iter steps (for logging)
             cumul_diff = cumul_pose = cumul_rv = cumul_cd = cumul_bev = cumul_repa = 0.0
             last_out        = None   # keep for vis / logging
-            all_predictions = []     # collect per-AR-step predictions for vis
+            vis_steps       = getattr(args, 'vis_steps', 500)
+            collect_vis     = vis_steps > 0 and (step + 1) % vis_steps == 0 and global_rank == 0
+            all_predictions = []     # [B, C, H, W] per AR step — predicted frames
+            all_gt_frames   = []     # [B, C, H, W] per AR step — GT frames
 
             for j in range(fw_iter):
                 features_gt = range_views[:, j + CF:j + CF + 1]
@@ -349,8 +353,9 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 # Log effective REPA contribution (weighted + ramped)
                 cumul_repa += _repa_w * _repa_ramp * _loss_repa.item()
                 last_out    = out
-                if global_rank == 0 and out.get('predict') is not None:
-                    all_predictions.append(out['predict'].detach())
+                if collect_vis and out.get('predict') is not None:
+                    all_predictions.append(out['predict'].detach().cpu())
+                    all_gt_frames.append(features_gt[:, 0].detach().cpu())
 
                 if j < fw_iter - 1:
                     # ── Obtain AR predictions for next-step conditioning ──────
@@ -492,9 +497,21 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                         'train/step':              step,
                     })
 
-            if (args.vis_steps > 0 and step % args.vis_steps == 0
-                    and global_rank == 0 and all_predictions):
-                _save_vis(step, args, range_views, all_predictions, CF, fw_iter)
+            if collect_vis and all_predictions:
+                vis_dir = os.path.join(args.validation_path, 'train_vis')
+                try:
+                    _save_cond_strip(step, args, range_views.cpu(), CF, vis_dir)
+                    with torch.no_grad():
+                        save_multistep_visualization(
+                            step=step,
+                            args=args,
+                            pred_frames=all_predictions,
+                            gt_frames=all_gt_frames,
+                            projector=args.vis_projector,
+                            vis_dir=vis_dir,
+                        )
+                except Exception as e:
+                    logger.warning(f"[S2] Visualisation failed at step {step}: {e}")
 
             if step % args.eval_steps == 0:
                 raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
@@ -637,60 +654,177 @@ def _save_vis_stage1(step, args, x, x_rec):
         logger.warning(f"[S1] Visualisation failed at step {step}: {e}")
 
 
-def _save_vis(step, args, range_views, all_predictions, CF, fw_iter):
-    """Save a 3-row grid: condition frames (GT) | GT future | predicted future."""
+def _to_depth_swin(chw_tensor, log_range=True, mean=0.0, std=1.0):
+    """Convert a single [C, H, W] normalised range-view tensor to a depth map in metres."""
+    arr = chw_tensor[0].float().cpu().numpy()
+    if log_range:
+        return np.clip((2.0 ** (arr * 6.0)) - 1.0, 0.0, 80.0)
+    return np.clip(arr * std + mean, 0.0, 80.0)
+
+
+def save_multistep_visualization(step, args, pred_frames, gt_frames, projector, vis_dir):
+    """Save multi-step forecast quality images for Stage 2 Swin training.
+
+    Produces two PNG files per call:
+
+    1. ``_multistep_rv.png``  — range-view grid:
+       rows = future frames (t+1 … t+N), cols = [GT depth | Pred depth | |Error|]
+       Row labels include per-step MAE (metres, over valid pixels only).
+
+    2. ``_multistep_bev.png`` — BEV bird's-eye-view grid:
+       rows = future frames (t+1 … t+N), cols = [GT BEV | Pred BEV | Overlay]
+       Row labels include per-step symmetric Chamfer distance (metres).
+
+    Args:
+        step:        Training step (for filename and title).
+        args:        Config namespace (log_range, proj_img_mean/stds, bev_* fields).
+        pred_frames: List of N tensors, each [B, C, H, W] — predicted frame at AR step j.
+        gt_frames:   List of N tensors, each [B, C, H, W] — GT frame at AR step j.
+        projector:   RangeProjection for BEV back-projection.
+        vis_dir:     Output directory (created if missing).
+    """
+    n = len(pred_frames)
+    if n == 0:
+        return
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    os.makedirs(vis_dir, exist_ok=True)
+    log_range = getattr(args, 'log_range', True)
+    m0        = args.proj_img_mean[0]
+    s0        = args.proj_img_stds[0]
+    max_depth = 80.0
+    bev_range = float(getattr(args, 'bev_x_range', getattr(args, 'bev_range', 50.0)))
+
+    def to_depth(tensor_bchw):
+        return _to_depth_swin(tensor_bchw[0], log_range, m0, s0)
+
+    def make_bev(depth_hw):
+        try:
+            pts  = projector.back_project_range(depth_hw)
+            res  = 0.2
+            grid = int(2 * bev_range / res)
+            img  = np.zeros((grid, grid), dtype=np.float32)
+            xi = ((pts[:, 0] + bev_range) / res).astype(int)
+            yi = ((pts[:, 1] + bev_range) / res).astype(int)
+            mask = (xi >= 0) & (xi < grid) & (yi >= 0) & (yi < grid)
+            img[yi[mask], xi[mask]] = 1.0
+            return img, pts
+        except Exception:
+            return np.zeros((100, 100), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
+
+    def chamfer_dist_3d(pts_a, pts_b):
+        try:
+            from scipy.spatial import cKDTree
+            if len(pts_a) == 0 or len(pts_b) == 0:
+                return float('nan')
+            d_ab = cKDTree(pts_b).query(pts_a, k=1, workers=1)[0]
+            d_ba = cKDTree(pts_a).query(pts_b, k=1, workers=1)[0]
+            return float(np.mean(d_ab) + np.mean(d_ba))
+        except Exception:
+            return float('nan')
+
+    # Pre-compute depths, BEVs, and per-step metrics
+    gt_depths, pred_depths = [], []
+    gt_bevs,   pred_bevs   = [], []
+    maes,      chamfers    = [], []
+
+    for fi in range(n):
+        gd = to_depth(gt_frames[fi])
+        pd = to_depth(pred_frames[fi])
+        gt_depths.append(gd)
+        pred_depths.append(pd)
+
+        gb, g_pts = make_bev(gd)
+        pb, p_pts = make_bev(pd)
+        gt_bevs.append(gb)
+        pred_bevs.append(pb)
+
+        valid = gd > 0.5
+        maes.append(float(np.abs(pd - gd)[valid].mean()) if valid.any() else float('nan'))
+        chamfers.append(chamfer_dist_3d(g_pts, p_pts))
+
+    # ── Range-view grid: GT | Pred | |Error| ─────────────────────────────────
+    _cmap_rv = matplotlib.colormaps['turbo_r']
+    fig_rv, axes_rv = plt.subplots(n, 3, figsize=(18, 2.8 * n))
+    if n == 1:
+        axes_rv = axes_rv[np.newaxis, :]
+
+    for c, title in enumerate(['GT depth (m)', 'Pred depth (m)', '|Error| (m)']):
+        axes_rv[0, c].set_title(title, fontsize=9, fontweight='bold')
+
+    for fi in range(n):
+        err = np.abs(pred_depths[fi] - gt_depths[fi])
+        axes_rv[fi, 0].imshow(gt_depths[fi],   cmap=_cmap_rv, vmin=0, vmax=max_depth, aspect='auto')
+        axes_rv[fi, 1].imshow(pred_depths[fi],  cmap=_cmap_rv, vmin=0, vmax=max_depth, aspect='auto')
+        im_err = axes_rv[fi, 2].imshow(err,     cmap='hot',    vmin=0, vmax=10.0,      aspect='auto')
+        mae_str = f'{maes[fi]:.3f} m' if not np.isnan(maes[fi]) else 'n/a'
+        axes_rv[fi, 0].set_ylabel(f't+{fi+1}\nMAE={mae_str}', fontsize=8, fontweight='bold')
+        plt.colorbar(im_err, ax=axes_rv[fi, 2], fraction=0.015, pad=0.02, label='m')
+        for ax in axes_rv[fi]:
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig_rv.suptitle(f'Step {step} — {n}-Frame Range-View Forecast (Swin)', fontsize=11)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_multistep_rv.png'), dpi=90, bbox_inches='tight')
+    plt.close(fig_rv)
+
+    # ── BEV grid: GT | Pred | Overlay ────────────────────────────────────────
+    fig_bev, axes_bev = plt.subplots(n, 3, figsize=(12, 4 * n))
+    if n == 1:
+        axes_bev = axes_bev[np.newaxis, :]
+
+    for c, title in enumerate(['GT BEV', 'Pred BEV', 'Overlay (green=GT, red=Pred)']):
+        axes_bev[0, c].set_title(title, fontsize=9, fontweight='bold')
+
+    for fi in range(n):
+        gb, pb  = gt_bevs[fi], pred_bevs[fi]
+        h_b, w_b = gb.shape
+        overlay  = np.zeros((h_b, w_b, 3), dtype=np.float32)
+        overlay[..., 1] = np.clip(gb, 0, 1)   # green = GT
+        overlay[..., 0] = np.clip(pb, 0, 1)   # red   = Pred
+
+        axes_bev[fi, 0].imshow(gb,      cmap='gray', aspect='equal', origin='lower')
+        axes_bev[fi, 1].imshow(pb,      cmap='gray', aspect='equal', origin='lower')
+        axes_bev[fi, 2].imshow(overlay,              aspect='equal', origin='lower')
+        cd_str = f'{chamfers[fi]:.3f} m' if not np.isnan(chamfers[fi]) else 'n/a'
+        axes_bev[fi, 0].set_ylabel(f't+{fi+1}\nCD={cd_str}', fontsize=8, fontweight='bold')
+        for ax in axes_bev[fi]:
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig_bev.suptitle(f'Step {step} — {n}-Frame BEV Forecast (Swin)', fontsize=11)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'step{step:07d}_multistep_bev.png'), dpi=90, bbox_inches='tight')
+    plt.close(fig_bev)
+
+
+def _save_cond_strip(step, args, range_views, CF, vis_dir):
+    """Save a strip of conditioning frames (GT input) for Stage 2."""
     try:
-        vis_dir = os.path.join(args.validation_path, 'vis')
         os.makedirs(vis_dir, exist_ok=True)
         log_range = getattr(args, 'log_range', True)
-        m0, s0 = args.proj_img_mean[0], args.proj_img_stds[0]
+        m0, s0    = args.proj_img_mean[0], args.proj_img_stds[0]
+        max_depth = 80.0
 
-        def to_depth(t_bchw):
-            arr = t_bchw[0, 0].float().detach().cpu().numpy()
-            if log_range:
-                return np.clip((2.0 ** (arr * 6.0)) - 1.0, 0.0, 80.0)
-            return np.clip(arr * s0 + m0, 0.0, 80.0)
-
-        n_cols = max(CF, fw_iter)
-        fig, axes = plt.subplots(3, n_cols, figsize=(n_cols * 8, 6))
-        vmax = 80.0
-
-        # Row 0: conditioning frames (GT input)
-        for i in range(CF):
-            depth = to_depth(range_views[:, i])
-            axes[0, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
-            axes[0, i].set_title(f't-{CF - 1 - i}', fontsize=8)
-            axes[0, i].axis('off')
-        for i in range(CF, n_cols):
-            axes[0, i].axis('off')
-
-        # Row 1: GT future frames
-        for i in range(fw_iter):
-            depth = to_depth(range_views[:, CF + i])
-            axes[1, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
-            axes[1, i].set_title(f't+{i + 1}', fontsize=8)
-            axes[1, i].axis('off')
-        for i in range(fw_iter, n_cols):
-            axes[1, i].axis('off')
-
-        # Row 2: predicted future frames
-        for i, pred in enumerate(all_predictions):
-            depth = to_depth(pred)
-            axes[2, i].imshow(depth, cmap='turbo_r', vmin=0, vmax=vmax, aspect='auto')
-            axes[2, i].set_title(f't+{i + 1}', fontsize=8)
-            axes[2, i].axis('off')
-        for i in range(len(all_predictions), n_cols):
-            axes[2, i].axis('off')
-
-        for r, label in enumerate(['Condition (GT)', 'GT Future', 'Predicted']):
-            axes[r, 0].set_ylabel(label, fontsize=9)
-
-        fig.suptitle(f'Stage 2 — step {step:,}', fontsize=12)
+        fig, axes = plt.subplots(1, CF, figsize=(6 * CF, 3))
+        if CF == 1:
+            axes = [axes]
+        for t, ax in enumerate(axes):
+            depth = _to_depth_swin(range_views[0, t], log_range, m0, s0)
+            im = ax.imshow(np.clip(depth, 0, max_depth),
+                           cmap=plt.get_cmap('turbo_r'), vmin=0, vmax=max_depth, aspect='auto')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='m')
+            label = f't-{CF - 1 - t}' if CF - 1 - t > 0 else 't'
+            ax.set_title(f'Cond [{label}]', fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+        fig.suptitle(f'Step {step} — Conditioning frames', fontsize=11)
         plt.tight_layout()
-        plt.savefig(os.path.join(vis_dir, f'step_{step:07d}.png'), dpi=80, bbox_inches='tight')
+        plt.savefig(os.path.join(vis_dir, f'step{step:07d}_cond.png'), dpi=80, bbox_inches='tight')
         plt.close(fig)
     except Exception as e:
-        logger.warning(f"Visualisation failed at step {step}: {e}")
+        logger.warning(f"[S2] Cond strip vis failed at step {step}: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -781,6 +915,13 @@ def main():
 
     logger.info(f"Training Stage {args.stage}: {len(train_ds)} train / {len(val_ds)} val samples, "
                 f"lr={lr:.2e}, eff_batch={eff_batch}")
+
+    # Projector for training visualisations (depth → 3-D for BEV)
+    args.vis_projector = RangeProjection(
+        fov_up=args.fov_up, fov_down=args.fov_down,
+        proj_w=args.range_w, proj_h=args.range_h,
+        fov_left=args.fov_left, fov_right=args.fov_right,
+    )
 
     step = int(getattr(args, 'resume_step', 0))
     if args.stage == '1':
