@@ -140,11 +140,11 @@ def add_arguments():
     if getattr(cfg, 'stage', 'all') == '2':
         cfg.elbo_weight = 0.0
         cfg.bev_perceptual_weight = 0.0
-        # chamfer_loss_weight and repa_weight are intentionally preserved from
-        # the config so Stage 2 can supervise the DiT with geometry-aware losses.
-        cfg.range_view_loss_weight = 0.0
-        # Stage 2 needs return_predict=True for Chamfer (DiT x_0 estimate) and
-        # return_hidden=True for REPA (intermediate hidden states).
+        # chamfer_loss_weight, repa_weight and range_view_loss_weight are
+        # intentionally preserved from the config so Stage 2 can supervise
+        # the DiT with geometry-aware and pixel-space losses.
+        # Stage 2 needs return_predict=True for Chamfer / RV loss (DiT x_0
+        # estimate) and return_hidden=True for REPA (intermediate hidden states).
         cfg.return_predict = True
     elif getattr(cfg, 'stage', 'all') == '1':
         # Config default is 0.0 (for stage 2); force it on for stage 1 VAE training.
@@ -937,11 +937,39 @@ def train(local_rank, args):
                             latents_cond_precomputed=latents_cond_next,
                         )
 
-                    loss_value = loss_final["loss_all"]
+                    # Rebuild total loss with REPA warmup so the cosine-alignment
+                    # term ramps up gradually rather than dominating from step 0.
+                    # loss_repa in the dict is the raw unweighted value; repa_weight
+                    # (from config) is the target scale at full ramp.
+                    _repa_ramp  = min(1.0, float(step) /
+                                      max(float(getattr(args, 'repa_warmup_steps', 5000)), 1))
+                    _repa_w     = float(getattr(args, 'repa_weight', 0.0))
+                    _chamfer_w  = float(getattr(args, 'chamfer_loss_weight', 0.0))
+                    _loss_repa  = loss_final.get('loss_repa',
+                                                 loss_final['loss_diff'].new_tensor(0.))
+                    _loss_cd    = loss_final.get('loss_chamfer',
+                                                 loss_final['loss_diff'].new_tensor(0.))
+                    loss_value  = (loss_final['loss_diff']
+                                   + loss_final['loss_pose']
+                                   + _chamfer_w * _loss_cd
+                                   + _repa_w * _repa_ramp * _loss_repa)
+
+                    # Range-view pixel-space L1 on decoded DiT prediction.
+                    # Controlled by rv_pred_weight in config (default 0 = off).
+                    # Provides direct depth/intensity supervision in image space
+                    # to complement the latent-space diffusion loss.
+                    _rv_pred_w = float(getattr(args, 'rv_pred_weight', 0.0))
+                    if _rv_pred_w > 0 and loss_final.get('predict') is not None:
+                        _rv_loss = torch.nn.functional.l1_loss(
+                            loss_final['predict'].float(),
+                            features_gt[:, 0].float(),
+                        )
+                        loss_value = loss_value + _rv_pred_w * _rv_loss
+                        loss_final['loss_rv_pred'] = _rv_loss.detach()
 
                     # Check for NaN
-                    if not math.isfinite(loss_value):
-                        print(f"Loss is {loss_value}, stopping training")
+                    if not math.isfinite(loss_value.item()):
+                        print(f"Loss is {loss_value.item()}, stopping training")
                         sys.exit(1)
 
                     # Backward and optimize
@@ -952,7 +980,8 @@ def train(local_rank, args):
                     cumul_diff  += loss_final["loss_diff"].item()
                     cumul_pose  += loss_final["loss_pose"].item()
                     cumul_cd    += loss_final.get("loss_chamfer", torch.tensor(0.)).item()
-                    cumul_repa  += loss_final.get("loss_repa",    torch.tensor(0.)).item()
+                    # Log effective REPA contribution (weighted + ramped)
+                    cumul_repa  += (_repa_w * _repa_ramp * _loss_repa).item()
 
                     # Collect this step's prediction for multi-step visualization.
                     # predict is [B, C, H, W] — one frame per AR step.
@@ -1106,6 +1135,7 @@ def train(local_rank, args):
                     loss_diff_val  = cumul_diff  / fw_iter
                     loss_pose_val  = cumul_pose  / fw_iter
                     loss_cd_val    = cumul_cd    / fw_iter
+                    # cumul_repa already holds the weighted+ramped effective value
                     loss_repa_val  = cumul_repa  / fw_iter
                     loss_all_val   = loss_diff_val + loss_pose_val + loss_cd_val + loss_repa_val
                     loss_rl1_val   = get_loss_val("loss_range_l1")

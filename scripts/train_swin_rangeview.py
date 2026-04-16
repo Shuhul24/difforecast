@@ -284,7 +284,29 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                         latents_cond_precomputed=latents_cond_next,
                     )
 
-                loss = out['loss_all']
+                # Rebuild total loss with:
+                #  1. REPA warmup — ramp from 0 → repa_weight over repa_warmup_steps
+                #     so cosine-alignment doesn't drown diffusion gradients early on.
+                #     loss_repa in the dict is the raw unweighted cosine-sim value.
+                #  2. Range-view pixel L1 — out['loss_rv'] is computed in the model
+                #     but was never included in loss_all; add it here when enabled.
+                _repa_ramp  = min(1.0, float(step) /
+                                  max(float(getattr(args, 'repa_warmup_steps', 5000)), 1))
+                _repa_w     = float(getattr(args, 'repa_weight', 0.0))
+                _chamfer_w  = float(getattr(args, 'chamfer_loss_weight', 0.0))
+                _rv_w       = float(getattr(args, 'range_view_loss_weight', 0.0))
+                _loss_repa  = out.get('loss_repa',
+                                      out['loss_diff'].new_tensor(0.))
+                _loss_cd    = out.get('loss_chamfer',
+                                      out['loss_diff'].new_tensor(0.))
+                _loss_rv    = out.get('loss_rv',
+                                      out['loss_diff'].new_tensor(0.))
+                loss = (out['loss_diff']
+                        + out['loss_pose']
+                        + _chamfer_w * _loss_cd
+                        + _rv_w     * _loss_rv
+                        + _repa_w   * _repa_ramp * _loss_repa)
+
                 if not math.isfinite(loss.item()):
                     print(f"[S2] Step {step} AR-step {j}: loss={loss.item()}, stopping")
                     sys.exit(1)
@@ -295,13 +317,38 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 if scheduler is not None:
                     scheduler.step()
 
+                # ── Auxiliary physical-unit pose regression ──────────────────
+                # The flow-matching pose loss can be satisfied by predicting the
+                # conditional mean (average KITTI velocity).  An L1 on physical
+                # units (metres, degrees) penalises mean-seeking directly and
+                # provides a much stronger gradient to the STT.
+                # Controlled by pose_reg_weight in config (default 0 = off).
+                _pose_reg_w = float(getattr(args, 'pose_reg_weight', 0.0))
+                if _pose_reg_w > 0:
+                    pred_xy  = out.get('predict_pose_xy')   # [B, 1, 2] metres
+                    pred_yaw = out.get('predict_pose_yaw')  # [B, 1, 1] degrees
+                    if pred_xy is not None and pred_yaw is not None:
+                        # rel_pose / rel_yaw: conditioning + target poses
+                        # Last entry [-1] is the target the PoseDiT should predict
+                        with torch.cuda.amp.autocast(enabled=False):
+                            _rp, _ry = get_rel_pose(rot_slice.float())
+                        gt_xy  = _rp[:, -1:].float()   # [B, 1, 2]
+                        gt_yaw = _ry[:, -1:].float()   # [B, 1, 1]
+                        _pose_reg = (
+                            torch.nn.functional.l1_loss(pred_xy.float(),  gt_xy)
+                            + torch.nn.functional.l1_loss(pred_yaw.float(), gt_yaw)
+                        )
+                        loss = loss + _pose_reg_w * _pose_reg
+                        out['loss_pose_reg'] = _pose_reg.detach()
+
                 # ── Accumulate losses for logging ────────────────────────────
                 cumul_diff += out['loss_diff'].item()
                 cumul_pose += out['loss_pose'].item()
-                cumul_rv   += out.get('loss_rv',         torch.tensor(0.)).item()
-                cumul_cd   += out.get('loss_chamfer',    torch.tensor(0.)).item()
+                cumul_rv   += _rv_w * _loss_rv.item()
+                cumul_cd   += _chamfer_w * _loss_cd.item()
                 cumul_bev  += out.get('loss_bev_percep', torch.tensor(0.)).item()
-                cumul_repa += out.get('loss_repa',       torch.tensor(0.)).item()
+                # Log effective REPA contribution (weighted + ramped)
+                cumul_repa += _repa_w * _repa_ramp * _loss_repa.item()
                 last_out    = out
                 if global_rank == 0 and out.get('predict') is not None:
                     all_predictions.append(out['predict'].detach())
@@ -390,6 +437,7 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 lr       = model_engine.get_lr()[0]
                 avg_diff  = cumul_diff / fw_iter
                 avg_pose  = cumul_pose / fw_iter
+                # cumul_rv/cd/repa already hold weighted effective values
                 avg_rv    = cumul_rv   / fw_iter
                 avg_cd    = cumul_cd   / fw_iter
                 avg_bev   = cumul_bev  / fw_iter
@@ -401,9 +449,12 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
                 stt_std  = last_out.get('stt_last_std',  torch.tensor(0.)).item() \
                            if last_out else 0.
 
+                pose_reg_val = last_out.get('loss_pose_reg', torch.tensor(0.)).item() \
+                              if last_out else 0.
                 msg = (
                     f"[S2] step={step} | total={avg_total:.4f} | "
                     f"diff={avg_diff:.4f} | pose={avg_pose:.4f} | "
+                    f"pose_reg={pose_reg_val:.4f} | "
                     f"rv={avg_rv:.4f} | cd={avg_cd:.4f} | bev={avg_bev:.4f} | "
                     f"repa={avg_repa:.2e} | "
                     f"stt_norm={stt_norm:.3f} | stt_std={stt_std:.3f} | "
