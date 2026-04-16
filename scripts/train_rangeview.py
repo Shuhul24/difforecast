@@ -947,8 +947,13 @@ def train(local_rank, args):
                     _chamfer_w  = float(getattr(args, 'chamfer_loss_weight', 0.0))
                     _loss_repa  = loss_final.get('loss_repa',
                                                  loss_final['loss_diff'].new_tensor(0.))
-                    _loss_cd    = loss_final.get('loss_chamfer',
-                                                 loss_final['loss_diff'].new_tensor(0.))
+                    # Only fetch loss_chamfer when the weight is non-zero.
+                    # Avoids 0 * NaN = NaN when the Chamfer fallback returns NaN
+                    # but chamfer_loss_weight is 0 in the config.
+                    _loss_cd    = (loss_final.get('loss_chamfer',
+                                                  loss_final['loss_diff'].new_tensor(0.))
+                                   if _chamfer_w > 0 else
+                                   loss_final['loss_diff'].new_tensor(0.))
                     loss_value  = (loss_final['loss_diff']
                                    + loss_final['loss_pose']
                                    + _chamfer_w * _loss_cd
@@ -999,7 +1004,8 @@ def train(local_rank, args):
                     # Accumulate for averaged logging (no effect on gradients).
                     cumul_diff  += loss_final["loss_diff"].item()
                     cumul_pose  += loss_final["loss_pose"].item()
-                    cumul_cd    += loss_final.get("loss_chamfer", torch.tensor(0.)).item()
+                    _cd_item = loss_final.get("loss_chamfer", torch.tensor(0.))
+                    cumul_cd += float(_cd_item) if torch.isfinite(_cd_item) else 0.0
                     # Log effective REPA contribution (weighted + ramped)
                     cumul_repa  += (_repa_w * _repa_ramp * _loss_repa).item()
 
