@@ -967,6 +967,26 @@ def train(local_rank, args):
                         loss_value = loss_value + _rv_pred_w * _rv_loss
                         loss_final['loss_rv_pred'] = _rv_loss.detach()
 
+                    # ── Physical-unit pose regression ─────────────────────────
+                    # Prevents PoseDiT from collapsing to mean KITTI velocity.
+                    # L1 in metres/degrees gives STT a strong pose-discriminative
+                    # signal. Controlled by pose_reg_weight in config (default 0).
+                    _pose_reg_w = float(getattr(args, 'pose_reg_weight', 0.0))
+                    if _pose_reg_w > 0:
+                        pred_xy  = loss_final.get('predict_pose_xy')   # [B, 1, 2] metres
+                        pred_yaw = loss_final.get('predict_pose_yaw')  # [B, 1, 1] degrees
+                        if pred_xy is not None and pred_yaw is not None:
+                            with torch.cuda.amp.autocast(enabled=False):
+                                _rp, _ry = get_rel_pose(rot_matrix_cond.float())
+                            gt_xy  = _rp[:, -1:].float()   # [B, 1, 2]
+                            gt_yaw = _ry[:, -1:].float()   # [B, 1, 1]
+                            _pose_reg = (
+                                torch.nn.functional.l1_loss(pred_xy.float(),  gt_xy)
+                                + torch.nn.functional.l1_loss(pred_yaw.float(), gt_yaw)
+                            )
+                            loss_value = loss_value + _pose_reg_w * _pose_reg
+                            loss_final['loss_pose_reg'] = _pose_reg.detach()
+
                     # Check for NaN
                     if not math.isfinite(loss_value.item()):
                         print(f"Loss is {loss_value.item()}, stopping training")
@@ -1141,6 +1161,7 @@ def train(local_rank, args):
                     loss_rl1_val   = get_loss_val("loss_range_l1")
                     loss_elbo_val  = get_loss_val("loss_elbo")
                     loss_bev_val   = get_loss_val("loss_bev_percep")
+                    loss_pose_reg_val = get_loss_val("loss_pose_reg")
 
                 # Log to console every 50 steps
                 epoch = step // len(train_data) + 1
@@ -1167,6 +1188,7 @@ def train(local_rank, args):
                             f'loss_avg:{loss_all_val:.4e} '
                             f'diff_loss:{loss_diff_val:.4e} '
                             f'pose_loss:{loss_pose_val:.4e} '
+                            f'pose_reg:{loss_pose_reg_val:.4e} '
                             f'range_l1:{loss_rl1_val:.4e} '
                             f'chamfer:{loss_cd_val:.4e} '
                             f'repa:{loss_repa_val:.4e} '

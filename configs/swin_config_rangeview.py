@@ -104,7 +104,7 @@ n_embd_dit_traj   = 512
 n_head_dit_traj   = 8
 axes_dim_dit_traj = [16, 16, 32]   # sum = 64 = pe_dim
 n_layer_traj      = [4, 4]         # [double_stream_blocks, single_stream_blocks]
-lambda_yaw_pose        = 0.1    # weight for pose diffusion loss
+lambda_yaw_pose        = 2.0    # weight for pose diffusion loss (raised from 0.1 — gradient ratio was ~1:3350 pose:diff; 20× increase balances contribution)
 return_predict_traj    = True   # must be True — predictions used for AR conditioning
 
 # ── Pose encoding ─────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ yaw_bound         = 12.
 # ── Diffusion ─────────────────────────────────────────────────────────────────
 diffusion_model_type = 'flow'
 num_sampling_steps   = 100
-return_predict       = False      # no aux losses active — skip decoder forward during training
+return_predict       = True       # run decoder forward during training to compute rv + chamfer losses
 traj_len             = 1         # single future step for PoseDiT
 latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_latent_stats.py
 
@@ -128,7 +128,7 @@ latent_scale         = 0.9936    # TODO: replace with std from scripts/compute_l
 temporal_skip_agg = True
 
 # ── Auxiliary losses (Stage 2) ────────────────────────────────────────────────
-range_view_loss_weight = 0.0    # disabled: decoder is frozen in Stage 2; TemporalSkipAggregator supervised via Chamfer instead
+range_view_loss_weight = 0.05   # pixel-space L1 on decoded prediction vs decoded GT; gradients still flow through frozen decoder into DiT latents
 # ── VAE KL regularisation (Stage 1) ──────────────────────────────────────────
 # β warmup: KL weight ramps from 0 → kl_weight over kl_warmup_steps so that
 # reconstruction quality stabilises before KL pressure kicks in.
@@ -145,10 +145,12 @@ chamfer_start          = 200     # earlier start so TemporalSkipAggregator gets 
 # Swin encoder's output for the clean GT target frame (lat_target).
 # Zero extra encoder forward pass — lat_target already computed in step_train.
 # Tune repa_weight ∈ [0.05, 0.5]; start small and increase if loss_diff stalls.
-repa_weight      = 0.1           # λ_repa
-repa_layer_idx   = 4             # middle of depth=8 double blocks (0-indexed)
-repa_start_step  = 0             # enable from step 0; set >0 to delay until flow loss stabilises
+repa_weight        = 0.1           # λ_repa
+repa_layer_idx     = 4             # middle of depth=8 double blocks (0-indexed)
+repa_start_step    = 0             # enable from step 0; set >0 to delay until flow loss stabilises
+repa_warmup_steps  = 500           # ramp REPA from 0→repa_weight over this many steps to prevent early domination
 
+pose_reg_weight        = 0.5     # λ for physical-unit L1 pose regression (metres/degrees); prevents PoseDiT from collapsing to mean velocity
 bev_perceptual_weight  = 0.0     # disabled; re-enable (e.g. 0.1) if BEV quality matters
 bev_h, bev_w           = 256, 256
 bev_x_range            = 25.6

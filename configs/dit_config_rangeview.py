@@ -282,7 +282,8 @@ vae_logvar_init      = 0.0    # initial log-variance for NLL scaling
 # Set a weight to 0.0 to disable the corresponding loss entirely (no parameter).
 #
 # chamfer_max_pts: max points per cloud for the O(N*M) distance kernel.
-range_view_loss_weight = 0.0   # disabled in Stage 2 (range_view_loss_weight forced to 0 by train script)
+range_view_loss_weight = 0.0   # model-internal rv L1 (uncertainty-weighted); use rv_pred_weight instead for stage 2
+rv_pred_weight         = 0.05  # training-script-side L1 on decoded prediction vs GT; active when > 0
 chamfer_loss_weight    = 0.1   # λ_chamfer — 3-D geometry supervision through frozen decoder
 chamfer_max_pts        = 2048  # max points used in Chamfer subsampling
 chamfer_start          = 500   # activate after this many steps (let flow loss stabilise first)
@@ -291,9 +292,10 @@ chamfer_start          = 500   # activate after this many steps (let flow loss s
 # Aligns FluxDiT double_blocks[repa_layer_idx] hidden state with the frozen
 # VAE encoder's clean GT target latents — zero extra encoder forward-pass cost.
 # repa_weight ∈ [0.05, 0.5]; start small and increase if loss_diff stalls.
-repa_weight      = 0.1    # λ_repa
-repa_layer_idx   = 4      # middle of depth=8 double blocks (0-indexed)
-repa_start_step  = 0      # enable from step 0; set >0 to delay until flow loss stabilises
+repa_weight        = 0.1    # λ_repa
+repa_layer_idx     = 4      # middle of depth=8 double blocks (0-indexed)
+repa_start_step    = 0      # enable from step 0; set >0 to delay until flow loss stabilises
+repa_warmup_steps  = 500    # ramp REPA contribution 0→repa_weight over this many steps
 
 # ===== BEV Perceptual Loss =====
 # Converts depth maps → BEV occupancy grids → VGG16 multi-scale featudre distance.
@@ -352,6 +354,10 @@ disc_resume_path = None  # Path to resume discriminator from (optional)
 return_predict = True  # Return predictions during training for visualization
 diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
+
+# ── Pose loss weights ─────────────────────────────────────────────────────────
+lambda_pose      = 2.0   # weight for PoseDiT flow-matching loss (raised from 0.1 to prevent collapse)
+pose_reg_weight  = 0.5   # physical-unit L1 regression loss (metres/degrees) to prevent mean-velocity collapse
 
 # ===== Output Directories =====
 outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory
