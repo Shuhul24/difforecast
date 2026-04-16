@@ -294,6 +294,8 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
 
                 # Grab detached scalars for logging (kept consistent with below)
                 _repa_w    = float(getattr(args, 'repa_weight', 0.0))
+                _repa_ramp = min(1.0, float(step) /
+                                 max(float(getattr(args, 'repa_warmup_steps', 5000)), 1))
                 _chamfer_w = float(getattr(args, 'chamfer_loss_weight', 0.0))
                 _rv_w      = float(getattr(args, 'range_view_loss_weight', 0.0))
                 _loss_repa = out.get('loss_repa',
