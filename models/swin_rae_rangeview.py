@@ -494,6 +494,9 @@ class RangeViewSwinDiT(nn.Module):
             temporal_block=int(getattr(args, 'block_size', 1)),
         )
         self.model.cuda()
+        # STT output normalisation: prevents the output norm from growing
+        # unboundedly (observed stt_norm 270→494), which degrades DiT conditioning.
+        self.stt_output_norm = nn.LayerNorm(args.n_embd)
 
         # ── FluxDiT (in/out_channels=768 for TULIP bottleneck) ───────────────
         _pfx = self.total_token_size - self.img_token_size
@@ -790,6 +793,7 @@ class RangeViewSwinDiT(nn.Module):
         B = lat_target.shape[0]
         CF = self.condition_frames
         stt_last = rearrange(stt_features, '(b cf) s e -> b cf s e', b=B)[:, -1]
+        stt_last = self.stt_output_norm(stt_last.float()).to(stt_last.dtype)
 
         tgt_norm = lat_target / self.latent_scale
 
@@ -976,6 +980,7 @@ class RangeViewSwinDiT(nn.Module):
 
         stt_feat, pose_emb = self.model.evaluate(lat_norm, pose_idx, yaw_idx,
                                                   sample_last=sample_last)
+        stt_feat = self.stt_output_norm(stt_feat.float()).to(stt_feat.dtype)
         B = stt_feat.shape[0]
         _pfx = self.total_token_size - self.img_token_size
         img_ids, cond_ids, _ = prepare_ids(B, self.h, self.w,

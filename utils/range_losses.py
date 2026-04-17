@@ -45,10 +45,17 @@ class _ChamferDistancePyTorch:
     Matches the interface of pyTorchChamferDistance:
       inputs : pc1 [1, N, 3], pc2 [1, M, 3]  (float32)
       returns: (dist1 [1, N], dist2 [1, M])   squared Euclidean distances
+
+    Squared distances are computed directly (without sqrt) to avoid NaN
+    gradients when two points coincide — sqrt'(0) = inf.
     """
     def __call__(self, pc1: torch.Tensor, pc2: torch.Tensor):
-        d  = torch.cdist(pc1, pc2)          # [1, N, M]  Euclidean distances
-        d2 = d * d                           # squared
+        # Squared L2: ||a-b||^2 = ||a||^2 + ||b||^2 - 2<a,b>
+        # Shape: pc1 [1,N,3], pc2 [1,M,3]
+        pc1_sq = (pc1 * pc1).sum(dim=-1, keepdim=True)          # [1, N, 1]
+        pc2_sq = (pc2 * pc2).sum(dim=-1, keepdim=True)          # [1, M, 1]
+        cross  = torch.bmm(pc1, pc2.transpose(1, 2))            # [1, N, M]
+        d2     = (pc1_sq + pc2_sq.transpose(1, 2) - 2.0 * cross).clamp(min=0.0)
         return d2.min(dim=2).values, d2.min(dim=1).values
 
 

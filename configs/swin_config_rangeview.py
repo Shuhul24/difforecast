@@ -22,8 +22,8 @@ kitti_root           = '/DATA2/shuhul/kitti'
 kitti_sequences_path = '/DATA2/shuhul/kitti/dataset/sequences'
 kitti_poses_path     = '/DATA2/shuhul/kitti/poses'
 
-train_sequences = [0, 1] #[0, 1, 2, 3, 4, 5]
-val_sequences   = [6] #[6, 7]
+train_sequences = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+val_sequences   = [8]
 test_sequences  = [8, 9, 10]
 
 pc_extension = '.bin'
@@ -87,14 +87,17 @@ drop_feature = 0
 augmentation_config = None
 
 # ── STT (identical to rae_config_rangeview.py) ────────────────────────────────
-n_layer = [10, 8, 8]   # n_layer[0] = CausalTimeSpaceBlock depth (only this value builds blocks)
-n_head  = 8
-n_embd  = 1024
+# n_layer[0]=14 CausalTimeSpaceBlocks (was 10); n_embd=1280 (was 1024)
+n_layer = [14, 12, 12]
+n_head  = 10
+n_embd  = 1280
 
-# ── FluxDiT (identical; latent dim 384 is same as DINOv2) ────────────────────
-n_embd_dit     = 768
-n_head_dit     = 12
-axes_dim_dit   = [16, 16, 32]
+# ── FluxDiT ───────────────────────────────────────────────────────────────────
+# hidden_size 768→1024, 12 double + 12 single blocks (was 8+8), 16 heads (was 12)
+# axes_dim must sum to head_dim = n_embd_dit / n_head_dit = 1024/16 = 64
+n_embd_dit     = 1024
+n_head_dit     = 16
+axes_dim_dit   = [16, 16, 32]   # sum=64 = head_dim
 mlp_ratio_dit  = 4.0
 drop_path_rate = 0.1
 
@@ -103,7 +106,7 @@ drop_path_rate = 0.1
 n_embd_dit_traj   = 512
 n_head_dit_traj   = 8
 axes_dim_dit_traj = [16, 16, 32]   # sum = 64 = pe_dim
-n_layer_traj      = [4, 4]         # [double_stream_blocks, single_stream_blocks]
+n_layer_traj      = [6, 6]         # was [4,4]; deeper for better pose representation
 lambda_yaw_pose        = 2.0    # weight for pose diffusion loss (raised from 0.1 — gradient ratio was ~1:3350 pose:diff; 20× increase balances contribution)
 return_predict_traj    = True   # must be True — predictions used for AR conditioning
 
