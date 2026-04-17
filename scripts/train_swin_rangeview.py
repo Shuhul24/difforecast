@@ -236,8 +236,8 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
     """
     model_engine.train()
     time_stamp = time.time()
-    fw_iter = args.forward_iter
     CF      = args.condition_frames
+    _fw_iter_full = args.forward_iter
     ar_eval = getattr(args, 'ar_eval_rollout', False)
     best_val_loss = float('inf')
 
@@ -249,6 +249,10 @@ def train_stage2(args, model_engine, scheduler, loader, val_loader, global_rank,
             range_views, poses = batch
             range_views = range_views.cuda(non_blocking=True).to(torch.bfloat16)
             poses       = poses.cuda(non_blocking=True).float()
+            # AR warmup: run single-step until the model can predict reliably,
+            # then enable full multi-step rollout. Mirrors Epona's multifw_perstep.
+            ar_warmup_steps = int(getattr(args, 'ar_warmup_steps', 2000))
+            fw_iter = 1 if step < ar_warmup_steps else _fw_iter_full
             rot_matrix  = poses[:, :CF + fw_iter]   # [B, CF+fw_iter, 4, 4]
 
             # ── Initialise AR state ───────────────────────────────────────────

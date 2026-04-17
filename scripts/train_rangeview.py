@@ -944,7 +944,7 @@ def train(local_rank, args):
                     _repa_ramp  = min(1.0, float(step) /
                                       max(float(getattr(args, 'repa_warmup_steps', 5000)), 1))
                     _repa_w     = float(getattr(args, 'repa_weight', 0.0))
-                    _chamfer_w  = float(getattr(args, 'chamfer_loss_weight', 0.0))
+                    _chamfer_w  = 0.0  # disabled: causes NaN losses; kept zero throughout training
                     _loss_repa  = loss_final.get('loss_repa',
                                                  loss_final['loss_diff'].new_tensor(0.))
                     # Only fetch loss_chamfer when the weight is non-zero.
@@ -964,7 +964,8 @@ def train(local_rank, args):
                     # Provides direct depth/intensity supervision in image space
                     # to complement the latent-space diffusion loss.
                     _rv_pred_w = float(getattr(args, 'rv_pred_weight', 0.0))
-                    if _rv_pred_w > 0 and loss_final.get('predict') is not None:
+                    _rv_warmup = int(getattr(args, 'rv_warmup_steps', 100000))
+                    if _rv_pred_w > 0 and step >= _rv_warmup and loss_final.get('predict') is not None:
                         _rv_loss = torch.nn.functional.l1_loss(
                             loss_final['predict'].float(),
                             features_gt[:, 0].float(),

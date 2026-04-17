@@ -95,8 +95,8 @@ n_embd  = 1280
 # ── FluxDiT ───────────────────────────────────────────────────────────────────
 # hidden_size 768→1024, 12 double + 12 single blocks (was 8+8), 16 heads (was 12)
 # axes_dim must sum to head_dim = n_embd_dit / n_head_dit = 1024/16 = 64
-n_embd_dit     = 1024
-n_head_dit     = 16
+n_embd_dit     = 1280
+n_head_dit     = 20             # head_dim = 1280/20 = 64 = sum(axes_dim_dit)
 axes_dim_dit   = [16, 16, 32]   # sum=64 = head_dim
 mlp_ratio_dit  = 4.0
 drop_path_rate = 0.1
@@ -142,6 +142,7 @@ kl_warmup_steps = 10000  # ramp duration in Stage 1 training steps
 chamfer_loss_weight    = 0.1     # λ_chamfer — explicit weight (no uncertainty weighting)
 chamfer_max_pts        = 2048
 chamfer_start          = 200     # earlier start so TemporalSkipAggregator gets supervision (rv_loss removed)
+ar_warmup_steps        = 2000    # steps of single-step AR before enabling full fw_iter rollout
 
 # ── REPA (Representation Alignment) ──────────────────────────────────────────
 # Aligns FluxDiT double_blocks[repa_layer_idx] hidden state with the frozen

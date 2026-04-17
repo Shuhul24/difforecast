@@ -568,7 +568,7 @@ class RangeViewSwinDiT(nn.Module):
             # hidden_size == latent_dim == 768 → square projection.
             # Eye init: identity at step 0, learns alignment gradually.
             self.repa_proj = nn.Linear(args.n_embd_dit, self.latent_dim, bias=False)
-            nn.init.eye_(self.repa_proj.weight)
+            nn.init.orthogonal_(self.repa_proj.weight)
         else:
             self.repa_proj = None
 
@@ -893,7 +893,10 @@ class RangeViewSwinDiT(nn.Module):
                 rv_px = berhu_loss(predict_decoded[:, 0].float(), gt_img[:, 0].float())
                 dist_w = 1.0 + gt_img[:, 0].detach().float().clamp(0., 1.)
                 z_rv  = (rv_px * dist_w * valid).sum() / n_v
-                diff_loss = diff_loss + self.range_view_loss_weight * z_rv
+                # Down-weight noisy high-t predictions: clean steps (t≈0) get
+                # full weight, high-noise steps (t≈1) get near-zero weight.
+                t_weight = (1.0 - t_sample.detach()).mean()
+                diff_loss = diff_loss + self.range_view_loss_weight * z_rv * t_weight
 
             if self.log_range:
                 gt_unnorm = torch.exp2(gt_img[:, 0].float() * 6.) - 1.
@@ -907,12 +910,12 @@ class RangeViewSwinDiT(nn.Module):
                 else:
                     pd = (predict_decoded[:, 0].float() * s0 + m0).reshape(B, -1)
                 gd = gt_unnorm.reshape(B, -1)
-                # Scale by mean timestep: high-noise steps produce noisy decoded
-                # predictions, so down-weight their Chamfer contribution.
+                # Down-weight noisy high-t predictions: (1-t) is near 1 when
+                # the prediction is clean (t≈0) and near 0 when noisy (t≈1).
                 z_cd = batch_chamfer_distance(
                     pd, gd, pd > 0.5, gd > 0.5,
                     self.range_projector, self.chamfer_max_pts
-                ) * t_sample.mean()
+                ) * (1.0 - t_sample.detach()).mean()
 
             if self.log_w_bev is not None and self.bev_perceptual_fn is not None:
                 if self.log_range:
