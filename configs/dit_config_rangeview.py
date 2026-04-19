@@ -356,12 +356,11 @@ diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
 
 # ── Pose loss weights ─────────────────────────────────────────────────────────
-# Disabled: step_eval always uses GT poses → PoseDiT predictions are never used
-# at inference, so training the pose loss only wastes gradient budget and creates
-# a train/inference mismatch (predicted poses used at j>0 during training but GT
-# poses used at all steps during inference).
-lambda_pose      = 0.0
-pose_reg_weight  = 0.0
+# TrajDiT is trained with GT pose supervision. Its predictions are NOT used for
+# AR conditioning during training (we always use GT rot_matrix), matching inference
+# which also always uses GT poses via step_eval.
+lambda_pose      = 2.0
+pose_reg_weight  = 0.5
 
 # ===== Output Directories =====
 outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory

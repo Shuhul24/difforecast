@@ -923,7 +923,6 @@ def train(local_rank, args):
                                    if _chamfer_w > 0 else
                                    loss_final['loss_diff'].new_tensor(0.))
                     loss_value  = (loss_final['loss_diff']
-                                   + loss_final['loss_pose']
                                    + _chamfer_w * _loss_cd
                                    + _repa_w * _repa_ramp * _loss_repa)
 
