@@ -598,14 +598,24 @@ def _validate_stage1(args, model_engine, val_loader, step, global_rank):
 
 
 def _validate_stage2(args, model_engine, val_loader, step, global_rank):
-    """Compute avg diffusion loss on val set — single AR step (j=0) for speed."""
-    CF = args.condition_frames
-    raw = model_engine.module if hasattr(model_engine, 'module') else model_engine
-    raw.train()  # keep in train mode so forward() routes to step_train (loss dict)
+    """Compute avg diffusion loss on val set and save multi-step AR visualizations.
+
+    Loss is averaged over the full val set (all ranks, all_reduce).
+    Visualization runs on rank 0 only, for a single batch, with a full AR rollout
+    of forward_iter steps — same as training — so all future frames are shown.
+    """
+    CF      = args.condition_frames
+    fw_iter = args.forward_iter
+    raw     = model_engine.module if hasattr(model_engine, 'module') else model_engine
+    raw.train()  # stay in train mode so forward() routes to step_train (loss dict)
     total = torch.tensor(0.0, device='cuda')
     n     = torch.tensor(0,   device='cuda')
+
+    vis_batch_rv   = None   # range_views for rank-0 visualization
+    vis_batch_pose = None
+
     with torch.no_grad():
-        for batch in val_loader:
+        for bi, batch in enumerate(val_loader):
             range_views, poses = batch
             range_views = range_views.cuda(non_blocking=True).to(torch.bfloat16)
             poses       = poses.cuda(non_blocking=True).float()
@@ -616,16 +626,95 @@ def _validate_stage2(args, model_engine, val_loader, step, global_rank):
                 out = raw(features_cond, rot_slice, features_gt, step=step)
             total += out['loss_diff'].detach().float().mean()
             n     += 1
+            # Grab first batch for multi-step vis on rank 0
+            if bi == 0 and global_rank == 0:
+                vis_batch_rv   = range_views.detach()
+                vis_batch_pose = poses.detach()
+
     dist.all_reduce(total, op=dist.ReduceOp.SUM)
     dist.all_reduce(n,     op=dist.ReduceOp.SUM)
-    # model stays in train() mode; train_stage2 manages mode as needed
     val_loss = (total / n.clamp(min=1)).item()
+
     if global_rank == 0:
         logger.info(f"[S2 Val] step={step} | val_diff={val_loss:.4f}")
         if hasattr(args, 'writer') and args.writer:
             args.writer.add_scalar('stage2/val_diff', val_loss, step)
         if not getattr(args, 'no_wandb', False):
             wandb.log({'s2/val_diff': val_loss, 'step': step})
+
+        # ── Multi-step AR visualization on a single val batch ─────────────────
+        if vis_batch_rv is not None:
+            try:
+                all_pred, all_gt = [], []
+                features_cond_vis = vis_batch_rv[:, :CF]
+                rot_matrix_vis    = vis_batch_pose[:, :CF + fw_iter]
+                latents_cond_next = None
+                rel_pose_cond     = None
+                rel_yaw_cond      = None
+                ar_rot_window     = rot_matrix_vis[:, :CF].clone()
+
+                with torch.no_grad():
+                    for j in range(fw_iter):
+                        features_gt_j = vis_batch_rv[:, j + CF:j + CF + 1]
+                        rot_slice_j   = rot_matrix_vis[:, j:j + CF + 1]
+                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                            out_j = raw(
+                                features_cond_vis, rot_slice_j, features_gt_j,
+                                rel_pose_cond=rel_pose_cond,
+                                rel_yaw_cond=rel_yaw_cond,
+                                step=step,
+                                latents_cond_precomputed=latents_cond_next,
+                            )
+                        pred_frame = out_j.get('predict')
+                        if pred_frame is None:
+                            break
+                        all_pred.append(pred_frame.detach().cpu())
+                        all_gt.append(features_gt_j[:, 0].detach().cpu())
+
+                        if j < fw_iter - 1:
+                            # Slide pixel window
+                            features_cond_vis = torch.cat(
+                                [features_cond_vis[:, 1:],
+                                 pred_frame.detach().unsqueeze(1)], dim=1
+                            )
+                            # Slide latent window
+                            slide_from = latents_cond_next if latents_cond_next is not None \
+                                         else out_j.get('latents_cond_enc')
+                            ar_pred_lats = out_j.get('predict_latents')
+                            if ar_pred_lats is not None and slide_from is not None:
+                                latents_cond_next = torch.cat([
+                                    slide_from[:, 1:],
+                                    ar_pred_lats.detach().unsqueeze(1),
+                                ], dim=1)
+                            # Advance rotation window
+                            pred_pose_xy  = out_j.get('predict_pose_xy')
+                            pred_pose_yaw = out_j.get('predict_pose_yaw')
+                            if pred_pose_xy is not None and pred_pose_yaw is not None:
+                                pred_abs_rot = _compose_predicted_rot(
+                                    ar_rot_window[:, -1],
+                                    pred_pose_xy[:, 0].float(),
+                                    pred_pose_yaw[:, 0].float(),
+                                )
+                                ar_rot_window = torch.cat(
+                                    [ar_rot_window[:, 1:],
+                                     pred_abs_rot.unsqueeze(1)], dim=1
+                                )
+                                with torch.cuda.amp.autocast(enabled=False):
+                                    rel_pose_cond, rel_yaw_cond = get_rel_pose(
+                                        ar_rot_window.float()
+                                    )
+
+                if all_pred:
+                    vis_dir = os.path.join(args.validation_path, 'val_vis')
+                    save_multistep_visualization(
+                        step=step, args=args,
+                        pred_frames=all_pred, gt_frames=all_gt,
+                        projector=args.vis_projector, vis_dir=vis_dir,
+                    )
+                    logger.info(f"[S2 Val] Saved {len(all_pred)}-step AR visualization to {vis_dir}")
+            except Exception as e:
+                logger.warning(f"[S2 Val] Visualization failed at step {step}: {e}")
+
     return val_loss
 
 

@@ -356,8 +356,12 @@ diff_only = True  # Train only diffusion model (no trajectory planning)
 no_pose = False  # Whether to use pose information
 
 # ── Pose loss weights ─────────────────────────────────────────────────────────
-lambda_pose      = 2.0   # weight for PoseDiT flow-matching loss (raised from 0.1 to prevent collapse)
-pose_reg_weight  = 0.5   # physical-unit L1 regression loss (metres/degrees) to prevent mean-velocity collapse
+# Disabled: step_eval always uses GT poses → PoseDiT predictions are never used
+# at inference, so training the pose loss only wastes gradient budget and creates
+# a train/inference mismatch (predicted poses used at j>0 during training but GT
+# poses used at all steps during inference).
+lambda_pose      = 0.0
+pose_reg_weight  = 0.0
 
 # ===== Output Directories =====
 outdir = "/DATA2/shuhul/exp/ckpt"  # Checkpoint directory

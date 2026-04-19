@@ -69,7 +69,7 @@ rae_ch_weights      = [1.]
 dist_weighted_loss  = True   # up-weight far pixels (2× at 80m) to improve fidelity
 
 # Stage 1 Swin-RAE checkpoint for Stage 2 init
-swin_ckpt = '/DATA2/shuhul/exp/swin_ckpt/swin-s1-ch1-b32/swin_rae_step222000.pkl'
+swin_ckpt = '/DATA2/shuhul/exp/swin_ckpt/swin-s1-ch1-b32/swin_rae_step346000.pkl'
 
 # ── Temporal configuration ────────────────────────────────────────────────────
 condition_frames = 5

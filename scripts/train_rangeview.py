@@ -48,7 +48,6 @@ sys.path.append(root_path)
 from utils.config_utils import Config
 from utils.deepspeed_utils import get_deepspeed_config
 from utils.utils import *
-from utils.preprocess import get_rel_pose
 from models.model_rangeview import RangeViewDiT, RangeViewVAE
 from dataset.dataset_kitti_rangeview import (
     KITTIRangeViewTrainDataset,
@@ -69,32 +68,6 @@ from models.modules.range_discriminator import (
 )
 
 logger = logging.getLogger('base')
-
-
-def _compose_predicted_rot(base_rot, pred_xy, pred_yaw_deg):
-    """Compose predicted absolute 4×4 pose from previous absolute pose + predicted
-    relative (dx, dy, yaw_deg).  Mirrors train_swin_rangeview._compose_predicted_rot.
-
-    base_rot    : [B, 4, 4]  last conditioning frame absolute pose
-    pred_xy     : [B, 2]     predicted (dx, dy) in body frame (metres)
-    pred_yaw_deg: [B, 1]     predicted relative yaw (degrees)
-    Returns     : [B, 4, 4]  predicted absolute pose of the next frame
-    """
-    B     = base_rot.shape[0]
-    yaw   = pred_yaw_deg[:, 0] * (math.pi / 180.)
-    cos_y = torch.cos(yaw)
-    sin_y = torch.sin(yaw)
-    dx    = pred_xy[:, 0]
-    dy    = pred_xy[:, 1]
-    z     = torch.zeros(B, device=base_rot.device, dtype=base_rot.dtype)
-    o     = torch.ones_like(z)
-    T_rel = torch.stack([
-        cos_y, -sin_y, z, dx,
-        sin_y,  cos_y, z, dy,
-        z,      z,     o, z,
-        z,      z,     z, o,
-    ], dim=1).view(B, 4, 4)
-    return base_rot @ T_rel
 
 
 def add_arguments():
@@ -885,16 +858,11 @@ def train(local_rank, args):
                 B, T, C, H, W = range_views.shape
                 
                 features_cond = range_views[:, :cf, ...]   # [B, CF, C, H, W]
-                rel_pose_cond, rel_yaw_cond = None, None
-                # Predicted latents from the previous AR step, used as direct
-                # conditioning for the next step (mirrors train_deepspeed.py which
-                # keeps latents_cond in latent space throughout the chain).
-                # None → model encodes features_cond normally (first step only).
+                # Pose conditioning always uses GT rot_matrix (matching inference,
+                # which also uses GT poses via step_eval — PoseDiT is never called
+                # at inference time, so training with predicted poses creates a
+                # train/inference mismatch that hurts convergence).
                 latents_cond_next = None
-                # AR rotation window: tracks predicted absolute poses for the CF
-                # conditioning frames so rel_pose_cond is derived from PoseDiT
-                # predictions rather than GT after j=0.
-                ar_rot_window = rot_matrix[:, :cf].clone()   # [B, CF, 4, 4]
 
                 # Forward iterations
                 fw_iter = 1
@@ -931,8 +899,8 @@ def train(local_rank, args):
                             features_cond,
                             rot_matrix_cond,
                             features_gt,
-                            rel_pose_cond=rel_pose_cond,
-                            rel_yaw_cond=rel_yaw_cond,
+                            rel_pose_cond=None,
+                            rel_yaw_cond=None,
                             step=step,
                             latents_cond_precomputed=latents_cond_next,
                         )
@@ -973,26 +941,6 @@ def train(local_rank, args):
                         loss_value = loss_value + _rv_pred_w * _rv_loss
                         loss_final['loss_rv_pred'] = _rv_loss.detach()
 
-                    # ── Physical-unit pose regression ─────────────────────────
-                    # Prevents PoseDiT from collapsing to mean KITTI velocity.
-                    # L1 in metres/degrees gives STT a strong pose-discriminative
-                    # signal. Controlled by pose_reg_weight in config (default 0).
-                    _pose_reg_w = float(getattr(args, 'pose_reg_weight', 0.0))
-                    if _pose_reg_w > 0:
-                        pred_xy  = loss_final.get('predict_pose_xy')   # [B, 1, 2] metres
-                        pred_yaw = loss_final.get('predict_pose_yaw')  # [B, 1, 1] degrees
-                        if pred_xy is not None and pred_yaw is not None:
-                            with torch.cuda.amp.autocast(enabled=False):
-                                _rp, _ry = get_rel_pose(rot_matrix_cond.float())
-                            gt_xy  = _rp[:, -1:].float()   # [B, 1, 2]
-                            gt_yaw = _ry[:, -1:].float()   # [B, 1, 1]
-                            _pose_reg = (
-                                torch.nn.functional.l1_loss(pred_xy.float(),  gt_xy)
-                                + torch.nn.functional.l1_loss(pred_yaw.float(), gt_yaw)
-                            )
-                            loss_value = loss_value + _pose_reg_w * _pose_reg
-                            loss_final['loss_pose_reg'] = _pose_reg.detach()
-
                     # Check for NaN
                     if not math.isfinite(loss_value.item()):
                         print(f"Loss is {loss_value.item()}, stopping training")
@@ -1030,27 +978,9 @@ def train(local_rank, args):
 
                     # Prepare for next autoregressive iteration (sliding window).
                     if j < fw_iter - 1:
-                        # ── Slide AR rotation window + update pose conditioning ──
-                        # Compose predicted absolute rotation for the new frame,
-                        # slide ar_rot_window forward, then derive all conditioning
-                        # relative poses from accumulated predicted rotations.
-                        pred_pose_xy  = loss_final.get('predict_pose_xy')   # [B, 1, 2]
-                        pred_pose_yaw = loss_final.get('predict_pose_yaw')  # [B, 1, 1]
-                        if pred_pose_xy is not None and pred_pose_yaw is not None:
-                            with torch.no_grad():
-                                pred_abs_rot = _compose_predicted_rot(
-                                    ar_rot_window[:, -1],
-                                    pred_pose_xy[:, 0].float(),
-                                    pred_pose_yaw[:, 0].float(),
-                                )   # [B, 4, 4]
-                                ar_rot_window = torch.cat(
-                                    [ar_rot_window[:, 1:],
-                                     pred_abs_rot.unsqueeze(1)], dim=1
-                                )   # [B, CF, 4, 4]
-                                with torch.cuda.amp.autocast(enabled=False):
-                                    rel_pose_cond, rel_yaw_cond = get_rel_pose(
-                                        ar_rot_window.float()
-                                    )   # [B, CF, 2], [B, CF, 1]
+                        # Pose conditioning: always None → model computes from GT rot_matrix_cond.
+                        # This matches inference (step_eval always uses GT poses), removing the
+                        # train/inference mismatch that arose from using PoseDiT-predicted poses.
 
                         if args.return_predict and loss_final.get("predict_latents") is not None:
                             # -------------------------------------------------- #
@@ -1168,7 +1098,6 @@ def train(local_rank, args):
                     loss_rl1_val   = get_loss_val("loss_range_l1")
                     loss_elbo_val  = get_loss_val("loss_elbo")
                     loss_bev_val   = get_loss_val("loss_bev_percep")
-                    loss_pose_reg_val = get_loss_val("loss_pose_reg")
 
                 # Log to console every 50 steps
                 epoch = step // len(train_data) + 1
@@ -1195,7 +1124,6 @@ def train(local_rank, args):
                             f'loss_avg:{loss_all_val:.4e} '
                             f'diff_loss:{loss_diff_val:.4e} '
                             f'pose_loss:{loss_pose_val:.4e} '
-                            f'pose_reg:{loss_pose_reg_val:.4e} '
                             f'range_l1:{loss_rl1_val:.4e} '
                             f'chamfer:{loss_cd_val:.4e} '
                             f'repa:{loss_repa_val:.4e} '
